@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">clia.dev logo</title>
+  <desc id="desc">Terminal mark with green, cyan, blue, and violet clia.dev gradients.</desc>
+  <defs>
+    <linearGradient id="markGradient" x1="120" x2="870" y1="180" y2="830" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#41ef6e" stop-opacity="0.92" />
+      <stop offset="0.46" stop-color="#1fc7dd" stop-opacity="0.9" />
+      <stop offset="0.72" stop-color="#4387ef" stop-opacity="0.9" />
+      <stop offset="1" stop-color="#7b4fe3" stop-opacity="0.9" />
+    </linearGradient>
+    <radialGradient id="glowGradient" cx="50%" cy="52%" r="48%">
+      <stop offset="0" stop-color="#41ef6e" stop-opacity="0.34" />
+      <stop offset="0.48" stop-color="#1fc7dd" stop-opacity="0.25" />
+      <stop offset="1" stop-color="#7b4fe3" stop-opacity="0" />
+    </radialGradient>
+    <filter id="softGlow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="34" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="210" fill="#161b22" />
+  <circle cx="512" cy="520" r="405" fill="url(#glowGradient)" filter="url(#softGlow)" />
+  <rect
+    x="190"
+    y="284"
+    width="644"
+    height="456"
+    rx="76"
+    fill="#182331"
+    stroke="url(#markGradient)"
+    stroke-width="22"
+  />
+  <path
+    d="M324 402l136 136-136 136"
+    fill="none"
+    stroke="url(#markGradient)"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="54"
+  />
+  <rect x="556" y="620" width="96" height="42" rx="21" fill="#41ef6e" />
+  <rect x="682" y="620" width="96" height="42" rx="21" fill="#1fc7dd" />
+</svg>

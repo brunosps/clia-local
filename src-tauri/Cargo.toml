@@ -1,0 +1,40 @@
+[package]
+name = "clia-local"
+version = "0.1.0"
+description = "clia.local — fully local desktop agent development environment"
+authors = ["Bruno Santos"]
+edition = "2021"
+
+[lib]
+name = "clia_local_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+dirs = "6"
+portable-pty = "0.9"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2.7.1"
+thiserror = "2"
+# rustls (pure-Rust TLS) so the URL fetcher cross-builds cleanly without OpenSSL.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+url = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
