@@ -1,4 +1,4 @@
-# DESIGN.md — clia-app
+# DESIGN.md — clia.local
 
 > Gerado por `/dw-analyze-project` a partir dos valores reais em `src/styles.css` em 2026-05-25. Cure antes de tratar como canon.
 >
