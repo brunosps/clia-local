@@ -1,5 +1,5 @@
 # Local dependencies and build outputs
-node_modules/
+node_modules
 dist/
 build/
 coverage/
