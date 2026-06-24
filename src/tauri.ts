@@ -284,6 +284,30 @@ export const api = {
       input: { workspace_id: workspaceId, remote_url: remoteUrl, name: name || null },
     });
   },
+  /** Streaming clone (emits `clone://progress`); cancel via cancelClone(cloneId).
+   *  On a private repo without a credential, fails with an "AUTH_REQUIRED:" error. */
+  cloneGitProjectStreamed(input: {
+    workspace_id: number;
+    remote_url: string;
+    name?: string | null;
+    clone_id: string;
+    username?: string | null;
+    token?: string | null;
+  }) {
+    return invokeSafe<Project>("clone_git_project_streamed", {
+      input: {
+        workspace_id: input.workspace_id,
+        remote_url: input.remote_url,
+        name: input.name ?? null,
+        clone_id: input.clone_id,
+        username: input.username ?? null,
+        token: input.token ?? null,
+      },
+    });
+  },
+  cancelClone(cloneId: string) {
+    return invokeSafe<void>("cancel_clone", { cloneId });
+  },
   listRequirementCards(workspaceId: number) {
     return invokeSafe<RequirementCard[]>("list_requirement_cards", { workspaceId });
   },

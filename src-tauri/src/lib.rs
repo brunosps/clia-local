@@ -20,11 +20,12 @@ use anyhow::Context as _;
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use tauri::Manager;
+use std::sync::{Mutex, OnceLock};
+use tauri::{Emitter, Manager};
 
 #[derive(Debug, Serialize)]
 struct AppError {
@@ -565,6 +566,234 @@ fn clone_project_into_workspace(
         return Err(error);
     }
     db.add_project(workspace.id, name, &destination_string, Some(remote_url))
+}
+
+// --- B4: streaming, cancellable clone with optional credential -------------
+
+/// clone_id -> child process-group pid, for cancellation.
+fn clone_procs() -> &'static Mutex<HashMap<String, u32>> {
+    static PROCS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    PROCS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneStreamInput {
+    workspace_id: i64,
+    remote_url: String,
+    name: Option<String>,
+    /// Frontend-generated id used to correlate progress events + cancellation.
+    clone_id: String,
+    username: Option<String>,
+    token: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct CloneProgress {
+    clone_id: String,
+    line: String,
+}
+
+/// Destination dir for a freshly cloned project (mirrors clone_project_into_workspace).
+fn project_destination(workspace: &store::Workspace, name: &str) -> PathBuf {
+    let safe_dir = safe_project_dir_name(name);
+    let workspace_root = PathBuf::from(&workspace.root_path);
+    let legacy = workspace_root.join("repos").join(&safe_dir);
+    if legacy.exists() {
+        legacy
+    } else {
+        workspace_root.join("projects").join(&safe_dir)
+    }
+}
+
+/// Temp GIT_ASKPASS helper that feeds the in-memory credential to git (so the
+/// token is never written to .git/config). Removed after the clone.
+fn write_askpass_script(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
+    let dir = app_data_dir(app)?;
+    std::fs::create_dir_all(&dir)?;
+    let script = dir.join(format!("clia-askpass-{}.sh", std::process::id()));
+    std::fs::write(
+        &script,
+        "#!/bin/sh\ncase \"$1\" in\n  Username*) printf '%s' \"$CLIA_GIT_USER\" ;;\n  *) printf '%s' \"$CLIA_GIT_PASS\" ;;\nesac\n",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(script)
+}
+
+#[tauri::command]
+fn clone_git_project_streamed(
+    app: tauri::AppHandle,
+    input: CloneStreamInput,
+) -> AppResult<store::Project> {
+    let remote_url = input.remote_url.trim().to_string();
+    if remote_url.is_empty() {
+        return Err(anyhow::anyhow!("remote URL is required").into());
+    }
+    validate_remote_url(&remote_url)?;
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    let workspace = db.get_workspace(input.workspace_id)?;
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| project_name_from_remote(&remote_url));
+    std::fs::create_dir_all(PathBuf::from(&workspace.root_path).join("projects"))
+        .map_err(anyhow::Error::from)?;
+    let destination = project_destination(&workspace, &name);
+    let destination_string = destination.display().to_string();
+    if destination.exists() {
+        if !is_git_project_dir(&destination) {
+            return Err(anyhow::anyhow!(
+                "project folder already exists and is not a Git project: {}",
+                destination.display()
+            )
+            .into());
+        }
+        let project = db.add_project(workspace.id, &name, &destination_string, Some(&remote_url))?;
+        let _ = db.reconcile_workspace_projects(workspace.id);
+        return Ok(project);
+    }
+
+    let askpass = if input.token.is_some() || input.username.is_some() {
+        Some(write_askpass_script(&app)?)
+    } else {
+        None
+    };
+
+    let mut command = Command::new("git");
+    command
+        .args([
+            "clone",
+            "--progress",
+            "--recurse-submodules",
+            "--jobs",
+            "4",
+            &remote_url,
+            &destination_string,
+        ])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(ref script) = askpass {
+        command
+            .env("GIT_ASKPASS", script)
+            .env("CLIA_GIT_USER", input.username.clone().unwrap_or_default())
+            .env("CLIA_GIT_PASS", input.token.clone().unwrap_or_default());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| anyhow::anyhow!("failed to start git clone: {error}"))?;
+    let pid = child.id();
+    if let Ok(mut procs) = clone_procs().lock() {
+        procs.insert(input.clone_id.clone(), pid);
+    }
+
+    // git clone --progress writes to stderr, updating with \r and \n. Emit each
+    // segment as a progress event so the modal can show live output.
+    let mut captured = String::new();
+    if let Some(stderr) = child.stderr.take() {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut segment: Vec<u8> = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match reader.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if byte[0] == b'\n' || byte[0] == b'\r' {
+                        if !segment.is_empty() {
+                            let line = String::from_utf8_lossy(&segment).trim().to_string();
+                            segment.clear();
+                            if !line.is_empty() {
+                                captured.push_str(&line);
+                                captured.push('\n');
+                                let _ = app.emit(
+                                    "clone://progress",
+                                    CloneProgress {
+                                        clone_id: input.clone_id.clone(),
+                                        line,
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        segment.push(byte[0]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if !segment.is_empty() {
+            let line = String::from_utf8_lossy(&segment).trim().to_string();
+            if !line.is_empty() {
+                captured.push_str(&line);
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| anyhow::anyhow!("git clone wait failed: {error}"))?;
+    if let Ok(mut procs) = clone_procs().lock() {
+        procs.remove(&input.clone_id);
+    }
+    if let Some(script) = askpass {
+        let _ = std::fs::remove_file(script);
+    }
+
+    if !status.success() {
+        // All-or-nothing: remove the partial checkout.
+        let _ = std::fs::remove_dir_all(&destination);
+        let lower = captured.to_lowercase();
+        let auth = lower.contains("authentication failed")
+            || lower.contains("could not read username")
+            || lower.contains("could not read password")
+            || lower.contains("terminal prompts disabled")
+            || lower.contains("invalid username or password")
+            || lower.contains("permission denied");
+        if auth && input.token.is_none() {
+            return Err(anyhow::anyhow!("AUTH_REQUIRED: o repositório exige autenticação").into());
+        }
+        let detail = captured.lines().last().unwrap_or("erro desconhecido");
+        return Err(anyhow::anyhow!("git clone falhou: {detail}").into());
+    }
+
+    let project = db.add_project(workspace.id, &name, &destination_string, Some(&remote_url))?;
+    // Register the cloned project's submodules as child projects.
+    let _ = db.reconcile_workspace_projects(workspace.id);
+    Ok(project)
+}
+
+#[tauri::command]
+fn cancel_clone(clone_id: String) {
+    let pid = clone_procs()
+        .lock()
+        .ok()
+        .and_then(|procs| procs.get(&clone_id).copied());
+    if let Some(pid) = pid {
+        #[cfg(unix)]
+        {
+            // Kill the whole process group (clone spawns submodule fetches).
+            let _ = Command::new("kill").arg("-TERM").arg(format!("-{pid}")).status();
+            let _ = Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status();
+        }
+    }
 }
 
 fn create_or_open_workspace(
@@ -4465,6 +4694,8 @@ pub fn run() {
             list_projects,
             add_local_project,
             clone_git_project,
+            clone_git_project_streamed,
+            cancel_clone,
             list_requirement_cards,
             create_requirement_card,
             update_requirement_card_status,
