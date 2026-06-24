@@ -1127,19 +1127,23 @@ export default function DeployPackagesPanel({
                   <button
                     key={stack.id}
                     className={
-                      selectedStack?.id === stack.id ? "machine-row active" : "machine-row"
+                      selectedStack?.id === stack.id
+                        ? "machine-row deploy-stack-card active"
+                        : "machine-row deploy-stack-card"
                     }
                     type="button"
                     onClick={() => setSelectedStackId(stack.id)}
                   >
-                    <span>
+                    <span className="deploy-stack-main">
                       <strong>{stack.name}</strong>
                       <small>{activeVersionLabel(stack, versions)}</small>
                     </span>
                     <span className={`machine-status ${deployStatusTone(stack.status)}`}>
                       {deployStatusLabel(stack.status)}
                     </span>
-                    <span>{stack.active_machine_id ? "active" : "idle"}</span>
+                    <span className="deploy-stack-activity">
+                      {stack.active_machine_id ? "active" : "idle"}
+                    </span>
                   </button>
                 ))}
               </div>

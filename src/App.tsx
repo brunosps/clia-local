@@ -5593,7 +5593,9 @@ function QueueColumn({
   const [over, setOver] = useState(false);
   return (
     <div
-      className={over ? "kanban-column over" : "kanban-column"}
+      className={["kanban-column", `kanban-${bucket}`, over ? "over" : ""]
+        .filter(Boolean)
+        .join(" ")}
       onDragOver={(event) => {
         event.preventDefault();
         if (!over) setOver(true);
@@ -5607,7 +5609,10 @@ function QueueColumn({
       }}
     >
       <header className="kanban-column-head">
-        <span>{label}</span>
+        <span className="kanban-column-title">
+          <span className="kanban-column-dot" aria-hidden="true" />
+          {label}
+        </span>
         <span className="kanban-count">{cards.length}</span>
       </header>
       <div className="kanban-column-body">
@@ -6742,8 +6747,39 @@ function WorkspaceSettingsPanel({
         </div>
       </div>
 
-      <div className="workspace-settings-form settings-page-form">
-        <section className="settings-section">
+      <div className="settings-main">
+        <aside className="settings-nav" aria-label="Seções de configurações">
+          <div className="settings-nav-section">
+            <div className="settings-nav-title">Aparência</div>
+            <div className="settings-nav-items">
+              <a className="settings-nav-item active" href="#settings-appearance">
+                Tema
+              </a>
+              <a className="settings-nav-item" href="#settings-language">
+                Idioma
+              </a>
+            </div>
+          </div>
+          <div className="settings-nav-section">
+            <div className="settings-nav-title">Editor</div>
+            <div className="settings-nav-items">
+              <a className="settings-nav-item" href="#settings-editor">
+                Fonte
+              </a>
+            </div>
+          </div>
+          <div className="settings-nav-section">
+            <div className="settings-nav-title">Agentes</div>
+            <div className="settings-nav-items">
+              <a className="settings-nav-item" href="#settings-rtk">
+                RTK
+              </a>
+            </div>
+          </div>
+        </aside>
+
+        <div className="workspace-settings-form settings-page-form settings-content">
+        <section className="settings-section" id="settings-appearance">
           <div>
             <div className="section-label">{t("workspace.settings.theme.title")}</div>
             <p>{t("workspace.settings.theme.description")}</p>
@@ -6774,7 +6810,7 @@ function WorkspaceSettingsPanel({
           </div>
         </section>
 
-        <section className="settings-section">
+        <section className="settings-section" id="settings-accent">
           <div>
             <div className="section-label">{t("workspace.settings.color.title")}</div>
             <p>{t("workspace.settings.color.description")}</p>
@@ -6823,7 +6859,7 @@ function WorkspaceSettingsPanel({
           </div>
         </section>
 
-        <section className="settings-section">
+        <section className="settings-section" id="settings-language">
           <div>
             <div className="section-label">{t("workspace.settings.language.title")}</div>
             <p>{t("workspace.settings.language.description")}</p>
@@ -6852,7 +6888,7 @@ function WorkspaceSettingsPanel({
           </div>
         </section>
 
-        <section className="settings-section">
+        <section className="settings-section" id="settings-editor">
           <div>
             <div className="section-label">{t("workspace.settings.editor.title")}</div>
             <p>{t("workspace.settings.editor.description")}</p>
@@ -6879,7 +6915,7 @@ function WorkspaceSettingsPanel({
           </div>
         </section>
 
-        <section className="settings-section rtk-settings-section">
+        <section className="settings-section rtk-settings-section" id="settings-rtk">
           <div>
             <div className="section-label">{t("workspace.settings.rtk.title")}</div>
             <p>{t("workspace.settings.rtk.description")}</p>
@@ -6961,7 +6997,7 @@ function WorkspaceSettingsPanel({
             <div className="empty-note">{t("workspace.settings.rtk.emptyAgents")}</div>
           )}
         </section>
-
+        </div>
       </div>
     </section>
   );
@@ -7881,7 +7917,9 @@ function AgentsPanel({
                     type="button"
                     onClick={() => onSelectProfile(profile.id)}
                   >
-                    <Bot aria-hidden="true" size={18} />
+                    <span className="agent-profile-avatar" aria-hidden="true">
+                      {authorInitials(profile.name).slice(0, 2)}
+                    </span>
                     <span>
                       <strong>{profile.name}</strong>
                       <small>
@@ -11719,6 +11757,7 @@ function ChangedFileNodes({
         if (node.file) {
           const file = node.file;
           const active = selectedFile?.path === file.path && selectedFile.area === file.area;
+          const { Icon, color } = fileIcon(file.path);
           return (
             <button
               className={active ? "changed-file-row active" : "changed-file-row"}
@@ -11732,6 +11771,18 @@ function ChangedFileNodes({
                 file.area === "staged" ? "Duplo clique para unstage" : "Duplo clique para stage"
               }
             >
+              <span
+                className={file.area === "staged" ? "git-file-check checked" : "git-file-check"}
+                aria-hidden="true"
+              >
+                {file.area === "staged" ? "✓" : ""}
+              </span>
+              <Icon
+                aria-hidden="true"
+                className={`diff-file-icon s-${file.status[0]}`}
+                size={15}
+                style={{ color }}
+              />
               <span className={`git-fstatus s-${file.status[0]}`}>{file.status[0]}</span>
               <span className="changed-file-name">{node.segment}</span>
               <small>{formatPatchStats(file)}</small>

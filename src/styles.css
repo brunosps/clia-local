@@ -27,6 +27,7 @@
   --clia-active-bg-strong: rgba(65, 239, 110, 0.14);
   --clia-active-green: rgba(65, 239, 110, 0.14);
   --clia-ring: rgba(146, 114, 243, 0.82);
+  --clia-focus-ring: var(--clia-ring);
   --space-1: 4px;
   --space-2: 6px;
   --space-3: 10px;
@@ -11486,4 +11487,956 @@ h2 {
 }
 .quick-switch-row.is-submodule .quick-switch-kind {
   color: var(--clia-teal, #2dd4bf);
+}
+
+/* Redesign phase 2: panel surfaces --------------------------------------- */
+.primary,
+.secondary,
+.ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.primary {
+  border: 1px solid var(--clia-primary);
+  background: var(--clia-primary);
+  color: #071015;
+}
+
+.secondary {
+  border: 1px solid color-mix(in srgb, var(--clia-secondary) 42%, var(--clia-border));
+  background: var(--clia-panel-strong);
+  color: var(--clia-text);
+}
+
+.ghost {
+  border: 1px solid var(--clia-border);
+  background: transparent;
+  color: var(--clia-muted);
+}
+
+.queue-panel,
+.git-workbench,
+.source-panel,
+.deploy-panel,
+.agents-panel,
+.settings-panel {
+  color: var(--clia-text);
+}
+
+.queue-panel .kanban-card,
+.git-main,
+.git-sidebar,
+.git-commit-bar,
+.source-panel .source-list,
+.source-editor-host,
+.deploy-setup,
+.deploy-wizard,
+.deploy-stack-card,
+.deploy-wizard-step,
+.deploy-section-details,
+.deploy-review-details,
+.deploy-technical-details,
+.deploy-detection,
+.deploy-artifact,
+.deploy-versions,
+.deploy-runs,
+.agent-row,
+.agent-empty-cta,
+.agent-workspace,
+.agents-sidebar,
+.agent-message,
+.agent-raw-panel,
+.settings-section,
+.rtk-agent-row {
+  background: var(--clia-panel-strong);
+  border-color: var(--clia-border);
+  box-shadow: var(--shadow-sm);
+}
+
+.queue-panel .kanban-card,
+.deploy-stack-card,
+.agent-row,
+.agent-empty-cta,
+.settings-section,
+.rtk-agent-row,
+.git-detail-file-row {
+  transition:
+    transform var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    background var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease);
+}
+
+.queue-panel .kanban-card:hover,
+.deploy-stack-card:hover,
+.agent-row:hover,
+.agent-empty-cta:hover,
+.settings-section:hover,
+.rtk-agent-row:hover,
+.git-detail-file-row:hover {
+  transform: translateY(-1px);
+  border-color: var(--clia-border-strong);
+  box-shadow: var(--shadow-md);
+}
+
+.primary-button:focus-visible,
+.secondary-button:focus-visible,
+.ghost-button:focus-visible,
+.source-footer-btn:focus-visible,
+.source-footer-link:focus-visible,
+.editor-tab-open:focus-visible,
+.editor-tab-close:focus-visible,
+.explorer-action-btn:focus-visible,
+.git-nav:focus-visible,
+.git-ref-action:focus-visible,
+.agent-row-main:focus-visible,
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--clia-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Queue / Kanban */
+.queue-panel {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  overflow: hidden;
+}
+
+.queue-header {
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--clia-panel-strong) 82%, transparent);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-sm);
+}
+
+.queue-header h1 {
+  font-size: 24px;
+  letter-spacing: 0;
+}
+
+.queue-header p {
+  max-width: 72ch;
+}
+
+.queue-panel .queue-filter {
+  margin: 0;
+}
+
+.chip,
+.priority-pill,
+.kanban-count,
+.status-pill,
+.machine-status {
+  border-radius: var(--radius-pill);
+}
+
+.queue-panel .kanban-board {
+  gap: var(--space-4);
+  padding-bottom: var(--space-2);
+  scrollbar-gutter: stable;
+}
+
+.queue-panel .kanban-column {
+  position: relative;
+  gap: var(--space-3);
+  min-height: 260px;
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 68%),
+    var(--clia-panel);
+  padding: var(--space-3);
+}
+
+.queue-panel .kanban-column::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--kanban-accent, var(--clia-muted));
+  opacity: 0.9;
+}
+
+.kanban-column.kanban-pending {
+  --kanban-accent: var(--clia-gold);
+  --kanban-active: rgba(242, 200, 121, 0.14);
+}
+
+.kanban-column.kanban-doing {
+  --kanban-accent: var(--clia-teal);
+  --kanban-active: rgba(45, 212, 191, 0.14);
+}
+
+.kanban-column.kanban-validating {
+  --kanban-accent: var(--clia-violet);
+  --kanban-active: rgba(124, 80, 226, 0.15);
+}
+
+.kanban-column.kanban-done {
+  --kanban-accent: var(--clia-green);
+  --kanban-active: rgba(65, 239, 110, 0.12);
+}
+
+.queue-panel .kanban-column.over {
+  border-color: var(--kanban-accent);
+  background: var(--kanban-active);
+}
+
+.kanban-column-head {
+  padding: 2px 2px 0;
+  letter-spacing: 0;
+}
+
+.kanban-column-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--kanban-accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.kanban-column-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--kanban-accent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--kanban-accent) 62%, transparent);
+}
+
+.kanban-count {
+  min-width: 24px;
+  border: 1px solid color-mix(in srgb, var(--kanban-accent) 34%, var(--clia-border));
+  background: color-mix(in srgb, var(--kanban-accent) 13%, var(--clia-panel-strong));
+  color: var(--clia-text);
+  text-align: center;
+}
+
+.queue-panel .kanban-card {
+  gap: var(--space-2);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.queue-panel .kanban-card h3 {
+  font-size: 13.5px;
+}
+
+.kanban-card-id,
+.commit-sha,
+.git-detail-value.mono,
+.git-fstatus,
+.diff-view,
+.source-footer-path,
+.source-file-row small {
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+.kanban-card-id {
+  color: var(--clia-dim);
+}
+
+.priority-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  border: 1px solid transparent;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.priority-pill.high {
+  border-color: color-mix(in srgb, var(--clia-danger) 44%, transparent);
+  background: rgba(255, 107, 138, 0.14);
+  color: var(--clia-danger);
+}
+
+.priority-pill.medium {
+  border-color: color-mix(in srgb, var(--clia-gold) 44%, transparent);
+  background: rgba(242, 200, 121, 0.14);
+  color: var(--clia-gold);
+}
+
+.priority-pill.low,
+.priority-pill.none {
+  border-color: color-mix(in srgb, var(--clia-teal) 44%, transparent);
+  background: rgba(45, 212, 191, 0.12);
+  color: var(--clia-teal);
+}
+
+.kanban-card-projects .chip.small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kanban-empty {
+  display: grid;
+  min-height: 72px;
+  place-items: center;
+  border: 1px dashed var(--clia-border);
+  border-radius: var(--radius-md);
+  color: var(--clia-dim);
+}
+
+/* Git workbench */
+.git-workbench {
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.git-toolbar,
+.git-sidebar,
+.git-main,
+.git-commit-bar,
+.git-detail,
+.diff-view {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-md);
+  background: var(--clia-panel);
+}
+
+.git-toolbar {
+  padding: var(--space-3) var(--space-4);
+  box-shadow: var(--shadow-sm);
+}
+
+.git-toolbar-left strong {
+  color: var(--clia-text);
+}
+
+.git-tracking {
+  border-color: rgba(45, 212, 191, 0.36);
+  background: rgba(45, 212, 191, 0.1);
+  color: var(--clia-teal);
+}
+
+.git-body {
+  gap: var(--space-3);
+}
+
+.git-sidebar {
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+.git-nav {
+  position: relative;
+  min-height: 34px;
+  border-radius: var(--radius-sm);
+  color: var(--clia-muted);
+}
+
+.git-nav:hover,
+.git-nav.active {
+  border-color: transparent;
+  background: var(--clia-active-bg);
+  color: var(--clia-text);
+}
+
+.git-nav.active::after,
+.git-detail-tabs > button.active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 3px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--clia-violet);
+}
+
+.git-section-head {
+  border-top-color: var(--clia-border);
+  color: var(--clia-dim);
+  letter-spacing: 0;
+}
+
+.commit-row {
+  border-bottom-color: rgba(42, 63, 75, 0.55);
+  color: var(--clia-text);
+}
+
+.commit-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.commit-row.active {
+  background: var(--clia-active-bg);
+  box-shadow: inset 2px 0 0 var(--clia-violet);
+}
+
+.commit-sha {
+  color: var(--clia-cyan);
+}
+
+.commit-author,
+.commit-date {
+  color: var(--clia-muted);
+}
+
+.git-detail-tabs {
+  border-bottom-color: var(--clia-border);
+}
+
+.git-detail-tabs > button {
+  position: relative;
+  border-radius: var(--radius-sm);
+}
+
+.git-detail-tabs > button.active {
+  border-color: transparent;
+  background: var(--clia-active-bg);
+  color: var(--clia-text);
+}
+
+.git-fsquare,
+.git-fstatus {
+  border-radius: 4px;
+}
+
+.git-fsquare.s-A {
+  background: var(--clia-green);
+}
+
+.git-fsquare.s-M {
+  background: var(--clia-gold);
+}
+
+.git-fsquare.s-D {
+  background: var(--clia-danger);
+}
+
+.git-fstatus.s-A {
+  color: var(--clia-green);
+}
+
+.git-fstatus.s-M {
+  color: var(--clia-gold);
+}
+
+.git-fstatus.s-D {
+  color: var(--clia-danger);
+}
+
+.git-detail-file-row small,
+.diff-file-stats {
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  color: var(--clia-muted);
+}
+
+.changed-file-row {
+  grid-template-columns: 18px 16px 20px minmax(0, 1fr) auto;
+  border-radius: var(--radius-sm);
+}
+
+.changed-file-row:hover,
+.changed-file-row.active {
+  border-color: transparent;
+  background: var(--clia-active-bg);
+}
+
+.changed-file-row.active {
+  box-shadow: inset 2px 0 0 var(--clia-violet);
+}
+
+.git-file-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--clia-border);
+  border-radius: 4px;
+  color: #071015;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.git-file-check.checked {
+  border-color: var(--clia-green);
+  background: var(--clia-green);
+}
+
+.diff-file-icon.s-A {
+  color: var(--clia-green) !important;
+}
+
+.diff-file-icon.s-M {
+  color: var(--clia-gold) !important;
+}
+
+.diff-file-icon.s-D {
+  color: var(--clia-danger) !important;
+}
+
+.diff-view {
+  background: var(--clia-input);
+}
+
+.diff-line.add {
+  background: rgba(65, 239, 110, 0.08);
+}
+
+.diff-line.add .diff-mark,
+.diff-line.add .diff-content {
+  color: color-mix(in srgb, var(--clia-green) 84%, var(--clia-text));
+}
+
+.diff-line.del {
+  background: rgba(255, 107, 138, 0.08);
+}
+
+.diff-line.del .diff-mark,
+.diff-line.del .diff-content {
+  color: color-mix(in srgb, var(--clia-danger) 84%, var(--clia-text));
+}
+
+/* Code */
+.source-panel {
+  padding: var(--space-4);
+}
+
+.source-panel .source-layout {
+  gap: var(--space-2);
+}
+
+.source-panel .source-list,
+.source-viewer {
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-md);
+  background: var(--clia-panel);
+  overflow: hidden;
+}
+
+.source-side-tabs {
+  min-height: 42px;
+  border-bottom: 1px solid var(--clia-border);
+  padding: 0 var(--space-2);
+}
+
+.source-side-tab,
+.editor-tab-open {
+  letter-spacing: 0;
+}
+
+.source-side-tab.active {
+  color: var(--clia-text);
+  border-bottom-color: var(--clia-violet);
+}
+
+.explorer-action-btn:hover,
+.source-footer-btn:hover:not(:disabled),
+.editor-tab-close:hover,
+.editor-tab-eye:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--clia-text);
+}
+
+.source-entry-list {
+  gap: 2px;
+  padding: var(--space-2);
+}
+
+.source-file-row {
+  min-height: 28px;
+  border-radius: var(--radius-sm);
+  color: var(--clia-text);
+}
+
+.source-file-row:hover,
+.source-file-row.active {
+  border-color: transparent;
+  background: var(--clia-active-bg);
+}
+
+.source-file-row.active {
+  box-shadow: inset 2px 0 0 var(--clia-violet);
+}
+
+.editor-tabs {
+  min-height: 42px;
+  gap: 0;
+  border-bottom-color: var(--clia-border);
+  background: var(--clia-panel);
+}
+
+.editor-tab {
+  position: relative;
+  border-radius: 0;
+  background: transparent;
+}
+
+.editor-tab.active {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.editor-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--clia-violet);
+}
+
+.editor-tab-dirty {
+  background: var(--clia-gold);
+  box-shadow: 0 0 10px rgba(242, 200, 121, 0.38);
+}
+
+.source-editor-host {
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: var(--clia-input);
+}
+
+.source-editor-host .monaco-editor,
+.source-editor-host .monaco-editor-background,
+.source-editor-host .monaco-editor .margin {
+  background-color: var(--clia-input) !important;
+}
+
+.source-editor-host .monaco-editor .line-numbers {
+  color: var(--clia-dim) !important;
+}
+
+.source-editor-host .monaco-editor .line-numbers.active-line-number {
+  color: var(--clia-text) !important;
+}
+
+.source-editor-host .monaco-editor .current-line,
+.source-editor-host .monaco-editor .view-overlays .current-line {
+  border-color: color-mix(in srgb, var(--clia-violet) 34%, transparent) !important;
+}
+
+.blame-age-uncommitted,
+.blame-age-0 {
+  background: var(--clia-green);
+  box-shadow: 0 0 8px rgba(65, 239, 110, 0.32);
+}
+
+.source-footer {
+  min-height: 28px;
+  margin-top: 0;
+  border-top-color: var(--clia-border);
+  background: var(--clia-panel);
+}
+
+.source-footer-dirty {
+  color: var(--clia-gold);
+}
+
+/* Deploy */
+.deploy-panel {
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.deploy-subnav {
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-md);
+  background: var(--clia-panel);
+  padding: var(--space-2);
+}
+
+.deploy-header {
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-md);
+  background: var(--clia-panel-strong);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-sm);
+}
+
+.deploy-shell {
+  gap: var(--space-4);
+}
+
+.deploy-setup,
+.deploy-wizard {
+  border-radius: var(--radius-md);
+}
+
+.deploy-stack-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  min-height: 78px;
+  border-radius: var(--radius-md);
+  background: var(--clia-panel-strong);
+  padding: var(--space-3);
+}
+
+.deploy-stack-card.active {
+  border-color: var(--clia-violet);
+  background: var(--clia-active-bg);
+}
+
+.deploy-stack-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.deploy-stack-activity {
+  grid-column: 1 / -1;
+  color: var(--clia-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.deploy-next-action,
+.deploy-wizard-step,
+.deploy-section-details,
+.deploy-review-details,
+.deploy-technical-details {
+  border-radius: var(--radius-md);
+}
+
+.deploy-next-action.ready {
+  border-color: rgba(65, 239, 110, 0.34);
+  background: rgba(65, 239, 110, 0.08);
+}
+
+.deploy-next-action.warning {
+  border-color: rgba(242, 200, 121, 0.36);
+  background: rgba(242, 200, 121, 0.08);
+}
+
+.deploy-next-action.blocked {
+  border-color: rgba(255, 107, 138, 0.36);
+  background: rgba(255, 107, 138, 0.08);
+}
+
+.deploy-stepper li {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: var(--clia-panel);
+}
+
+.deploy-stepper li.done {
+  border-color: rgba(65, 239, 110, 0.34);
+  background: rgba(65, 239, 110, 0.08);
+}
+
+.deploy-stepper li.current {
+  border-color: rgba(124, 80, 226, 0.48);
+  background: var(--clia-active-bg);
+}
+
+.deploy-summary-grid span,
+.deploy-version-row,
+.deploy-run-row {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: var(--clia-panel);
+}
+
+/* Agents */
+.agents-panel {
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.agents-sidebar,
+.agent-workspace {
+  border-radius: var(--radius-md);
+}
+
+.agent-row {
+  min-height: 88px;
+  border-radius: var(--radius-md);
+  background: var(--clia-panel);
+}
+
+.agent-row.active,
+.agent-row:hover,
+.agent-empty-cta:hover {
+  border-color: var(--clia-violet);
+  background: var(--clia-active-bg);
+}
+
+.agent-profile-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(220, 232, 243, 0.18);
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--clia-violet), var(--clia-blue));
+  color: #f8fbff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  box-shadow: 0 8px 22px rgba(66, 137, 240, 0.18);
+}
+
+.agent-row-main small {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 2px 7px;
+  color: var(--clia-muted);
+}
+
+.agent-session-bar,
+.agent-diagnostics,
+.agent-timeline,
+.agent-raw-panel,
+.agent-composer textarea {
+  border-color: var(--clia-border);
+  background: var(--clia-panel);
+}
+
+.agent-message.user {
+  border-color: rgba(45, 212, 191, 0.36);
+  background: rgba(45, 212, 191, 0.08);
+}
+
+.agent-message.assistant {
+  border-color: rgba(124, 80, 226, 0.32);
+}
+
+/* Settings */
+.settings-panel {
+  max-width: 1240px;
+  padding: var(--space-5);
+}
+
+.settings-panel-heading {
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-md);
+  background: var(--clia-panel-strong);
+  padding: var(--space-4);
+}
+
+.settings-main {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: var(--space-4);
+  display: grid;
+  gap: var(--space-4);
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-md);
+  background: var(--clia-panel);
+  padding: var(--space-3);
+}
+
+.settings-nav-section {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.settings-nav-title {
+  color: var(--clia-dim);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.settings-nav-items {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-nav-item {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--clia-muted);
+  padding: 0 var(--space-3);
+  text-decoration: none;
+}
+
+.settings-nav-item:hover,
+.settings-nav-item.active {
+  background: var(--clia-active-bg);
+  color: var(--clia-violet);
+}
+
+.settings-content {
+  grid-template-columns: 1fr;
+}
+
+.settings-page-form .settings-section {
+  border-radius: var(--radius-md);
+  background: var(--clia-panel-strong);
+  padding: var(--space-4);
+}
+
+.theme-control,
+.language-control,
+.workspace-color-control,
+.font-size-control {
+  max-width: 680px;
+}
+
+.rtk-agent-row {
+  border-radius: var(--radius-md);
+}
+
+@media (max-width: 1180px) {
+  .queue-panel .kanban-board {
+    grid-template-columns: repeat(2, minmax(280px, 1fr));
+  }
+}
+
+@media (max-width: 899px) {
+  .settings-main,
+  .agents-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav {
+    position: static;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-panel .kanban-card,
+  .deploy-stack-card,
+  .agent-row,
+  .agent-empty-cta,
+  .settings-section,
+  .rtk-agent-row,
+  .git-detail-file-row {
+    transition: none;
+  }
+
+  .queue-panel .kanban-card:hover,
+  .deploy-stack-card:hover,
+  .agent-row:hover,
+  .agent-empty-cta:hover,
+  .settings-section:hover,
+  .rtk-agent-row:hover,
+  .git-detail-file-row:hover {
+    transform: none;
+  }
 }
