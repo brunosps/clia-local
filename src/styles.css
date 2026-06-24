@@ -12448,3 +12448,773 @@ h2 {
 .submodule-branch {
   color: var(--clia-teal, #2dd4bf);
 }
+
+/* Redesign final polish: modals, welcome, empty/loading states, palettes ---- */
+.modal-backdrop {
+  z-index: 80;
+  padding: var(--space-6);
+  background:
+    radial-gradient(circle at 18% 12%, rgba(45, 212, 191, 0.1), transparent 30%),
+    radial-gradient(circle at 82% 8%, rgba(124, 80, 226, 0.12), transparent 34%),
+    rgba(3, 6, 10, 0.76);
+  backdrop-filter: blur(16px);
+}
+
+.modal-backdrop.elevated {
+  z-index: 120;
+}
+
+.modal-panel {
+  position: relative;
+  display: grid;
+  width: min(640px, 100%);
+  max-height: calc(100vh - 48px);
+  gap: var(--space-4);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--clia-border) 86%, var(--clia-teal));
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, rgba(25, 34, 48, 0.88), rgba(17, 25, 35, 0.96)),
+    var(--clia-panel-strong);
+  box-shadow: var(--shadow-lg);
+  padding: var(--space-5);
+}
+
+.modal-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--clia-teal), var(--clia-green), transparent);
+  opacity: 0.86;
+}
+
+.modal-panel.wide {
+  width: min(900px, 96vw);
+}
+
+.modal-heading {
+  align-items: start;
+  min-width: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--clia-border) 72%, transparent);
+  padding-bottom: var(--space-4);
+}
+
+.modal-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.modal-heading .section-label,
+.about-copy .section-label {
+  color: var(--clia-teal);
+}
+
+.modal-heading h2,
+.confirm-modal h2,
+.about-copy h2 {
+  margin: 0;
+  color: var(--clia-text);
+  font-size: 22px;
+  line-height: 1.18;
+  letter-spacing: 0;
+}
+
+.modal-heading p,
+.confirm-modal p {
+  margin: 0;
+  color: var(--clia-muted);
+  line-height: 1.45;
+}
+
+.modal-actions,
+.flow-builder-actions {
+  align-items: center;
+  gap: var(--space-3);
+  border-top: 1px solid color-mix(in srgb, var(--clia-border) 72%, transparent);
+  padding-top: var(--space-4);
+}
+
+.modal-actions .secondary-button:first-child,
+.flow-builder-actions .secondary-button:first-child {
+  margin-right: auto;
+}
+
+.modal-panel input,
+.modal-panel select,
+.modal-panel textarea,
+.quick-switch-input {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: var(--clia-input);
+  color: var(--clia-text);
+  transition:
+    border-color var(--motion-fast) var(--ease),
+    background var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease);
+}
+
+.modal-panel input:focus,
+.modal-panel select:focus,
+.modal-panel textarea:focus,
+.quick-switch-input:focus {
+  border-color: var(--clia-secondary-hover);
+  outline: 2px solid var(--clia-focus-ring);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--clia-secondary) 18%, transparent);
+}
+
+.field,
+.setup-form label,
+.prompt-field,
+.flow-stage-grid label,
+.flow-stage-card > label,
+.interview-question label,
+.interview-draft label,
+.flow-interview-start label {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.field > span,
+.setup-form label > span,
+.prompt-field > span,
+.flow-stage-grid label span,
+.flow-stage-card > label > span,
+.interview-question label span,
+.interview-draft label span,
+.flow-interview-start label span {
+  color: var(--clia-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.primary-button,
+.secondary-button,
+.ghost-button,
+.primary,
+.secondary,
+.ghost {
+  border-radius: var(--radius-sm);
+  transition:
+    transform var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease),
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease),
+    box-shadow var(--motion-fast) var(--ease);
+}
+
+.primary-button:hover:not(:disabled),
+.secondary-button:hover:not(:disabled),
+.ghost-button:hover:not(:disabled),
+.primary:hover:not(:disabled),
+.secondary:hover:not(:disabled),
+.ghost:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.primary-button:focus-visible,
+.secondary-button:focus-visible,
+.ghost-button:focus-visible,
+.primary:focus-visible,
+.secondary:focus-visible,
+.ghost:focus-visible,
+.chip:focus-visible,
+.context-menu-item:focus-visible,
+.quick-switch-row:focus-visible {
+  outline: 2px solid var(--clia-focus-ring);
+  outline-offset: 2px;
+}
+
+.ghost-button,
+.ghost {
+  border-color: color-mix(in srgb, var(--clia-border) 82%, transparent);
+  background: transparent;
+  color: var(--clia-muted);
+}
+
+.ghost-button:hover:not(:disabled),
+.ghost:hover:not(:disabled) {
+  border-color: var(--clia-border-strong);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--clia-text);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-pill);
+  background: var(--clia-panel);
+  color: var(--clia-muted);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chip:hover {
+  border-color: var(--clia-border-strong);
+  color: var(--clia-text);
+}
+
+.chip.active {
+  border-color: color-mix(in srgb, var(--clia-green) 54%, var(--clia-border));
+  background: var(--clia-active-green);
+  color: var(--clia-green);
+  box-shadow: inset 0 0 0 1px rgba(65, 239, 110, 0.08);
+}
+
+.chip-row {
+  gap: var(--space-2);
+}
+
+.setup-form {
+  display: grid;
+  gap: var(--space-4);
+  min-height: 0;
+  overflow: auto;
+}
+
+.path-picker,
+.task-run-row,
+.checklist-add {
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.path-picker input,
+.task-run-row input,
+.task-run-row select,
+.checklist-add input {
+  min-width: 0;
+}
+
+.empty-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 40px;
+  border: 1px dashed color-mix(in srgb, var(--clia-border) 84%, transparent);
+  border-radius: var(--radius-sm);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(45, 212, 191, 0.05), transparent 44%),
+    rgba(11, 17, 24, 0.68);
+  color: var(--clia-muted);
+  padding: var(--space-3) var(--space-4);
+  line-height: 1.4;
+}
+
+.empty-note::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--clia-teal) 72%, var(--clia-border));
+  border-radius: var(--radius-pill);
+  background: rgba(45, 212, 191, 0.12);
+  box-shadow: 0 0 14px rgba(45, 212, 191, 0.16);
+}
+
+.lazy-panel-loading {
+  gap: var(--space-3);
+  background:
+    radial-gradient(circle at 50% 18%, rgba(124, 80, 226, 0.1), transparent 34%),
+    var(--clia-bg);
+  color: var(--clia-muted);
+  font-weight: 700;
+}
+
+.lazy-panel-loading svg {
+  color: var(--clia-teal);
+}
+
+.welcome-screen {
+  min-height: calc(100vh - var(--topbar-height));
+  padding: var(--space-8);
+  background:
+    radial-gradient(ellipse 55% 42% at 50% 18%, rgba(45, 212, 191, 0.12), transparent 62%),
+    radial-gradient(ellipse 60% 44% at 80% 85%, rgba(124, 80, 226, 0.11), transparent 64%);
+}
+
+.welcome-panel {
+  position: relative;
+  width: min(940px, 100%);
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--clia-border) 86%, var(--clia-teal));
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(135deg, rgba(25, 34, 48, 0.8), rgba(17, 25, 35, 0.94)),
+    var(--clia-panel-strong);
+  box-shadow: var(--shadow-lg), 0 0 42px rgba(45, 212, 191, 0.08);
+  padding: clamp(24px, 5vw, 48px);
+}
+
+.welcome-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--clia-teal), var(--clia-green), transparent);
+}
+
+.welcome-copy .section-label {
+  color: var(--clia-teal);
+}
+
+.welcome-copy h1 {
+  margin: 0;
+  max-width: 760px;
+  color: var(--clia-text);
+  font-size: clamp(38px, 6vw, 68px);
+  line-height: 0.98;
+  letter-spacing: 0;
+}
+
+.welcome-copy p {
+  margin: 0;
+  color: var(--clia-muted);
+}
+
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.welcome-cta {
+  min-height: 46px;
+  padding-inline: var(--space-5);
+}
+
+.welcome-notes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.welcome-notes span {
+  min-width: 0;
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-md);
+  background: rgba(11, 17, 24, 0.58);
+  color: var(--clia-muted);
+  padding: var(--space-3);
+  line-height: 1.45;
+}
+
+.modal-panel.task-modal,
+.modal-panel.add-project-modal,
+.modal-panel.analysis-modal {
+  width: min(720px, 94vw);
+  max-height: calc(100vh - 48px);
+  padding: var(--space-5);
+}
+
+.task-modal-body,
+.project-blueprint-body,
+.project-blueprint-form,
+.interview-modal-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 var(--space-1) var(--space-1);
+  scrollbar-gutter: stable;
+}
+
+.task-modal-row {
+  gap: var(--space-3);
+}
+
+.task-modal .field input,
+.task-modal .field textarea,
+.task-modal .field select,
+.flow-builder-meta input,
+.project-blueprint-form input,
+.project-blueprint-form textarea,
+.project-blueprint-question-form textarea,
+.prompt-field input,
+.rebase-row select {
+  border-radius: var(--radius-sm);
+  background: var(--clia-input);
+}
+
+.task-modal .checklist,
+.task-modal .attachment-list {
+  gap: var(--space-2);
+}
+
+.task-modal .checklist li,
+.task-modal .attachment-list li {
+  min-height: 38px;
+  border: 1px solid color-mix(in srgb, var(--clia-border) 78%, transparent);
+  border-radius: var(--radius-sm);
+  background: rgba(11, 17, 24, 0.62);
+  padding: var(--space-2) var(--space-3);
+}
+
+.task-modal .attachment-list li.empty-note {
+  border-style: dashed;
+  background: rgba(11, 17, 24, 0.68);
+}
+
+.agent-inline-stream {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-md);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(124, 80, 226, 0.07), transparent 42%),
+    var(--clia-input);
+}
+
+.agent-msg {
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+  padding: var(--space-2);
+}
+
+.add-project-modal > .chip-row {
+  border-bottom: 1px solid color-mix(in srgb, var(--clia-border) 72%, transparent);
+  padding-bottom: var(--space-3);
+}
+
+.analysis-question {
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-md);
+  background: rgba(11, 17, 24, 0.72);
+  padding: var(--space-4);
+}
+
+.flow-builder-modal,
+.project-blueprint-modal,
+.interview-modal,
+.dw-artifact-preview-modal,
+.attachment-preview-modal {
+  border-radius: var(--radius-lg);
+}
+
+.flow-builder-modal {
+  width: min(1120px, 96vw);
+}
+
+.flow-builder-body {
+  gap: var(--space-4);
+}
+
+.flow-builder-palette,
+.flow-builder-editor,
+.project-blueprint-sources,
+.project-blueprint-plan section,
+.project-blueprint-stats span,
+.flow-stage-card,
+.interview-option,
+.markdown-preview-body,
+.attachment-preview-body {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-md);
+  background: var(--clia-panel);
+}
+
+.flow-palette-item {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: var(--clia-panel);
+  transition:
+    border-color var(--motion-fast) var(--ease),
+    background var(--motion-fast) var(--ease),
+    transform var(--motion-fast) var(--ease);
+}
+
+.flow-palette-item:hover:not(:disabled) {
+  border-color: var(--clia-teal);
+  background: rgba(45, 212, 191, 0.07);
+  transform: translateY(-1px);
+}
+
+.flow-builder-advanced > summary,
+.flow-palette-empty,
+.project-blueprint-source-list small {
+  color: var(--clia-muted);
+}
+
+.project-blueprint-stats strong,
+.flow-builder-ok,
+.interview-option strong,
+.interview-progress {
+  color: var(--clia-green);
+}
+
+.project-blueprint-source-list label {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: var(--clia-panel-strong);
+}
+
+.project-blueprint-note,
+.project-blueprint-waiting,
+.interview-waiting,
+.rebase-hint {
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: rgba(11, 17, 24, 0.68);
+  color: var(--clia-muted);
+  padding: var(--space-3) var(--space-4);
+}
+
+.interview-option:hover {
+  border-color: var(--clia-teal);
+  background: rgba(45, 212, 191, 0.07);
+}
+
+.about-modal {
+  border-radius: var(--radius-lg);
+}
+
+.about-hero,
+.about-status-item {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-md);
+  background:
+    radial-gradient(circle at 26% 42%, rgba(65, 239, 110, 0.13), transparent 36%),
+    radial-gradient(circle at 76% 38%, rgba(124, 80, 226, 0.16), transparent 38%),
+    var(--clia-panel);
+}
+
+.about-footer {
+  border-top-color: var(--clia-border);
+}
+
+.attachment-preview-modal,
+.dw-artifact-preview-modal {
+  width: min(1040px, 96vw);
+}
+
+.attachment-preview-body,
+.markdown-preview-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.confirm-modal {
+  width: min(460px, 94vw);
+}
+
+.confirm-modal .modal-heading {
+  padding-bottom: var(--space-3);
+}
+
+.confirm-modal > h2 {
+  border-bottom: 1px solid color-mix(in srgb, var(--clia-border) 72%, transparent);
+  padding-bottom: var(--space-3);
+}
+
+.new-branch-checkout {
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: rgba(11, 17, 24, 0.58);
+  padding: var(--space-3);
+}
+
+.rebase-dialog {
+  width: min(760px, 94vw);
+}
+
+.rebase-rows {
+  gap: var(--space-2);
+  scrollbar-gutter: stable;
+}
+
+.rebase-row {
+  border-color: var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: var(--clia-panel);
+  transition:
+    border-color var(--motion-fast) var(--ease),
+    background var(--motion-fast) var(--ease);
+}
+
+.rebase-row:hover {
+  border-color: var(--clia-border-strong);
+  background: var(--clia-active-bg);
+}
+
+.quick-switch {
+  width: min(620px, 92vw);
+  gap: var(--space-3);
+  align-self: start;
+  margin-top: 12vh;
+}
+
+.quick-switch-input {
+  min-height: 46px;
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(180deg, rgba(11, 17, 24, 0.92), rgba(11, 17, 24, 0.98)),
+    var(--clia-input);
+  color: var(--clia-text);
+  font-size: 15px;
+  padding: 0 var(--space-4);
+}
+
+.quick-switch-list {
+  gap: var(--space-1);
+  max-height: min(54vh, 520px);
+  padding-right: var(--space-1);
+}
+
+.quick-switch-row {
+  position: relative;
+  min-height: 40px;
+  border-radius: var(--radius-sm);
+  color: var(--clia-text);
+  padding: var(--space-2) var(--space-3);
+  transition:
+    border-color var(--motion-fast) var(--ease),
+    background var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease);
+}
+
+.quick-switch-row::before {
+  content: "";
+  position: absolute;
+  inset: 7px auto 7px 0;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+}
+
+.quick-switch-row.active {
+  border-color: color-mix(in srgb, var(--clia-secondary-hover) 44%, var(--clia-border));
+  background: var(--clia-active-bg);
+}
+
+.quick-switch-row.active::before {
+  background: linear-gradient(180deg, var(--clia-teal), var(--clia-green));
+}
+
+.quick-switch-row svg {
+  color: var(--clia-muted);
+}
+
+.quick-switch-row.active svg {
+  color: var(--clia-teal);
+}
+
+.quick-switch-label strong {
+  color: var(--clia-text);
+}
+
+.quick-switch-kind,
+.file-palette-dir {
+  color: var(--clia-muted);
+}
+
+.quick-switch-row.is-submodule {
+  padding-left: 24px;
+}
+
+.quick-switch-row.is-submodule .quick-switch-kind {
+  border: 1px solid color-mix(in srgb, var(--clia-teal) 45%, var(--clia-border));
+  border-radius: var(--radius-pill);
+  background: rgba(45, 212, 191, 0.08);
+  color: var(--clia-teal);
+  padding: 1px 7px;
+}
+
+.context-menu {
+  min-width: 220px;
+  border-color: var(--clia-border);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(180deg, rgba(25, 34, 48, 0.96), rgba(17, 25, 35, 0.98)),
+    var(--clia-panel-strong);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-1);
+}
+
+.context-menu-item {
+  min-height: 32px;
+  border-radius: var(--radius-sm);
+  color: var(--clia-text);
+}
+
+.context-menu-item:hover:not(:disabled),
+.context-menu-item:focus-visible {
+  background: var(--clia-active-bg);
+  color: var(--clia-text);
+}
+
+.context-menu-shortcut,
+.context-menu-caret {
+  color: var(--clia-muted);
+}
+
+.context-menu-item.danger {
+  color: var(--clia-danger);
+}
+
+.context-menu-sep {
+  background: var(--clia-border);
+}
+
+@media (max-width: 760px) {
+  .modal-backdrop {
+    padding: var(--space-3);
+  }
+
+  .task-modal-row,
+  .welcome-notes,
+  .flow-builder-body,
+  .flow-builder-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .task-run-row,
+  .path-picker,
+  .modal-actions,
+  .flow-builder-actions {
+    flex-wrap: wrap;
+  }
+
+  .modal-actions .primary-button,
+  .modal-actions .secondary-button,
+  .flow-builder-actions .primary-button,
+  .flow-builder-actions .secondary-button {
+    flex: 1 1 160px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lazy-panel-loading svg,
+  .project-blueprint-waiting svg {
+    animation: none;
+  }
+
+  .primary-button,
+  .secondary-button,
+  .ghost-button,
+  .primary,
+  .secondary,
+  .ghost,
+  .chip,
+  .quick-switch-row,
+  .flow-palette-item,
+  .rebase-row {
+    transition: none;
+  }
+
+  .primary-button:hover:not(:disabled),
+  .secondary-button:hover:not(:disabled),
+  .ghost-button:hover:not(:disabled),
+  .primary:hover:not(:disabled),
+  .secondary:hover:not(:disabled),
+  .ghost:hover:not(:disabled),
+  .flow-palette-item:hover:not(:disabled) {
+    transform: none;
+  }
+}

@@ -143,8 +143,13 @@ export function useConfirm() {
   const dialog = state ? (
     <div className="modal-backdrop elevated" role="presentation">
       <section className="modal-panel confirm-modal" role="dialog" aria-modal="true">
-        <h2>{state.title}</h2>
-        {state.body ? <p>{state.body}</p> : null}
+        <div className="modal-heading">
+          <div>
+            <div className="section-label">Confirmação</div>
+            <h2>{state.title}</h2>
+            {state.body ? <p>{state.body}</p> : null}
+          </div>
+        </div>
         <div className="modal-actions">
           <button className="secondary-button" type="button" onClick={() => settle(false)}>
             Cancelar
@@ -184,8 +189,13 @@ export function useNotice() {
           if (event.key === "Escape") settle();
         }}
       >
-        <h2 id="notice-title">{state.title}</h2>
-        {state.body ? <p>{state.body}</p> : null}
+        <div className="modal-heading">
+          <div>
+            <div className="section-label">Aviso</div>
+            <h2 id="notice-title">{state.title}</h2>
+            {state.body ? <p>{state.body}</p> : null}
+          </div>
+        </div>
         <div className="modal-actions">
           <button className="primary-button" type="button" autoFocus onClick={settle}>
             {state.confirmLabel ?? "Entendi"}
@@ -222,7 +232,12 @@ export function usePrompt() {
   const dialog = state ? (
     <div className="modal-backdrop elevated" role="presentation">
       <section className="modal-panel confirm-modal" role="dialog" aria-modal="true">
-        <h2>{state.title}</h2>
+        <div className="modal-heading">
+          <div>
+            <div className="section-label">Entrada</div>
+            <h2>{state.title}</h2>
+          </div>
+        </div>
         <label className="prompt-field">
           {state.label ? <span>{state.label}</span> : null}
           <input

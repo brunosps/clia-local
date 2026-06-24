@@ -4491,6 +4491,7 @@ function WorkspaceModal({
       >
         <div className="modal-heading">
           <div>
+            <div className="section-label">Workspace</div>
             <h2 id="workspace-modal-title">{t("workspace.modal.title")}</h2>
             <p>{t("workspace.modal.description")}</p>
           </div>
@@ -4581,6 +4582,7 @@ function WorkspaceImportModal({
       >
         <div className="modal-heading">
           <div>
+            <div className="section-label">Workspace</div>
             <h2 id="workspace-import-title">{t("workspace.import.title")}</h2>
             <p>{t("workspace.import.description")}</p>
           </div>
@@ -4845,6 +4847,7 @@ function FlowBuilderModal({
       >
         <div className="modal-heading">
           <div>
+            <div className="section-label">Fluxos</div>
             <h2 id="flow-builder-title">
               {mode === "edit" ? `Editar fluxo · ${initialId}` : "Novo fluxo custom"}
             </h2>
@@ -9799,7 +9802,12 @@ function NewBranchModal({
   return (
     <div className="modal-backdrop elevated" role="presentation">
       <section className="modal-panel confirm-modal" role="dialog" aria-modal="true">
-        <h2>Criar branch</h2>
+        <div className="modal-heading">
+          <div>
+            <div className="section-label">Git</div>
+            <h2>Criar branch</h2>
+          </div>
+        </div>
         <label className="prompt-field">
           <span>Nome da nova branch</span>
           <input
@@ -9887,6 +9895,7 @@ function RebaseDialog({
       <section className="modal-panel rebase-dialog" role="dialog" aria-modal="true">
         <div className="modal-heading">
           <div>
+            <div className="section-label">Git</div>
             <h2>Rebase interativo</h2>
             <p>
               Replay dos commits sobre <code>{base.slice(0, 8)}</code>. Arraste para reordenar;
