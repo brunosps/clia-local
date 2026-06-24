@@ -832,6 +832,9 @@ export const api = {
   gitUpdateSubmoduleRemote(path: string, subPath: string) {
     return invokeSafe<string>("git_update_submodule_remote", { path, subPath });
   },
+  gitCheckoutSubmoduleBranch(path: string, subPath: string) {
+    return invokeSafe<string>("git_checkout_submodule_branch", { path, subPath });
+  },
   gitDiscardFile(path: string, filePath: string) {
     return invokeSafe<string>("git_discard_file", { path, filePath });
   },

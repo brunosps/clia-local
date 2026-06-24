@@ -1449,13 +1449,17 @@ pub struct Submodule {
     pub sha: String,
     pub status: String,
     pub describe: Option<String>,
+    /// Current branch of the (initialized) submodule, or None when detached.
+    pub branch: Option<String>,
+    /// True when the submodule's HEAD is detached (git's default for submodules).
+    pub detached: bool,
 }
 
 pub fn list_submodules(repo: &Path) -> anyhow::Result<Vec<Submodule>> {
     // `git submodule status` lines: "<flag><sha> <path> (<describe>)"; flag is
     // ' '=ok, '+'=needs update, '-'=uninitialized, 'U'=conflicts.
     let output = git(repo, &["submodule", "status"])?;
-    Ok(output
+    let mut submodules: Vec<Submodule> = output
         .lines()
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| {
@@ -1486,9 +1490,26 @@ pub fn list_submodules(repo: &Path) -> anyhow::Result<Vec<Submodule>> {
                 sha,
                 status: status.to_string(),
                 describe,
+                branch: None,
+                detached: false,
             })
         })
-        .collect())
+        .collect();
+    // Enrich initialized submodules with their current branch / detached state.
+    for sub in &mut submodules {
+        if sub.status == "uninitialized" {
+            continue;
+        }
+        let head = git(&repo.join(&sub.path), &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_default();
+        let head = head.trim();
+        if head.is_empty() || head == "HEAD" {
+            sub.detached = true;
+        } else {
+            sub.branch = Some(head.to_string());
+        }
+    }
+    Ok(submodules)
 }
 
 pub fn update_submodule(repo: &Path, path: &str, init: bool) -> anyhow::Result<String> {
@@ -1526,6 +1547,27 @@ pub fn update_submodule_remote(repo: &Path, path: &str) -> anyhow::Result<String
         repo,
         &["submodule", "update", "--remote", "--init", "--recursive", "--", path],
     )
+}
+
+/// Put a submodule onto its tracked branch (`submodule.<name>.branch` in
+/// `.gitmodules`, else origin's default branch) instead of a detached HEAD.
+pub fn checkout_submodule_branch(repo: &Path, path: &str) -> anyhow::Result<String> {
+    validate_git_path(path)?;
+    let sub = repo.join(path);
+    let key = format!("submodule.{path}.branch");
+    let tracked = git(repo, &["config", "-f", ".gitmodules", key.as_str()])
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value != ".");
+    let branch = match tracked {
+        Some(branch) => branch,
+        None => git(&sub, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
+            .ok()
+            .map(|value| value.trim().trim_start_matches("origin/").to_string())
+            .filter(|value| !value.is_empty() && value != "HEAD")
+            .unwrap_or_else(|| "main".to_string()),
+    };
+    git(&sub, &["checkout", &branch])
 }
 
 pub fn stash_save(

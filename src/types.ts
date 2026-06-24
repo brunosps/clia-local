@@ -503,6 +503,8 @@ export type Submodule = {
   sha: string;
   status: string;
   describe?: string | null;
+  branch?: string | null;
+  detached?: boolean;
 };
 
 export type BlameLine = {

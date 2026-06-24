@@ -10831,6 +10831,11 @@ function GitWorkbench({
                       {sub.status !== "ok" ? (
                         <small className="submodule-flag"> {sub.status}</small>
                       ) : null}
+                      {sub.detached ? (
+                        <small className="submodule-flag detached"> detached</small>
+                      ) : sub.branch ? (
+                        <small className="submodule-branch"> {sub.branch}</small>
+                      ) : null}
                     </span>
                     <button
                       className="git-ref-action"
@@ -10858,6 +10863,21 @@ function GitWorkbench({
                     >
                       remote
                     </button>
+                    {sub.detached ? (
+                      <button
+                        className="git-ref-action"
+                        type="button"
+                        title="checkout da branch rastreada (sai do detached HEAD)"
+                        disabled={busy}
+                        onClick={() =>
+                          void run("Submódulo na branch", () =>
+                            api.gitCheckoutSubmoduleBranch(path, sub.path),
+                          )
+                        }
+                      >
+                        branch
+                      </button>
+                    ) : null}
                   </div>
                 ))}
               </div>

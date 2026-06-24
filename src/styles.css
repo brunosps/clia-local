@@ -12440,3 +12440,11 @@ h2 {
     transform: none;
   }
 }
+
+/* clia-local: submodule branch / detached-HEAD indicators */
+.submodule-flag.detached {
+  color: var(--clia-gold, #f2c879);
+}
+.submodule-branch {
+  color: var(--clia-teal, #2dd4bf);
+}

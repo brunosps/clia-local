@@ -2272,6 +2272,12 @@ fn git_update_submodule_remote(path: String, sub_path: String) -> AppResult<Stri
 }
 
 #[tauri::command]
+fn git_checkout_submodule_branch(path: String, sub_path: String) -> AppResult<String> {
+    let root = canonical_project_root(&PathBuf::from(path))?;
+    Ok(git::checkout_submodule_branch(&root, &sub_path)?)
+}
+
+#[tauri::command]
 fn git_start_interactive_rebase(
     path: String,
     base: String,
@@ -4872,6 +4878,7 @@ pub fn run() {
             git_update_all_submodules,
             git_sync_submodules,
             git_update_submodule_remote,
+            git_checkout_submodule_branch,
             git_merge_branch,
             git_rebase_branch,
             git_cherry_pick,
