@@ -21,6 +21,11 @@ pub struct Project {
     pub name: String,
     pub path: String,
     pub remote_url: Option<String>,
+    /// When this project is a git submodule, the id of its containing project.
+    pub parent_project_id: Option<i64>,
+    pub is_submodule: bool,
+    /// Submodule path relative to the parent project root (e.g. "vendor/lib").
+    pub submodule_path: Option<String>,
     pub created_at: String,
 }
 
@@ -525,21 +530,13 @@ impl Database {
         let conn = self.workspace_connect_by_id(workspace_id)?;
         dedupe_workspace_projects(&conn, workspace_id)?;
         let mut stmt = conn.prepare(
-            "select id, workspace_id, name, path, remote_url, created_at
+            "select id, workspace_id, name, path, remote_url, parent_project_id,
+                    is_submodule, submodule_path, created_at
              from projects
              where workspace_id = ?1
              order by name asc",
         )?;
-        let rows = stmt.query_map([workspace_id], |row| {
-            Ok(Project {
-                id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                name: row.get(2)?,
-                path: row.get(3)?,
-                remote_url: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map([workspace_id], project_from_row)?;
         collect_rows(rows)
     }
 
@@ -1237,6 +1234,57 @@ impl Database {
             name: name.trim().to_string(),
             path: project_path,
             remote_url: remote_url.map(ToOwned::to_owned),
+            parent_project_id: None,
+            is_submodule: false,
+            submodule_path: None,
+            created_at,
+        })
+    }
+
+    /// Register a git submodule of `parent_project_id` as its own child project.
+    /// Idempotent by path (returns the existing row if already registered).
+    pub fn add_submodule_project(
+        &self,
+        workspace_id: i64,
+        parent_project_id: i64,
+        name: &str,
+        path: &str,
+        remote_url: Option<&str>,
+        submodule_path: &str,
+    ) -> anyhow::Result<Project> {
+        let created_at = Utc::now().to_rfc3339();
+        let conn = self.workspace_connect_by_id(workspace_id)?;
+        let project_path = normalize_project_path(path);
+        if let Some(existing) =
+            self.find_project_by_path_with_conn(&conn, workspace_id, &project_path)?
+        {
+            return Ok(existing);
+        }
+        conn.execute(
+            "insert into projects
+               (workspace_id, name, path, remote_url, parent_project_id, is_submodule,
+                submodule_path, created_at)
+             values (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+            params![
+                workspace_id,
+                name.trim(),
+                project_path,
+                remote_url,
+                parent_project_id,
+                submodule_path.trim(),
+                created_at
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        Ok(Project {
+            id,
+            workspace_id,
+            name: name.trim().to_string(),
+            path: project_path,
+            remote_url: remote_url.map(ToOwned::to_owned),
+            parent_project_id: Some(parent_project_id),
+            is_submodule: true,
+            submodule_path: Some(submodule_path.trim().to_string()),
             created_at,
         })
     }
@@ -1246,20 +1294,12 @@ impl Database {
             let conn = self.workspace_connect(&workspace)?;
             if let Some(project) = conn
                 .query_row(
-                    "select id, workspace_id, name, path, remote_url, created_at
+                    "select id, workspace_id, name, path, remote_url, parent_project_id,
+                            is_submodule, submodule_path, created_at
                      from projects
                      where id = ?1",
                     [id],
-                    |row| {
-                        Ok(Project {
-                            id: row.get(0)?,
-                            workspace_id: row.get(1)?,
-                            name: row.get(2)?,
-                            path: row.get(3)?,
-                            remote_url: row.get(4)?,
-                            created_at: row.get(5)?,
-                        })
-                    },
+                    project_from_row,
                 )
                 .optional()?
             {
@@ -2082,6 +2122,95 @@ impl Database {
             let remote_url = git_remote_origin(&project_path);
             self.add_project(workspace_id, &name, &normalized_path, remote_url.as_deref())?;
         }
+        // Register git submodules of each top-level project as child projects.
+        let parents: Vec<Project> = {
+            let mut stmt = conn.prepare(
+                "select id, workspace_id, name, path, remote_url, parent_project_id,
+                        is_submodule, submodule_path, created_at
+                 from projects
+                 where workspace_id = ?1 and is_submodule = 0",
+            )?;
+            let rows = stmt.query_map([workspace_id], project_from_row)?;
+            collect_rows(rows)?
+        };
+        for parent in parents {
+            self.reconcile_submodules_recursive(workspace_id, &conn, &parent, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Register the (initialized) git submodules of `parent` as child projects,
+    /// recursing into nested submodules; deregister children no longer present in
+    /// the parent's `.gitmodules`. Depth-bounded to avoid pathological chains.
+    fn reconcile_submodules_recursive(
+        &self,
+        workspace_id: i64,
+        conn: &Connection,
+        parent: &Project,
+        depth: u32,
+    ) -> anyhow::Result<()> {
+        if depth > 5 {
+            return Ok(());
+        }
+        let gitmodules = Path::new(&parent.path).join(".gitmodules");
+        let entries = if gitmodules.is_file() {
+            parse_gitmodules(&gitmodules)
+        } else {
+            Vec::new()
+        };
+        let mut present: Vec<String> = Vec::new();
+        for entry in &entries {
+            let sub_abs = normalize_project_path(
+                &Path::new(&parent.path)
+                    .join(&entry.path)
+                    .display()
+                    .to_string(),
+            );
+            // Only register initialized submodules (a `.git` file/dir is present).
+            if !Path::new(&sub_abs).join(".git").exists() {
+                continue;
+            }
+            present.push(entry.path.clone());
+            let name = Path::new(&entry.path)
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| entry.path.clone());
+            let child = self.add_submodule_project(
+                workspace_id,
+                parent.id,
+                &name,
+                &sub_abs,
+                entry.url.as_deref(),
+                &entry.path,
+            )?;
+            self.reconcile_submodules_recursive(workspace_id, conn, &child, depth + 1)?;
+        }
+        // Deregister child submodule-projects no longer present in `.gitmodules`.
+        let stale: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "select id, submodule_path from projects
+                 where workspace_id = ?1 and parent_project_id = ?2 and is_submodule = 1",
+            )?;
+            let rows = stmt.query_map(params![workspace_id, parent.id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
+            let mut ids = Vec::new();
+            for row in rows {
+                let (id, sub_path) = row?;
+                let keep = sub_path
+                    .as_deref()
+                    .map(|value| present.iter().any(|item| item == value))
+                    .unwrap_or(false);
+                if !keep {
+                    ids.push(id);
+                }
+            }
+            ids
+        };
+        for id in stale {
+            conn.execute("delete from projects where id = ?1", [id])?;
+        }
         Ok(())
     }
 
@@ -2807,21 +2936,13 @@ impl Database {
         path: &str,
     ) -> anyhow::Result<Option<Project>> {
         conn.query_row(
-            "select id, workspace_id, name, path, remote_url, created_at
+            "select id, workspace_id, name, path, remote_url, parent_project_id,
+                    is_submodule, submodule_path, created_at
              from projects
              where workspace_id = ?1 and path = ?2
              limit 1",
             params![workspace_id, path],
-            |row| {
-                Ok(Project {
-                    id: row.get(0)?,
-                    workspace_id: row.get(1)?,
-                    name: row.get(2)?,
-                    path: row.get(3)?,
-                    remote_url: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            },
+            project_from_row,
         )
         .optional()
         .map_err(Into::into)
@@ -3161,6 +3282,9 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
               name text not null,
               path text not null,
               remote_url text,
+              parent_project_id integer,
+              is_submodule integer not null default 0,
+              submodule_path text,
               created_at text not null
             );
 
@@ -3506,6 +3630,9 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
     ensure_column(conn, "requirement_cards", "archived_from_status", "text")?;
     ensure_column(conn, "requirement_cards", "archived_at", "text")?;
     ensure_column(conn, "requirement_cards", "flow_id", "text")?;
+    ensure_column(conn, "projects", "parent_project_id", "integer")?;
+    ensure_column(conn, "projects", "is_submodule", "integer not null default 0")?;
+    ensure_column(conn, "projects", "submodule_path", "text")?;
     ensure_column(
         conn,
         "requirement_cards",
@@ -3759,6 +3886,20 @@ fn rewrite_table_path_column(
     Ok(())
 }
 
+fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        name: row.get(2)?,
+        path: row.get(3)?,
+        remote_url: row.get(4)?,
+        parent_project_id: row.get(5)?,
+        is_submodule: row.get::<_, i64>(6)? != 0,
+        submodule_path: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
 fn find_project_by_equivalent_path_with_conn(
     conn: &Connection,
     workspace_id: i64,
@@ -3766,20 +3907,12 @@ fn find_project_by_equivalent_path_with_conn(
 ) -> anyhow::Result<Option<Project>> {
     let target_key = project_path_identity(path);
     let mut stmt = conn.prepare(
-        "select id, workspace_id, name, path, remote_url, created_at
+        "select id, workspace_id, name, path, remote_url, parent_project_id,
+                is_submodule, submodule_path, created_at
          from projects
          where workspace_id = ?1",
     )?;
-    let rows = stmt.query_map([workspace_id], |row| {
-        Ok(Project {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            name: row.get(2)?,
-            path: row.get(3)?,
-            remote_url: row.get(4)?,
-            created_at: row.get(5)?,
-        })
-    })?;
+    let rows = stmt.query_map([workspace_id], project_from_row)?;
     for row in rows {
         let project = row?;
         if project_path_identity(&project.path) == target_key {
@@ -4606,6 +4739,55 @@ fn project_blueprint_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Proje
         created_at: row.get(17)?,
         updated_at: row.get(18)?,
     })
+}
+
+struct GitmoduleEntry {
+    path: String,
+    url: Option<String>,
+}
+
+/// Minimal `.gitmodules` parser: returns the `path`/`url` of each `[submodule]`
+/// block (branch and other keys are ignored).
+fn parse_gitmodules(gitmodules_path: &Path) -> Vec<GitmoduleEntry> {
+    let Ok(content) = std::fs::read_to_string(gitmodules_path) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<GitmoduleEntry> = Vec::new();
+    let mut path: Option<String> = None;
+    let mut url: Option<String> = None;
+    let mut in_submodule = false;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            if in_submodule {
+                if let Some(p) = path.take() {
+                    entries.push(GitmoduleEntry { path: p, url: url.clone() });
+                }
+            }
+            path = None;
+            url = None;
+            in_submodule = line.starts_with("[submodule");
+            continue;
+        }
+        if !in_submodule {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("path") {
+            if let Some((_, value)) = rest.split_once('=') {
+                path = Some(value.trim().to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("url") {
+            if let Some((_, value)) = rest.split_once('=') {
+                url = Some(value.trim().to_string());
+            }
+        }
+    }
+    if in_submodule {
+        if let Some(p) = path.take() {
+            entries.push(GitmoduleEntry { path: p, url });
+        }
+    }
+    entries.into_iter().filter(|entry| !entry.path.is_empty()).collect()
 }
 
 fn discover_workspace_git_projects(root_path: &str) -> anyhow::Result<Vec<PathBuf>> {
