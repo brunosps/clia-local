@@ -3,6 +3,9 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
+  Copy,
+  Eye,
+  Monitor,
   Package,
   Play,
   RefreshCw,
@@ -39,7 +42,7 @@ import {
   sortDeployStacks,
   type DeployProgressEntry,
 } from "./deploy";
-import { machineStatusLabel, sortMachines } from "./machines";
+import { machineAccessUser, machineSshCommand, machineStatusLabel, sortMachines } from "./machines";
 import MachinesPanel from "./MachinesPanel";
 import { api } from "./tauri";
 import type {
@@ -52,6 +55,7 @@ import type {
   DeployStack,
   DeployStackDetail,
   DeployVersion,
+  MachinePreset,
   Project,
   Workspace,
   WorkspaceMachine,
@@ -127,24 +131,27 @@ function DeploySubnav({
   onViewChange: (view: "deploy" | "machines") => void;
 }) {
   return (
-    <div className="deploy-subnav" role="tablist" aria-label="Deploy">
+    <div className="topbar-tabs deploy-subnav" role="tablist" aria-label="Deploy">
       <button
-        className={view === "deploy" ? "git-nav active" : "git-nav"}
+        className={view === "deploy" ? "topbar-tab active" : "topbar-tab"}
         type="button"
         role="tab"
         aria-selected={view === "deploy"}
         onClick={() => onViewChange("deploy")}
       >
-        Deploy
+        Stacks
       </button>
       <button
-        className={view === "machines" ? "git-nav active" : "git-nav"}
+        className={view === "machines" ? "topbar-tab active" : "topbar-tab"}
         type="button"
         role="tab"
         aria-selected={view === "machines"}
         onClick={() => onViewChange("machines")}
       >
         Máquinas
+      </button>
+      <button className="topbar-tab" type="button" role="tab" aria-selected={false} disabled>
+        Histórico
       </button>
     </div>
   );
@@ -170,6 +177,7 @@ export default function DeployPackagesPanel({
   const [stacks, setStacks] = useState<DeployStack[]>([]);
   const [detail, setDetail] = useState<DeployStackDetail | null>(null);
   const [machines, setMachines] = useState<WorkspaceMachine[]>([]);
+  const [machinePresets, setMachinePresets] = useState<MachinePreset[]>([]);
   const [agentProfiles, setAgentProfiles] = useState<AgentProfile[]>([]);
   const [selectedStackId, setSelectedStackId] = useState<string | null>(null);
   const [selectedProjectIds, setSelectedProjectIds] = useState<number[]>(() =>
@@ -428,9 +436,10 @@ export default function DeployPackagesPanel({
   const reload = useCallback(async () => {
     setBusy(true);
     setError("");
-    const [stackResult, machineResult, agentResult] = await Promise.all([
+    const [stackResult, machineResult, presetResult, agentResult] = await Promise.all([
       api.listDeployStacks(workspace.id),
       api.listWorkspaceMachines(workspace.id),
+      api.listMachinePresets(),
       api.listAgentProfiles(workspace.id, null),
     ]);
     if (stackResult.ok) {
@@ -468,6 +477,11 @@ export default function DeployPackagesPanel({
       });
     } else {
       setError(machineResult.error);
+    }
+    if (presetResult.ok) {
+      setMachinePresets(presetResult.value);
+    } else {
+      setError(presetResult.error);
     }
     if (agentResult.ok) {
       setAgentProfiles(agentResult.value);
@@ -843,6 +857,51 @@ export default function DeployPackagesPanel({
     setBusy(false);
   }
 
+  async function copyMachineSsh(machine: WorkspaceMachine) {
+    try {
+      await navigator.clipboard.writeText(machineSshCommand(machine));
+      setError("");
+    } catch {
+      setError("clipboard_unavailable: copie o comando SSH manualmente.");
+    }
+  }
+
+  async function openMachineConsole(machine: WorkspaceMachine) {
+    setBusy(true);
+    const result = await api.openWorkspaceMachine(machine.id);
+    if (!result.ok) setError(deployErrorMessage(result.error));
+    setBusy(false);
+  }
+
+  async function restartMachine(machine: WorkspaceMachine) {
+    setBusy(true);
+    setError("");
+    const stop = machine.status === "running" ? await api.stopWorkspaceMachine(machine.id) : null;
+    if (stop && !stop.ok) {
+      setError(deployErrorMessage(stop.error));
+      setBusy(false);
+      return;
+    }
+    const start = await api.startWorkspaceMachine(machine.id);
+    if (start.ok) await reload();
+    else setError(deployErrorMessage(start.error));
+    setBusy(false);
+  }
+
+  function machinePreset(machine: WorkspaceMachine) {
+    return machinePresets.find((preset) => preset.id === machine.preset_id) ?? null;
+  }
+
+  function runProgress(run: DeployRun) {
+    const runEntries = progressForDeploy(progress, { runId: run.id });
+    const latest = runEntries[runEntries.length - 1] ?? null;
+    if (latest?.percent != null) return Math.max(4, Math.min(100, latest.percent));
+    if (run.status === "passed" || run.status === "success") return 100;
+    if (run.status === "failed") return 35;
+    if (run.status === "running" || run.status === "started") return 65;
+    return 12;
+  }
+
   async function runNextAction() {
     switch (nextAction.action) {
       case "create":
@@ -1034,7 +1093,10 @@ export default function DeployPackagesPanel({
   if (view === "machines") {
     return (
       <section className="deploy-combined-panel">
-        <DeploySubnav view={view} onViewChange={setView} />
+        <header className="deploy-topbar screen-topbar">
+          <span className="topbar-title">Deploy</span>
+          <DeploySubnav view={view} onViewChange={setView} />
+        </header>
         <MachinesPanel activeProject={activeProject} confirm={confirm} workspace={workspace} />
       </section>
     );
@@ -1042,22 +1104,16 @@ export default function DeployPackagesPanel({
 
   return (
     <div className="deploy-panel">
-      <DeploySubnav view={view} onViewChange={setView} />
-      <header className="deploy-header">
-        <div>
-          <p className="eyebrow">Workspace deploy packages</p>
-          <h1>Deploy guiado</h1>
-          <p>Crie o pacote, configure o ambiente local e publique em uma VM WinBox.</p>
-        </div>
-        <div className="machines-actions">
-          <button className="secondary-button" type="button" onClick={() => void reload()}>
-            <RefreshCw aria-hidden="true" size={16} /> Refresh
+      <header className="deploy-topbar screen-topbar">
+        <span className="topbar-title">Deploy</span>
+        <DeploySubnav view={view} onViewChange={setView} />
+        <div className="topbar-actions">
+          <button className="topbar-btn" type="button" onClick={() => void reload()}>
+            <RefreshCw aria-hidden="true" size={14} /> Refresh
           </button>
-          {sortedStacks.length ? (
-            <button className="primary-button" type="button" onClick={openCreatePackageModal}>
-              <Package aria-hidden="true" size={16} /> Criar pacote
-            </button>
-          ) : null}
+          <button className="topbar-btn primary" type="button" onClick={openCreatePackageModal}>
+            <Package aria-hidden="true" size={14} /> Criar pacote
+          </button>
         </div>
       </header>
 
@@ -1110,39 +1166,43 @@ export default function DeployPackagesPanel({
         </div>
       ) : null}
 
-      <div className="deploy-shell">
-        <aside className="deploy-setup" aria-label="Deploys do workspace">
+      <div className="deploy-main deploy-shell">
+        <aside className="stacks-panel deploy-setup" aria-label="Deploys do workspace">
           <section className="deploy-stack-picker" aria-label="Stacks de deploy">
-            <div className="machines-list-head">
-              <strong>{stacks.length} deploys</strong>
+            <div className="stacks-header machines-list-head">
+              <span className="stacks-title">Stacks</span>
               {busy ? <span className="status-pill pending">loading</span> : null}
             </div>
             {!sortedStacks.length ? (
-              <div className="terminal-empty">
-                <span>Nenhum deploy criado.</span>
-              </div>
+              <div className="empty-inline">Nenhum pacote ainda.</div>
             ) : (
-              <div className="machines-table">
+              <div className="stacks-list machines-table">
                 {sortedStacks.map((stack) => (
                   <button
                     key={stack.id}
                     className={
                       selectedStack?.id === stack.id
-                        ? "machine-row deploy-stack-card active"
-                        : "machine-row deploy-stack-card"
+                        ? "stack-card machine-row deploy-stack-card active"
+                        : "stack-card machine-row deploy-stack-card"
                     }
                     type="button"
                     onClick={() => setSelectedStackId(stack.id)}
                   >
-                    <span className="deploy-stack-main">
-                      <strong>{stack.name}</strong>
-                      <small>{activeVersionLabel(stack, versions)}</small>
+                    <span className="stack-header deploy-stack-main">
+                      <span className="stack-name">{stack.name}</span>
+                      <span className={`stack-status ${deployStatusTone(stack.status)}`}>
+                        {deployStatusLabel(stack.status)}
+                      </span>
                     </span>
-                    <span className={`machine-status ${deployStatusTone(stack.status)}`}>
-                      {deployStatusLabel(stack.status)}
-                    </span>
-                    <span className="deploy-stack-activity">
-                      {stack.active_machine_id ? "active" : "idle"}
+                    <span className="stack-meta">
+                      <span className="stack-meta-item">
+                        <Package aria-hidden="true" size={12} />
+                        {activeVersionLabel(stack, versions)}
+                      </span>
+                      <span className="stack-meta-item">
+                        <Monitor aria-hidden="true" size={12} />
+                        {stack.active_machine_id ? "active" : "idle"}
+                      </span>
                     </span>
                   </button>
                 ))}
@@ -1151,22 +1211,236 @@ export default function DeployPackagesPanel({
           </section>
         </aside>
 
-        <main className="deploy-wizard" aria-label="Fluxo guiado de deploy">
+        <main className="detail-panel deploy-wizard" aria-label="Fluxo guiado de deploy">
           {selectedStack && selectedVersion ? (
             <>
-              <div className="deploy-wizard-head">
+              <div className="detail-header deploy-wizard-head">
                 <div>
-                  <h2>{selectedStack.name}</h2>
-                  <p>
+                  <h2 className="detail-title">{selectedStack.name}</h2>
+                  <p className="topbar-path">
                     {selectedVersion.label} · {selectedMachine?.display_name ?? "sem target"}
                   </p>
                 </div>
-                <span className={`machine-status ${deployStatusTone(selectedVersion.status)}`}>
-                  {deployStatusLabel(selectedVersion.status)}
-                </span>
+                <div className="detail-actions">
+                  <button
+                    className="topbar-btn"
+                    type="button"
+                    onClick={() =>
+                      latestRepair.patchPending
+                        ? void createRepairVersion()
+                        : void prepareTarget()
+                    }
+                    disabled={busy || (!latestRepair.patchPending && !prepareReady)}
+                  >
+                    <Upload aria-hidden="true" size={14} /> Reparar
+                  </button>
+                  <button
+                    className="topbar-btn"
+                    type="button"
+                    onClick={() => void approveVersion()}
+                    disabled={busy || !canApproveVersion(selectedVersion)}
+                  >
+                    <Check aria-hidden="true" size={14} /> Validar
+                  </button>
+                  <button
+                    className="topbar-btn primary"
+                    type="button"
+                    onClick={() => void deploySelected()}
+                    disabled={busy || !deployReady}
+                  >
+                    <Play aria-hidden="true" size={14} /> Deploy
+                  </button>
+                </div>
+                <div className="envs-row">
+                  <article className="env-card">
+                    <div className="env-header">
+                      <span className="env-name dev">Versão local</span>
+                      <span className="env-status active" />
+                    </div>
+                    <div className="env-version">{selectedVersion.label}</div>
+                    <div className="env-time">{selectedVersion.updated_at.slice(0, 19)}</div>
+                  </article>
+                  <article className="env-card">
+                    <div className="env-header">
+                      <span className="env-name staging">Review</span>
+                      <span
+                        className={
+                          readiness.reviewClean ? "env-status active" : "env-status inactive"
+                        }
+                      />
+                    </div>
+                    <div className="env-version">{selectedVersion.review_status}</div>
+                    <div className="env-time">{environmentSummary}</div>
+                  </article>
+                  <article className="env-card">
+                    <div className="env-header">
+                      <span className="env-name prod">Target</span>
+                      <span
+                        className={
+                          readiness.targetReady ? "env-status active" : "env-status inactive"
+                        }
+                      />
+                    </div>
+                    <div className="env-version">
+                      {selectedMachine?.display_name ?? "sem VM"}
+                    </div>
+                    <div className="env-time">
+                      {selectedMachine ? machineStatusLabel(selectedMachine.status) : "não selecionado"}
+                    </div>
+                  </article>
+                </div>
               </div>
 
+              <div className="detail-tabs">
+                <span className="detail-tab active">Runs</span>
+                <span className="detail-tab">Validações</span>
+                <span className="detail-tab">Configuração</span>
+              </div>
+
+              <div className="detail-content">
               {renderNextActionCard()}
+
+              <section className="runs-list" aria-label="Runs de deploy">
+                {runs.length ? (
+                  runs.slice(0, 5).map((run) => {
+                    const statusTone =
+                      run.status === "failed"
+                        ? "failed"
+                        : run.status === "passed" || run.status === "success"
+                          ? "success"
+                          : "running";
+                    return (
+                      <button
+                        key={run.id}
+                        className="run-item"
+                        type="button"
+                        onClick={() => void loadRunLogs(run)}
+                      >
+                        <span className="run-header">
+                          <span className={`run-status-icon ${statusTone}`}>
+                            {statusTone === "success" ? (
+                              <Check aria-hidden="true" size={18} />
+                            ) : statusTone === "failed" ? (
+                              <AlertTriangle aria-hidden="true" size={18} />
+                            ) : (
+                              <RefreshCw aria-hidden="true" size={18} />
+                            )}
+                          </span>
+                          <span className="run-info">
+                            <span className="run-title">{run.operation}</span>
+                            <span className="run-meta">
+                              <span>{run.status}</span>
+                              <span>{run.started_at}</span>
+                              {run.agent_name ? <span>{run.agent_name}</span> : null}
+                            </span>
+                          </span>
+                          <span className="run-duration">{run.completed_at ? "ok" : "ativo"}</span>
+                        </span>
+                        <span className="run-progress">
+                          <span
+                            className={`run-progress-bar ${statusTone}`}
+                            style={{ width: `${runProgress(run)}%` }}
+                          />
+                        </span>
+                      </button>
+                    );
+                  })
+                ) : (
+                  <div className="empty-note">Nenhum run para este pacote.</div>
+                )}
+              </section>
+
+              <section className="machines-section" aria-label="Máquinas WinBox">
+                <div className="section-header">
+                  <h3 className="section-title">Máquinas</h3>
+                  <button className="topbar-btn" type="button" onClick={() => setView("machines")}>
+                    <Monitor aria-hidden="true" size={14} /> Ver todas
+                  </button>
+                </div>
+                <div className="machines-grid deploy-machines-grid">
+                  {machines.slice(0, 4).map((machine) => {
+                    const preset = machinePreset(machine);
+                    return (
+                      <article className="machine-card" key={machine.id}>
+                        <div className="machine-header">
+                          <div className="machine-icon">
+                            <Monitor aria-hidden="true" size={20} />
+                          </div>
+                          <div className="machine-info">
+                            <div className="machine-name">{machine.display_name}</div>
+                            <div className="machine-provider">
+                              WinBox · {machine.provider_runtime} · {machine.provider_profile}
+                            </div>
+                          </div>
+                          <span className={`machine-status ${machineStatusLabel(machine.status)}`}>
+                            {machineStatusLabel(machine.status)}
+                          </span>
+                        </div>
+                        <div className="machine-specs">
+                          <div className="machine-spec">
+                            <div className="machine-spec-value">
+                              {preset?.default_cpu ?? machine.ssh_port ?? "-"}
+                            </div>
+                            <div className="machine-spec-label">
+                              {preset ? "CPU" : "SSH"}
+                            </div>
+                          </div>
+                          <div className="machine-spec">
+                            <div className="machine-spec-value">
+                              {preset?.default_ram ?? machine.rdp_port ?? "-"}
+                            </div>
+                            <div className="machine-spec-label">
+                              {preset ? "RAM" : "RDP"}
+                            </div>
+                          </div>
+                          <div className="machine-spec">
+                            <div className="machine-spec-value">
+                              {preset?.default_disk ?? machine.web_port ?? "-"}
+                            </div>
+                            <div className="machine-spec-label">
+                              {preset ? "DISK" : "WEB"}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="machine-actions">
+                          <button
+                            className="machine-btn"
+                            type="button"
+                            onClick={() => void copyMachineSsh(machine)}
+                            disabled={!machine.ssh_port}
+                            title={
+                              machine.ssh_port
+                                ? `SSH como ${machineAccessUser(machine) || "usuário local"}`
+                                : "Sem SSH"
+                            }
+                          >
+                            <Copy aria-hidden="true" size={14} /> SSH
+                          </button>
+                          <button
+                            className="machine-btn"
+                            type="button"
+                            onClick={() => void openMachineConsole(machine)}
+                            disabled={busy}
+                          >
+                            <Eye aria-hidden="true" size={14} /> Console
+                          </button>
+                          <button
+                            className="machine-btn"
+                            type="button"
+                            onClick={() => void restartMachine(machine)}
+                            disabled={busy}
+                          >
+                            <RefreshCw aria-hidden="true" size={14} /> Restart
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                  {!machines.length ? (
+                    <div className="empty-note">Nenhuma máquina WinBox criada.</div>
+                  ) : null}
+                </div>
+              </section>
 
               {latestRepair.attemptCount || latestRepair.patchPending ? (
                 <section className="deploy-wizard-step compact">
@@ -1585,11 +1859,20 @@ export default function DeployPackagesPanel({
                   </section>
                 </div>
               </details>
+              </div>
             </>
           ) : (
-            <div className="deploy-empty-start">
-              {renderNextActionCard()}
-              <div className="terminal-empty">Crie ou selecione uma stack para começar.</div>
+            <div className="empty-state">
+              <span className="empty-state-icon">
+                <Package aria-hidden="true" size={26} />
+              </span>
+              <h3 className="empty-state-title">Nenhum pacote de deploy ainda</h3>
+              <p className="empty-state-desc">
+                Crie um pacote para empacotar seus projetos e publicar nas suas VMs locais (WinBox).
+              </p>
+              <button className="topbar-btn primary" type="button" onClick={openCreatePackageModal}>
+                <Package aria-hidden="true" size={14} /> Criar pacote
+              </button>
             </div>
           )}
         </main>

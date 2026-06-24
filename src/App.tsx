@@ -33,6 +33,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Search,
   Send,
   Settings,
   Sparkles,
@@ -3645,6 +3646,7 @@ export function App() {
 
   // clia-local: no cloud login or cloud-install gates. The app goes straight to the
   // workspace UI; creating/opening workspaces is fully local.
+  const activeTabLabel = t(navItems.find((item) => item.id === activeTab)?.labelKey ?? "nav.queue");
 
   return (
     <>
@@ -3697,6 +3699,7 @@ export function App() {
 
         <section className="main-column">
           <header className="topbar">
+            <div className="topbar-screen-title">{activeTabLabel}</div>
             <nav className="context-breadcrumb" aria-label={t("topbar.activeContext")}>
               <button
                 className="context-crumb"
@@ -5459,6 +5462,29 @@ function priorityLabel(priority: string): string {
   return "Média";
 }
 
+function priorityCode(priority: string): string {
+  if (priority === "high") return "P0";
+  if (priority === "low") return "P2";
+  return "P1";
+}
+
+function priorityClass(priority: string): string {
+  if (priority === "high") return "p0";
+  if (priority === "low") return "p2";
+  return "p1";
+}
+
+function queueAttachmentCount(card: QueueCard): number {
+  const raw = card.raw as RequirementCard & {
+    attachment_count?: number;
+    attachments_count?: number;
+    attachments?: unknown[];
+  };
+  if (typeof raw.attachment_count === "number") return raw.attachment_count;
+  if (typeof raw.attachments_count === "number") return raw.attachments_count;
+  return Array.isArray(raw.attachments) ? raw.attachments.length : 0;
+}
+
 function QueuePanel({
   cards,
   projects,
@@ -5512,9 +5538,18 @@ function QueuePanel({
     <section className="queue-panel" aria-labelledby="queue-title">
       <header className="queue-header">
         <div>
-          <span className="section-label">CLIA LOCAL</span>
-          <h1 id="queue-title">Tarefas</h1>
-          <p>Quadro do workspace ativo. Arraste uma tarefa entre as colunas para movê-la.</p>
+          <h2 className="queue-title" id="queue-title">
+            Minha Fila
+          </h2>
+          <p>Quadro local do workspace ativo.</p>
+        </div>
+        <div className="queue-stats">
+          <span className="queue-stat">
+            <span className="queue-stat-num">{queue.items.length}</span> cards
+          </span>
+          <span className="queue-stat">
+            <span className="queue-stat-num">{projects.length}</span> projetos
+          </span>
         </div>
         <div className="queue-card-actions">
           <button className="primary-button" type="button" onClick={onCreateCard}>
@@ -5529,18 +5564,18 @@ function QueuePanel({
       </header>
 
       {projects.length ? (
-        <div className="queue-filter" role="group" aria-label="Filtrar por projeto">
+        <div className="queue-filter detail-tabs" role="group" aria-label="Filtrar por projeto">
           <button
-            className={projectFilter == null ? "chip active" : "chip"}
+            className={projectFilter == null ? "detail-tab active" : "detail-tab"}
             type="button"
             onClick={() => onChangeProjectFilter(null)}
           >
-            Todos os projetos
+            Todos
           </button>
           {projects.map((project) => (
             <button
               key={project.id}
-              className={projectFilter === project.id ? "chip active" : "chip"}
+              className={projectFilter === project.id ? "detail-tab active" : "detail-tab"}
               type="button"
               onClick={() => onChangeProjectFilter(project.id)}
             >
@@ -5557,7 +5592,7 @@ function QueuePanel({
       {!loaded ? (
         <PanelLoading label="Tarefas" />
       ) : (
-        <div className="kanban-board">
+        <div className="queue-kanban kanban-board">
           {QUEUE_BUCKETS.map((bucket) => (
             <QueueColumn
               key={bucket.id}
@@ -5596,7 +5631,7 @@ function QueueColumn({
   const [over, setOver] = useState(false);
   return (
     <div
-      className={["kanban-column", `kanban-${bucket}`, over ? "over" : ""]
+      className={["queue-column", bucket, "kanban-column", `kanban-${bucket}`, over ? "over" : ""]
         .filter(Boolean)
         .join(" ")}
       onDragOver={(event) => {
@@ -5611,14 +5646,14 @@ function QueueColumn({
         if (Number.isFinite(cardId)) onDropCardId(cardId, bucket);
       }}
     >
-      <header className="kanban-column-head">
-        <span className="kanban-column-title">
-          <span className="kanban-column-dot" aria-hidden="true" />
+      <header className="queue-column-header kanban-column-head">
+        <span className="queue-column-title kanban-column-title">
+          <span className="queue-column-dot kanban-column-dot" aria-hidden="true" />
           {label}
         </span>
-        <span className="kanban-count">{cards.length}</span>
+        <span className="queue-column-count kanban-count">{cards.length}</span>
       </header>
-      <div className="kanban-column-body">
+      <div className="queue-column-cards kanban-column-body">
         {cards.map((card) => (
           <TaskCardView
             key={card.cardId}
@@ -5645,35 +5680,50 @@ function TaskCardView({
   onOpen: (cardId: number) => void;
   onArchive: (card: QueueCard) => void;
 }) {
+  const attachmentCount = queueAttachmentCount(card);
   return (
     <article
-      className={pending ? "kanban-card pending" : "kanban-card"}
+      className={pending ? "queue-card kanban-card pending" : "queue-card kanban-card"}
       draggable
       onDragStart={(event) => event.dataTransfer.setData("text/plain", String(card.cardId))}
       onClick={() => onOpen(card.cardId)}
     >
-      <div className="kanban-card-meta">
-        <span className={`priority-pill ${card.priority}`}>{priorityLabel(card.priority)}</span>
-        <span className="kanban-card-id">{card.publicId}</span>
+      <div className="queue-card-header kanban-card-meta">
+        <span className="queue-card-id kanban-card-id">{card.publicId}</span>
+        <span
+          className={`queue-card-priority ${priorityClass(card.priority)} priority-pill ${card.priority}`}
+          title={priorityLabel(card.priority)}
+        >
+          {priorityCode(card.priority)}
+        </span>
       </div>
-      <h3>{card.title}</h3>
-      {card.projectNames.length ? (
-        <div className="kanban-card-projects">
-          {card.projectNames.map((name) => (
-            <span key={name} className="chip small">
-              {name}
-            </span>
-          ))}
-        </div>
-      ) : null}
-      <div className="kanban-card-foot">
+      <h3 className="queue-card-title">{card.title}</h3>
+      <div className="queue-card-meta">
+        <span className="queue-card-meta-item">
+          <FolderGit2 aria-hidden="true" size={12} />
+          {card.projectNames[0] ?? "Sem projeto"}
+        </span>
         {card.checklistTotal ? (
-          <span className="kanban-card-checklist">
-            <Check aria-hidden="true" size={13} /> {card.checklistDone}/{card.checklistTotal}
+          <span className="queue-card-meta-item kanban-card-checklist">
+            <ListChecks aria-hidden="true" size={12} />
+            {card.checklistDone}/{card.checklistTotal}
           </span>
-        ) : (
-          <span />
-        )}
+        ) : null}
+        {attachmentCount ? (
+          <span className="queue-card-meta-item">
+            <FileText aria-hidden="true" size={12} />
+            {attachmentCount} docs
+          </span>
+        ) : null}
+        {card.agentPrompt.trim() ? (
+          <span className="queue-card-meta-item">
+            <Bot aria-hidden="true" size={12} />
+            agente
+          </span>
+        ) : null}
+      </div>
+      <div className="kanban-card-foot">
+        <span />
         <button
           className="ghost-button"
           type="button"
@@ -6714,6 +6764,9 @@ function WorkspaceSettingsPanel({
   const [rtkStatuses, setRtkStatuses] = useState<Record<number, RtkStatus>>({});
   const [rtkBusyProfileId, setRtkBusyProfileId] = useState<number | null>(null);
   const [rtkError, setRtkError] = useState("");
+  const [activeSettingsSection, setActiveSettingsSection] = useState<
+    "theme" | "accent" | "language" | "editor" | "rtk"
+  >("theme");
 
   async function refreshRtkStatus(profile: AgentProfile) {
     const result = await api.getRtkStatus(profile.id, rtkProjectPath);
@@ -6815,266 +6868,340 @@ function WorkspaceSettingsPanel({
     };
   }, [agentProfiles, rtkProjectPath]);
 
+  const settingsNavGroups: Array<{
+    title: string;
+    items: Array<{
+      id: typeof activeSettingsSection;
+      label: string;
+      icon: ReactNode;
+    }>;
+  }> = [
+    {
+      title: "Aparência",
+      items: [
+        { id: "theme", label: "Tema", icon: <CircleDot aria-hidden="true" size={16} /> },
+        { id: "accent", label: "Cor de destaque", icon: <Pencil aria-hidden="true" size={16} /> },
+        { id: "language", label: "Idioma", icon: <Settings aria-hidden="true" size={16} /> },
+        { id: "editor", label: "Tipografia", icon: <Code2 aria-hidden="true" size={16} /> },
+      ],
+    },
+    {
+      title: "Agentes",
+      items: [{ id: "rtk", label: "Agent RTK", icon: <Bot aria-hidden="true" size={16} /> }],
+    },
+  ];
+
   return (
     <section className="settings-panel" aria-labelledby="workspace-settings-title">
-      <div className="settings-panel-heading">
-        <div>
-          <span>{t("workspace.settings.eyebrow")}</span>
-          <h2 id="workspace-settings-title">{t("workspace.settings.title")}</h2>
-          <p>{workspace.name}</p>
-        </div>
-      </div>
+      <header className="settings-topbar screen-topbar">
+        <span className="topbar-title" id="workspace-settings-title">
+          Settings
+        </span>
+        <span className="topbar-path">{workspace.name}</span>
+      </header>
 
       <div className="settings-main">
         <aside className="settings-nav" aria-label="Seções de configurações">
-          <div className="settings-nav-section">
-            <div className="settings-nav-title">Aparência</div>
-            <div className="settings-nav-items">
-              <a className="settings-nav-item active" href="#settings-appearance">
-                Tema
-              </a>
-              <a className="settings-nav-item" href="#settings-language">
-                Idioma
-              </a>
+          {settingsNavGroups.map((group) => (
+            <div className="settings-nav-section" key={group.title}>
+              <div className="settings-nav-title">{group.title}</div>
+              <div className="settings-nav-items">
+                {group.items.map((item) => (
+                  <button
+                    className={
+                      activeSettingsSection === item.id
+                        ? "settings-nav-item active"
+                        : "settings-nav-item"
+                    }
+                    key={item.id}
+                    type="button"
+                    aria-current={activeSettingsSection === item.id ? "page" : undefined}
+                    onClick={() => setActiveSettingsSection(item.id)}
+                  >
+                    {item.icon}
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-          <div className="settings-nav-section">
-            <div className="settings-nav-title">Editor</div>
-            <div className="settings-nav-items">
-              <a className="settings-nav-item" href="#settings-editor">
-                Fonte
-              </a>
-            </div>
-          </div>
-          <div className="settings-nav-section">
-            <div className="settings-nav-title">Agentes</div>
-            <div className="settings-nav-items">
-              <a className="settings-nav-item" href="#settings-rtk">
-                RTK
-              </a>
-            </div>
-          </div>
+          ))}
         </aside>
 
         <div className="workspace-settings-form settings-page-form settings-content">
-        <section className="settings-section" id="settings-appearance">
-          <div>
-            <div className="section-label">{t("workspace.settings.theme.title")}</div>
-            <p>{t("workspace.settings.theme.description")}</p>
-          </div>
-          <div
-            className="theme-control"
-            role="radiogroup"
-            aria-label={t("workspace.settings.theme.title")}
-          >
-            <button
-              className={themeMode === "clia" ? "theme-choice active" : "theme-choice"}
-              type="button"
-              aria-pressed={themeMode === "clia"}
-              onClick={() => onThemeModeChange("clia")}
-            >
-              <span className="theme-preview theme-preview-clia" aria-hidden="true" />
-              {t("workspace.settings.theme.clia")}
-            </button>
-            <button
-              className={themeMode === "black" ? "theme-choice active" : "theme-choice"}
-              type="button"
-              aria-pressed={themeMode === "black"}
-              onClick={() => onThemeModeChange("black")}
-            >
-              <span className="theme-preview theme-preview-black" aria-hidden="true" />
-              {t("workspace.settings.theme.black")}
-            </button>
-          </div>
-        </section>
+          {activeSettingsSection === "theme" ? (
+            <section className="settings-section" id="settings-appearance">
+              <h2 className="settings-section-title">{t("workspace.settings.theme.title")}</h2>
+              <p className="settings-section-desc">{t("workspace.settings.theme.description")}</p>
+              <div className="settings-group">
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <div className="settings-row-label">{t("workspace.settings.theme.title")}</div>
+                    <div className="settings-row-hint">
+                      {t("workspace.settings.theme.description")}
+                    </div>
+                  </div>
+                  <div
+                    className="settings-row-control theme-control"
+                    role="radiogroup"
+                    aria-label={t("workspace.settings.theme.title")}
+                  >
+                    <button
+                      className={themeMode === "clia" ? "theme-choice active" : "theme-choice"}
+                      type="button"
+                      aria-pressed={themeMode === "clia"}
+                      onClick={() => onThemeModeChange("clia")}
+                    >
+                      <span className="theme-preview theme-preview-clia" aria-hidden="true" />
+                      {t("workspace.settings.theme.clia")}
+                    </button>
+                    <button
+                      className={themeMode === "black" ? "theme-choice active" : "theme-choice"}
+                      type="button"
+                      aria-pressed={themeMode === "black"}
+                      onClick={() => onThemeModeChange("black")}
+                    >
+                      <span className="theme-preview theme-preview-black" aria-hidden="true" />
+                      {t("workspace.settings.theme.black")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          ) : null}
 
-        <section className="settings-section" id="settings-accent">
-          <div>
-            <div className="section-label">{t("workspace.settings.color.title")}</div>
-            <p>{t("workspace.settings.color.description")}</p>
-          </div>
-          <div className="workspace-color-control">
-            <div className="workspace-color-preview">
-              <span
-                className="workspace-color-preview-swatch"
-                style={{
-                  background: workspaceAccentColor ?? "transparent",
-                  borderColor: workspaceAccentColor ?? "#3a4656",
-                }}
-                aria-hidden="true"
-              />
-              <span>{workspaceAccentColor ?? t("common.noColor")}</span>
-            </div>
-            <div
-              className="workspace-color-swatch-grid"
-              aria-label={t("workspace.settings.color.title")}
-            >
-              {WORKSPACE_COLOR_PRESETS.map((preset) => (
-                <button
-                  key={preset.color}
-                  className={
-                    workspaceAccentColor === preset.color
-                      ? "workspace-color-swatch active"
-                      : "workspace-color-swatch"
-                  }
-                  type="button"
-                  style={{ background: preset.color }}
-                  title={preset.label}
-                  aria-label={preset.label}
-                  aria-pressed={workspaceAccentColor === preset.color}
-                  onClick={() => onWorkspaceAccentColorChange(preset.color)}
-                />
-              ))}
-            </div>
-            <button
-              className="secondary-button workspace-color-reset"
-              type="button"
-              onClick={() => onWorkspaceAccentColorChange(null)}
-              disabled={!workspaceAccentColor}
-            >
-              {t("workspace.settings.color.remove")}
-            </button>
-          </div>
-        </section>
+          {activeSettingsSection === "accent" ? (
+            <section className="settings-section" id="settings-accent">
+              <h2 className="settings-section-title">{t("workspace.settings.color.title")}</h2>
+              <p className="settings-section-desc">{t("workspace.settings.color.description")}</p>
+              <div className="settings-group">
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <div className="settings-row-label">
+                      {t("workspace.settings.color.title")}
+                    </div>
+                    <div className="settings-row-hint">
+                      {t("workspace.settings.color.description")}
+                    </div>
+                  </div>
+                  <div className="settings-row-control workspace-color-control">
+                    <div className="workspace-color-preview">
+                      <span
+                        className="workspace-color-preview-swatch"
+                        style={{
+                          background: workspaceAccentColor ?? "transparent",
+                          borderColor: workspaceAccentColor ?? "#3a4656",
+                        }}
+                        aria-hidden="true"
+                      />
+                      <span>{workspaceAccentColor ?? t("common.noColor")}</span>
+                    </div>
+                    <div
+                      className="workspace-color-swatch-grid"
+                      aria-label={t("workspace.settings.color.title")}
+                    >
+                      {WORKSPACE_COLOR_PRESETS.map((preset) => (
+                        <button
+                          key={preset.color}
+                          className={
+                            workspaceAccentColor === preset.color
+                              ? "workspace-color-swatch active"
+                              : "workspace-color-swatch"
+                          }
+                          type="button"
+                          style={{ background: preset.color }}
+                          title={preset.label}
+                          aria-label={preset.label}
+                          aria-pressed={workspaceAccentColor === preset.color}
+                          onClick={() => onWorkspaceAccentColorChange(preset.color)}
+                        />
+                      ))}
+                    </div>
+                    <button
+                      className="secondary-button workspace-color-reset"
+                      type="button"
+                      onClick={() => onWorkspaceAccentColorChange(null)}
+                      disabled={!workspaceAccentColor}
+                    >
+                      {t("workspace.settings.color.remove")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          ) : null}
 
-        <section className="settings-section" id="settings-language">
-          <div>
-            <div className="section-label">{t("workspace.settings.language.title")}</div>
-            <p>{t("workspace.settings.language.description")}</p>
-          </div>
-          <div
-            className="language-control"
-            role="radiogroup"
-            aria-label={t("workspace.settings.language.title")}
-          >
-            <button
-              className={locale === "en" ? "language-choice active" : "language-choice"}
-              type="button"
-              aria-pressed={locale === "en"}
-              onClick={() => onLocaleChange("en")}
-            >
-              {t("workspace.settings.language.en")}
-            </button>
-            <button
-              className={locale === "pt-BR" ? "language-choice active" : "language-choice"}
-              type="button"
-              aria-pressed={locale === "pt-BR"}
-              onClick={() => onLocaleChange("pt-BR")}
-            >
-              {t("workspace.settings.language.ptBR")}
-            </button>
-          </div>
-        </section>
+          {activeSettingsSection === "language" ? (
+            <section className="settings-section" id="settings-language">
+              <h2 className="settings-section-title">{t("workspace.settings.language.title")}</h2>
+              <p className="settings-section-desc">
+                {t("workspace.settings.language.description")}
+              </p>
+              <div className="settings-group">
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <div className="settings-row-label">
+                      {t("workspace.settings.language.title")}
+                    </div>
+                    <div className="settings-row-hint">
+                      {t("workspace.settings.language.description")}
+                    </div>
+                  </div>
+                  <div
+                    className="settings-row-control language-control"
+                    role="radiogroup"
+                    aria-label={t("workspace.settings.language.title")}
+                  >
+                    <button
+                      className={locale === "en" ? "language-choice active" : "language-choice"}
+                      type="button"
+                      aria-pressed={locale === "en"}
+                      onClick={() => onLocaleChange("en")}
+                    >
+                      {t("workspace.settings.language.en")}
+                    </button>
+                    <button
+                      className={
+                        locale === "pt-BR" ? "language-choice active" : "language-choice"
+                      }
+                      type="button"
+                      aria-pressed={locale === "pt-BR"}
+                      onClick={() => onLocaleChange("pt-BR")}
+                    >
+                      {t("workspace.settings.language.ptBR")}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+          ) : null}
 
-        <section className="settings-section" id="settings-editor">
-          <div>
-            <div className="section-label">{t("workspace.settings.editor.title")}</div>
-            <p>{t("workspace.settings.editor.description")}</p>
-          </div>
-          <div className="font-size-control">
-            <input
-              type="range"
-              min={MIN_EDITOR_FONT_SIZE}
-              max={MAX_EDITOR_FONT_SIZE}
-              step={1}
-              value={editorFontSize}
-              onChange={(event) => onEditorFontSizeChange(Number(event.target.value))}
-              aria-label={t("workspace.settings.editor.title")}
-            />
-            <input
-              type="number"
-              min={MIN_EDITOR_FONT_SIZE}
-              max={MAX_EDITOR_FONT_SIZE}
-              value={editorFontSize}
-              onChange={(event) => onEditorFontSizeChange(Number(event.target.value))}
-              aria-label={t("workspace.settings.editorPx")}
-            />
-            <span className="font-size-unit">px</span>
-          </div>
-        </section>
+          {activeSettingsSection === "editor" ? (
+            <section className="settings-section" id="settings-editor">
+              <h2 className="settings-section-title">{t("workspace.settings.editor.title")}</h2>
+              <p className="settings-section-desc">{t("workspace.settings.editor.description")}</p>
+              <div className="settings-group">
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <div className="settings-row-label">
+                      {t("workspace.settings.editor.title")}
+                    </div>
+                    <div className="settings-row-hint">
+                      {t("workspace.settings.editor.description")}
+                    </div>
+                  </div>
+                  <div className="settings-row-control font-size-control">
+                    <input
+                      className="settings-slider"
+                      type="range"
+                      min={MIN_EDITOR_FONT_SIZE}
+                      max={MAX_EDITOR_FONT_SIZE}
+                      step={1}
+                      value={editorFontSize}
+                      onChange={(event) => onEditorFontSizeChange(Number(event.target.value))}
+                      aria-label={t("workspace.settings.editor.title")}
+                    />
+                    <input
+                      className="settings-number-input"
+                      type="number"
+                      min={MIN_EDITOR_FONT_SIZE}
+                      max={MAX_EDITOR_FONT_SIZE}
+                      value={editorFontSize}
+                      onChange={(event) => onEditorFontSizeChange(Number(event.target.value))}
+                      aria-label={t("workspace.settings.editorPx")}
+                    />
+                    <span className="settings-slider-value">{editorFontSize}px</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          ) : null}
 
-        <section className="settings-section rtk-settings-section" id="settings-rtk">
-          <div>
-            <div className="section-label">{t("workspace.settings.rtk.title")}</div>
-            <p>{t("workspace.settings.rtk.description")}</p>
-          </div>
-          {rtkError ? <div className="error-banner compact">{rtkError}</div> : null}
-          {agentProfiles.length ? (
-            <div className="rtk-agent-list">
-              {agentProfiles.map((profile) => {
-                const status = rtkStatuses[profile.id];
-                const busyProfile = rtkBusyProfileId === profile.id;
-                const available = Boolean(status?.available);
-                return (
-                  <article className="rtk-agent-row" key={profile.id}>
-                    <div className="rtk-agent-main">
-                      <Sparkles aria-hidden="true" size={18} />
-                      <span>
-                        <strong>{profile.name}</strong>
-                        <small>
-                          {agentProviderLabel(profile.provider)} ·{" "}
-                          {profile.rtk_enabled
-                            ? t("workspace.settings.rtk.enabled")
-                            : t("workspace.settings.rtk.disabled")}
+          {activeSettingsSection === "rtk" ? (
+            <section className="settings-section rtk-settings-section" id="settings-rtk">
+              <h2 className="settings-section-title">{t("workspace.settings.rtk.title")}</h2>
+              <p className="settings-section-desc">{t("workspace.settings.rtk.description")}</p>
+              {rtkError ? <div className="error-banner compact">{rtkError}</div> : null}
+              <div className="settings-group rtk-agent-list">
+                {agentProfiles.length ? (
+                  agentProfiles.map((profile) => {
+                    const status = rtkStatuses[profile.id];
+                    const busyProfile = rtkBusyProfileId === profile.id;
+                    const available = Boolean(status?.available);
+                    return (
+                      <article className="settings-row rtk-agent-row" key={profile.id}>
+                        <div className="rtk-agent-main">
+                          <Sparkles aria-hidden="true" size={18} />
+                          <span>
+                            <strong>{profile.name}</strong>
+                            <small>
+                              {agentProviderLabel(profile.provider)} ·{" "}
+                              {profile.rtk_enabled
+                                ? t("workspace.settings.rtk.enabled")
+                                : t("workspace.settings.rtk.disabled")}
+                            </small>
+                          </span>
+                        </div>
+                        <span className={available ? "status-pill ready" : "status-pill"}>
+                          {status?.setup_state ?? t("common.loading")}
+                        </span>
+                        <small className="rtk-agent-message">
+                          {status?.version ??
+                            status?.message ??
+                            t("workspace.settings.rtk.checking")}
                         </small>
-                      </span>
-                    </div>
-                    <span className={available ? "status-pill ready" : "status-pill"}>
-                      {status?.setup_state ?? t("common.loading")}
-                    </span>
-                    <small className="rtk-agent-message">
-                      {status?.version ?? status?.message ?? t("workspace.settings.rtk.checking")}
-                    </small>
-                    <div className="rtk-agent-actions">
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        onClick={() => void toggleRtk(profile)}
-                        disabled={busy || busyProfile}
-                      >
-                        {profile.rtk_enabled
-                          ? t("workspace.settings.rtk.disable")
-                          : t("workspace.settings.rtk.enable")}
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        onClick={() => void installRtk(profile)}
-                        disabled={busy || busyProfile}
-                        title={status?.message}
-                      >
-                        {available
-                          ? t("workspace.settings.rtk.checkInstall")
-                          : t("workspace.settings.rtk.install")}
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        onClick={() => void configureRtk(profile)}
-                        disabled={busy || busyProfile || !profile.rtk_enabled || !available}
-                        title={status?.message}
-                      >
-                        {t("workspace.settings.rtk.setup")}
-                      </button>
-                      <button
-                        className="secondary-button icon-button"
-                        type="button"
-                        onClick={() => void refreshRtkStatus(profile)}
-                        disabled={busy || busyProfile}
-                        aria-label={t("workspace.settings.rtk.refresh")}
-                        title={t("workspace.settings.rtk.refresh")}
-                      >
-                        <RefreshCw aria-hidden="true" size={14} />
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="empty-note">{t("workspace.settings.rtk.emptyAgents")}</div>
-          )}
-        </section>
+                        <div className="rtk-agent-actions">
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            onClick={() => void toggleRtk(profile)}
+                            disabled={busy || busyProfile}
+                          >
+                            {profile.rtk_enabled
+                              ? t("workspace.settings.rtk.disable")
+                              : t("workspace.settings.rtk.enable")}
+                          </button>
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            onClick={() => void installRtk(profile)}
+                            disabled={busy || busyProfile}
+                            title={status?.message}
+                          >
+                            {available
+                              ? t("workspace.settings.rtk.checkInstall")
+                              : t("workspace.settings.rtk.install")}
+                          </button>
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            onClick={() => void configureRtk(profile)}
+                            disabled={busy || busyProfile || !profile.rtk_enabled || !available}
+                            title={status?.message}
+                          >
+                            {t("workspace.settings.rtk.setup")}
+                          </button>
+                          <button
+                            className="secondary-button icon-button"
+                            type="button"
+                            onClick={() => void refreshRtkStatus(profile)}
+                            disabled={busy || busyProfile}
+                            aria-label={t("workspace.settings.rtk.refresh")}
+                            title={t("workspace.settings.rtk.refresh")}
+                          >
+                            <RefreshCw aria-hidden="true" size={14} />
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })
+                ) : (
+                  <div className="settings-row">
+                    <div className="empty-note">{t("workspace.settings.rtk.emptyAgents")}</div>
+                  </div>
+                )}
+              </div>
+            </section>
+          ) : null}
         </div>
       </div>
     </section>
@@ -7965,98 +8092,173 @@ function AgentsPanel({
           }}
         />
       ) : null}
+      <header className="agents-topbar screen-topbar">
+        <span className="topbar-title">Agents</span>
+        <div className="topbar-actions">
+          <button
+            className={rawOpen ? "topbar-btn active" : "topbar-btn"}
+            type="button"
+            onClick={() => {
+              setRawOpen((open) => !open);
+              setSessionsOpen(false);
+            }}
+            aria-pressed={rawOpen}
+          >
+            <FileText aria-hidden="true" size={14} />
+            Eventos
+          </button>
+          <button
+            className="topbar-btn"
+            type="button"
+            onClick={() => {
+              setEditingProfile(activeProfile);
+              setProfileModalOpen(true);
+            }}
+            disabled={!activeProfile}
+          >
+            <Settings aria-hidden="true" size={14} />
+            Perfis
+          </button>
+        </div>
+      </header>
       <aside className="agents-sidebar" aria-label="Agentes">
-        <button
-          className="primary-button agent-new-button"
-          type="button"
-          onClick={() => {
-            setEditingProfile(null);
-            setProfileModalOpen(true);
-          }}
-          disabled={busy}
-        >
-          <Plus aria-hidden="true" size={17} />
-          Novo agente
-        </button>
-
-        <div className="agent-list">
-          {profiles.length ? (
-            profiles.map((profile) => {
-              const profileWorking = sessions.some(
-                (session) => session.profile_id === profile.id && isAgentRunning(session),
-              );
-              return (
-                <article
-                  className={activeProfile?.id === profile.id ? "agent-row active" : "agent-row"}
-                  key={profile.id}
-                >
-                  <button
-                    className="agent-row-main"
-                    type="button"
-                    onClick={() => onSelectProfile(profile.id)}
-                  >
-                    <span className="agent-profile-avatar" aria-hidden="true">
-                      {authorInitials(profile.name).slice(0, 2)}
-                    </span>
-                    <span>
-                      <strong>{profile.name}</strong>
-                      <small>
-                        {agentProviderLabel(profile.provider)} · {profile.model || "modelo default"}
-                      </small>
-                      <small>
-                        {profile.reasoning_effort || "effort default"} · {profile.sandbox}
-                      </small>
-                      <small>
-                        {profile.context_mode === "full" ? "Full context" : "Auto Lean"}
-                        {profile.rtk_enabled ? " · RTK on" : ""}
-                      </small>
-                    </span>
-                  </button>
-                  {profileWorking ? (
-                    <span className="agent-list-status" aria-label="Agente em trabalho">
-                      <span className="agent-spinner compact" aria-hidden="true" />
-                    </span>
-                  ) : null}
-                  <button
-                    className="secondary-button icon-button agent-edit-button"
-                    type="button"
-                    onClick={() => {
-                      setEditingProfile(profile);
-                      setProfileModalOpen(true);
-                    }}
-                    aria-label={`Editar ${profile.name}`}
-                    title="Editar agente"
-                  >
-                    <Pencil aria-hidden="true" size={15} />
-                  </button>
-                </article>
-              );
-            })
-          ) : (
+        <section className="sidebar-section">
+          <div className="sidebar-section-title">
+            Perfis
             <button
-              className="agent-empty-cta"
+              className="sidebar-section-btn"
               type="button"
               onClick={() => {
                 setEditingProfile(null);
                 setProfileModalOpen(true);
               }}
               disabled={busy}
+              aria-label="Novo agente"
+              title="Novo agente"
             >
-              <Plus aria-hidden="true" size={18} />
-              <span>
-                <strong>Criar agente</strong>
-                <small>Configure um agente para executar o fluxo.</small>
-              </span>
+              <Plus aria-hidden="true" size={14} />
             </button>
-          )}
-        </div>
+          </div>
+
+          <div className="profile-list agent-list">
+            {profiles.length ? (
+              profiles.map((profile) => {
+                const profileWorking = sessions.some(
+                  (session) => session.profile_id === profile.id && isAgentRunning(session),
+                );
+                return (
+                  <article
+                    className={
+                      activeProfile?.id === profile.id
+                        ? "profile-card agent-row active"
+                        : "profile-card agent-row"
+                    }
+                    key={profile.id}
+                  >
+                    <button
+                      className="profile-card-main agent-row-main"
+                      type="button"
+                      onClick={() => onSelectProfile(profile.id)}
+                    >
+                      <span className="profile-header">
+                        <span className="profile-avatar agent-profile-avatar" aria-hidden="true">
+                          {authorInitials(profile.name).slice(0, 2)}
+                        </span>
+                        <span className="profile-name">{profile.name}</span>
+                      </span>
+                      <span className="profile-meta">
+                        <span className="profile-tag model">
+                          {profile.model || agentProviderLabel(profile.provider)}
+                        </span>
+                        <span className="profile-tag">
+                          {profile.reasoning_effort || "default"}
+                        </span>
+                        <span className="profile-tag sandbox">{profile.sandbox}</span>
+                        {profile.rtk_enabled ? <span className="profile-tag">RTK</span> : null}
+                      </span>
+                    </button>
+                    {profileWorking ? (
+                      <span className="agent-list-status" aria-label="Agente em trabalho">
+                        <span className="agent-spinner compact" aria-hidden="true" />
+                      </span>
+                    ) : null}
+                    <button
+                      className="secondary-button icon-button agent-edit-button"
+                      type="button"
+                      onClick={() => {
+                        setEditingProfile(profile);
+                        setProfileModalOpen(true);
+                      }}
+                      aria-label={`Editar ${profile.name}`}
+                      title="Editar agente"
+                    >
+                      <Pencil aria-hidden="true" size={15} />
+                    </button>
+                  </article>
+                );
+              })
+            ) : (
+              <button
+                className="agent-empty-cta"
+                type="button"
+                onClick={() => {
+                  setEditingProfile(null);
+                  setProfileModalOpen(true);
+                }}
+                disabled={busy}
+              >
+                <Plus aria-hidden="true" size={18} />
+                <span>
+                  <strong>Criar agente</strong>
+                  <small>Configure um agente para executar o fluxo.</small>
+                </span>
+              </button>
+            )}
+          </div>
+        </section>
+
+        <section className="sidebar-section agent-session-section">
+          <div className="sidebar-section-title">
+            Sessões
+            <button
+              className="sidebar-section-btn"
+              type="button"
+              onClick={onResetChat}
+              disabled={busy || !activeProfile}
+              aria-label="Nova sessão"
+              title="Nova sessão"
+            >
+              <Plus aria-hidden="true" size={14} />
+            </button>
+          </div>
+          <div className="session-list">
+            {activeSessions.length ? (
+              activeSessions.map((session) => (
+                <button
+                  key={session.id}
+                  type="button"
+                  className={session.id === activeSession?.id ? "session-item active" : "session-item"}
+                  onClick={() => onSelectSession(session.id)}
+                >
+                  <span className="session-title">{session.title || `#${session.id}`}</span>
+                  <span className="session-meta">
+                    <span>{agentStatusLabel(session.status)}</span>
+                    <span>{new Date(session.updated_at).toLocaleString()}</span>
+                  </span>
+                </button>
+              ))
+            ) : (
+              <div className="empty-note">Nenhuma conversa ainda.</div>
+            )}
+          </div>
+        </section>
 
         {activeProfile ? (
-          <div className="agent-usage">
+          <section className="sidebar-section agent-usage">
             <div className="agent-usage-head">
               <span>Uso · {agentProviderLabel(activeProfile.provider)}</span>
               <button
-                className="secondary-button icon-button"
+                className="sidebar-section-btn"
                 type="button"
                 onClick={() => void refreshUsage()}
                 disabled={usageBusy || !project}
@@ -8071,7 +8273,7 @@ function AgentsPanel({
               </button>
             </div>
             {usage == null ? (
-              <span className="agent-usage-hint">Clique em ↻ para consultar o uso.</span>
+              <span className="agent-usage-hint">Clique em atualizar para consultar.</span>
             ) : !usage.supported ? (
               <span className="agent-usage-hint">Uso indisponível para este provider.</span>
             ) : usage.windows.length ? (
@@ -8092,24 +8294,25 @@ function AgentsPanel({
                 Uso indisponível (sem dados legíveis).
               </span>
             )}
-          </div>
+          </section>
         ) : null}
       </aside>
 
       <section className="agent-workspace">
-        <div className="agent-session-bar">
-          <div className="agent-chat-title">
-            <div className="section-label">
-              {project ? projectDisplayName(project) : "Sem projeto"}
-            </div>
-            <h2>{activeProfile?.name || "Selecione um agente"}</h2>
-            <p>
+        <div className="chat-header agent-session-bar">
+          <div className="chat-profile-avatar" aria-hidden="true">
+            {activeProfile ? authorInitials(activeProfile.name).slice(0, 2) : "AI"}
+          </div>
+          <div className="chat-profile-info agent-chat-title">
+            <div className="chat-profile-name">{activeProfile?.name || "Selecione um agente"}</div>
+            <div className="chat-profile-status">
+              <span className={working ? "chat-profile-dot" : "chat-profile-dot idle"} />
               {activeProfile
-                ? `${agentProviderLabel(activeProfile.provider)} · ${
-                    activeProfile.model || "modelo default"
-                  } · ${sessionStatus}`
-                : "Configure um agente para delegar comandos do workflow."}
-            </p>
+                ? `Ativo · ${activeSession?.title || sessionStatus}`
+                : project
+                  ? projectDisplayName(project)
+                  : "Sem projeto"}
+            </div>
           </div>
           <div className="agent-session-actions">
             {working ? <span className="status-pill ready">Working</span> : null}
@@ -8187,15 +8390,22 @@ function AgentsPanel({
         </div>
 
         <div className={rawOpen || sessionsOpen ? "agent-chat-shell raw-open" : "agent-chat-shell"}>
-          <div className="agent-timeline" ref={timelineRef} aria-label="Histórico do agente">
+          <div className="chat-messages agent-timeline" ref={timelineRef} aria-label="Histórico do agente">
             {visibleMessages.length ? (
               visibleMessages.map((message) => (
-                <article className={`agent-message ${message.role}`} key={message.id}>
-                  <div className="agent-message-meta">
-                    <span>{message.role}</span>
+                <article
+                  className={`message agent-message ${
+                    message.role === "user" ? "user" : "assistant"
+                  }`}
+                  key={message.id}
+                >
+                  <div className="message-header agent-message-meta">
+                    <span className="message-author">{message.role === "user" ? "Você" : activeProfile?.name || "Agente"}</span>
                     <time>{new Date(message.created_at).toLocaleString()}</time>
                   </div>
-                  <AgentMessageContent message={message} />
+                  <div className="message-content">
+                    <AgentMessageContent message={message} />
+                  </div>
                 </article>
               ))
             ) : (
@@ -8205,9 +8415,10 @@ function AgentsPanel({
               </div>
             )}
             {working ? (
-              <div className="agent-working">
-                <span className="agent-spinner" aria-hidden="true" />
-                <strong>Processando resposta...</strong>
+              <div className="typing-indicator agent-working">
+                <span className="typing-dot" aria-hidden="true" />
+                <span className="typing-dot" aria-hidden="true" />
+                <span className="typing-dot" aria-hidden="true" />
               </div>
             ) : null}
           </div>
@@ -8328,7 +8539,7 @@ function AgentsPanel({
         </div>
 
         <form
-          className="agent-composer"
+          className="chat-composer agent-composer"
           onSubmit={(event) => {
             event.preventDefault();
             const message = composer.trim();
@@ -8337,7 +8548,7 @@ function AgentsPanel({
             setComposer("");
           }}
         >
-          <div className="agent-composer-input">
+          <div className="composer-input-wrapper agent-composer-input">
             {skillAutocompleteOpen ? (
               <div className="agent-skill-menu" role="listbox" aria-label="Skills">
                 {skillSuggestionRows.length ? (
@@ -8383,6 +8594,7 @@ function AgentsPanel({
               </div>
             ) : null}
             <textarea
+              className="composer-input"
               value={composer}
               onChange={(event) => {
                 setComposer(event.target.value);
@@ -8415,18 +8627,34 @@ function AgentsPanel({
                   setSkillAutocompleteHidden(true);
                 }
               }}
-              placeholder={`Mensagem para o agente ${activeProfile ? agentProviderLabel(activeProfile.provider) : ""}`.trim()}
+              placeholder="Digite sua mensagem… (Ctrl+K para skills)"
               disabled={busy || !project}
             />
+            <div className="composer-actions">
+              <button className="composer-btn" type="button" title="Anexar arquivo" disabled>
+                <Upload aria-hidden="true" size={18} />
+              </button>
+              <button
+                className="composer-btn send"
+                type="submit"
+                disabled={busy || !project || !composer.trim()}
+                title="Enviar"
+              >
+                <Send aria-hidden="true" size={18} />
+              </button>
+            </div>
           </div>
-          <button
-            className="primary-button"
-            type="submit"
-            disabled={busy || !project || !composer.trim()}
-          >
-            <Send aria-hidden="true" size={17} />
-            Enviar
-          </button>
+          <div className="composer-hints">
+            <span className="composer-hint">
+              <kbd>Enter</kbd> Enviar
+            </span>
+            <span className="composer-hint">
+              <kbd>Shift</kbd>+<kbd>Enter</kbd> Nova linha
+            </span>
+            <span className="composer-hint">
+              <kbd>Ctrl</kbd>+<kbd>K</kbd> Skills
+            </span>
+          </div>
         </form>
       </section>
     </section>
@@ -9185,6 +9413,10 @@ function SourcePanel({
     document.body.style.cursor = "col-resize";
   }
 
+  const sourcePathLabel = selectedFile?.relative_path
+    ? `${selectedFile.relative_path.split("/").join(" / ")}`
+    : "Nenhum arquivo";
+
   function toggleDir(path: string) {
     const next = new Set(expanded);
     if (next.has(path)) next.delete(path);
@@ -9211,14 +9443,89 @@ function SourcePanel({
   }
 
   return (
-    <div className="panel-stack source-panel">
+    <div className="source-panel">
+      <header className="source-topbar screen-topbar">
+        <span className="topbar-title">Source Code</span>
+        <span className="topbar-path">
+          {selectedFile ? sourcePathLabel : "Selecione um arquivo no explorer"}
+        </span>
+        <div className="topbar-actions">
+          <button className="topbar-btn" type="button" onClick={onQuickOpen}>
+            <Search aria-hidden="true" size={14} />
+            Buscar
+          </button>
+          <button
+            className={previewActive ? "topbar-btn active" : "topbar-btn"}
+            type="button"
+            onClick={onTogglePreview}
+            disabled={!selectedFile || !isMarkdown}
+            aria-pressed={previewActive}
+          >
+            <Eye aria-hidden="true" size={14} />
+            Preview
+          </button>
+        </div>
+      </header>
       <div
         className="source-layout"
         ref={layoutRef}
         style={{ "--explorer-w": `${explorerWidth}px` } as React.CSSProperties}
       >
-        <section className="source-list" aria-label="Source files">
-          <div className="source-side-tabs" role="tablist">
+        <aside className="explorer source-list" aria-label="Source files">
+          <div className="explorer-header source-side-tabs" role="tablist">
+            <span className="explorer-title">Explorer</span>
+            {sideTab === "explorer" ? (
+              <div className="explorer-actions">
+                <button
+                  className="explorer-btn explorer-action-btn"
+                  type="button"
+                  onClick={() => void promptNewFile()}
+                  title="Novo arquivo"
+                  aria-label="Novo arquivo"
+                >
+                  <FilePlus aria-hidden="true" size={15} />
+                </button>
+                <button
+                  className="explorer-btn explorer-action-btn"
+                  type="button"
+                  onClick={() => void promptNewDir()}
+                  title="Nova pasta"
+                  aria-label="Nova pasta"
+                >
+                  <FolderPlus aria-hidden="true" size={15} />
+                </button>
+                <button
+                  className="explorer-btn explorer-action-btn"
+                  type="button"
+                  onClick={onRefreshTree}
+                  title="Atualizar"
+                  aria-label="Atualizar"
+                >
+                  <RefreshCw aria-hidden="true" size={15} />
+                </button>
+                <button
+                  className="explorer-btn explorer-action-btn"
+                  type="button"
+                  onClick={() => onExpandedPathsChange([])}
+                  title="Recolher tudo"
+                  aria-label="Recolher tudo"
+                >
+                  <ChevronsDownUp aria-hidden="true" size={15} />
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <div className="explorer-search">
+            <input
+              type="search"
+              placeholder="Buscar arquivos..."
+              onFocus={() => {
+                onSideTabChange("search");
+                onFindInFiles();
+              }}
+            />
+          </div>
+          <div className="source-side-tab-row" role="tablist" aria-label="Source side tabs">
             <button
               type="button"
               role="tab"
@@ -9238,46 +9545,6 @@ function SourcePanel({
             >
               Search
             </button>
-            {sideTab === "explorer" ? (
-              <div className="explorer-actions">
-                <button
-                  className="explorer-action-btn"
-                  type="button"
-                  onClick={() => void promptNewFile()}
-                  title="Novo arquivo"
-                  aria-label="Novo arquivo"
-                >
-                  <FilePlus aria-hidden="true" size={15} />
-                </button>
-                <button
-                  className="explorer-action-btn"
-                  type="button"
-                  onClick={() => void promptNewDir()}
-                  title="Nova pasta"
-                  aria-label="Nova pasta"
-                >
-                  <FolderPlus aria-hidden="true" size={15} />
-                </button>
-                <button
-                  className="explorer-action-btn"
-                  type="button"
-                  onClick={onRefreshTree}
-                  title="Atualizar"
-                  aria-label="Atualizar"
-                >
-                  <RefreshCw aria-hidden="true" size={15} />
-                </button>
-                <button
-                  className="explorer-action-btn"
-                  type="button"
-                  onClick={() => onExpandedPathsChange([])}
-                  title="Recolher tudo"
-                  aria-label="Recolher tudo"
-                >
-                  <ChevronsDownUp aria-hidden="true" size={15} />
-                </button>
-              </div>
-            ) : null}
           </div>
           {sideTab === "search" ? (
             <SearchPanel
@@ -9296,12 +9563,19 @@ function SourcePanel({
                   selectedPath={selectedFile?.relative_path}
                 />
               ) : (
-                <div className="empty-note">Refresh a saved project to load source files.</div>
+                <div className="empty-state empty-state-compact">
+                  <span className="empty-state-icon">
+                    <FolderGit2 aria-hidden="true" size={20} />
+                  </span>
+                  <p className="empty-state-desc">
+                    Nenhum projeto carregado. Selecione ou adicione um projeto para ver os arquivos.
+                  </p>
+                </div>
               )}
             </>
           )}
           {promptDialog}
-        </section>
+        </aside>
 
         <div
           className="source-resizer"
@@ -9311,7 +9585,7 @@ function SourcePanel({
           onMouseDown={startExplorerResize}
         />
 
-        <section className="source-viewer">
+        <section className="editor-area source-viewer">
           <EditorTabs
             openFiles={openFiles}
             activePath={selectedFile?.relative_path ?? null}
@@ -9349,7 +9623,15 @@ function SourcePanel({
                   </Suspense>
                 )
               ) : (
-                <div className="diff-empty">Selecione um arquivo para inspecionar o conteúdo.</div>
+                <div className="empty-state">
+                  <span className="empty-state-icon">
+                    <Code2 aria-hidden="true" size={26} />
+                  </span>
+                  <h3 className="empty-state-title">Nenhum arquivo aberto</h3>
+                  <p className="empty-state-desc">
+                    Selecione um arquivo no explorer para ver e editar o código.
+                  </p>
+                </div>
               )}
             </div>
             {showHistory && selectedFile ? (
@@ -9364,8 +9646,13 @@ function SourcePanel({
             ) : null}
           </div>
 
-          <footer className="source-footer">
+          <footer className="source-footer status-bar">
             <div className="source-footer-info">
+              <span className="source-footer-branch" title="Branch atual">
+                <GitBranch aria-hidden="true" size={13} />
+                branch
+              </span>
+              <span className="source-footer-sep">·</span>
               {selectedFile ? (
                 <>
                   <span className="source-footer-path" title={selectedFile.relative_path}>
@@ -9386,6 +9673,9 @@ function SourcePanel({
                   Ln {cursor.line}, Col {cursor.col}
                 </span>
               ) : null}
+              <span>UTF-8</span>
+              <span>Spaces: 2</span>
+              <span>LF</span>
               {selectedFile && sourceDirty ? (
                 <span className="source-footer-dirty" title="Alterações não salvas">
                   ● não salvo
@@ -9479,6 +9769,7 @@ function SourceEntryList({
           <div key={entry.relative_path}>
             <button
               className={[
+                "tree-item",
                 "source-file-row",
                 isDir ? "is-dir" : "",
                 selectedPath === entry.relative_path ? "active" : "",
@@ -9486,7 +9777,12 @@ function SourceEntryList({
                 .filter(Boolean)
                 .join(" ")}
               onClick={() => (isDir ? onToggle(entry.relative_path) : onSelect(entry))}
-              style={{ paddingLeft: `${10 + depth * 14}px` }}
+              style={
+                {
+                  paddingLeft: `${10 + depth * 14}px`,
+                  "--depth": depth,
+                } as CSSProperties
+              }
               type="button"
               aria-expanded={isDir ? isOpen : undefined}
             >
@@ -9501,17 +9797,24 @@ function SourceEntryList({
               )}
               {isDir ? (
                 isOpen ? (
-                  <FolderOpen aria-hidden="true" size={15} />
+                  <FolderOpen aria-hidden="true" size={15} className="tree-icon folder" />
                 ) : (
-                  <Folder aria-hidden="true" size={15} />
+                  <Folder aria-hidden="true" size={15} className="tree-icon folder" />
                 )
               ) : (
                 (() => {
                   const { Icon, color } = fileIcon(entry.name);
-                  return <Icon aria-hidden="true" size={15} style={{ color }} />;
+                  return (
+                    <Icon
+                      aria-hidden="true"
+                      className={`tree-icon ${entry.extension ?? ""}`}
+                      size={15}
+                      style={{ color }}
+                    />
+                  );
                 })()
               )}
-              <span>{entry.name}</span>
+              <span className="tree-name">{entry.name}</span>
               {entry.kind === "file" && entry.bytes != null ? (
                 <small>{formatSourceSize(entry.bytes)}</small>
               ) : null}
@@ -10018,7 +10321,8 @@ function GitWorkbench({
   sidebarWidth: number;
   onSidebarResize: (width: number) => void;
 }) {
-  const [view, setView] = useState<GitView>("commits");
+  const [view, setView] = useState<GitView>("local");
+  const [sidebarMode, setSidebarMode] = useState<"commits" | "branches" | "stashes">("commits");
   const [aiCommitBusy, setAiCommitBusy] = useState(false);
   const [commits, setCommits] = useState<Commit[]>([]);
   const [commitQuery, setCommitQuery] = useState("");
@@ -10553,9 +10857,13 @@ function GitWorkbench({
 
   return (
     <div className="git-workbench">
-      <div className="git-toolbar">
+      <header className="git-topbar screen-topbar">
         <div className="git-toolbar-left">
-          <strong>{currentBranch ?? (repoState?.detached ? "(detached)" : "—")}</strong>
+          <span className="topbar-title">Git Workbench</span>
+          <span className="topbar-branch">
+            <GitBranch aria-hidden="true" size={14} />
+            {currentBranch ?? (repoState?.detached ? "(detached)" : "—")}
+          </span>
           {repoState && (repoState.ahead > 0 || repoState.behind > 0) ? (
             <span className="git-tracking">
               ↑{repoState.ahead} ↓{repoState.behind}
@@ -10570,15 +10878,7 @@ function GitWorkbench({
         </div>
         <div className="git-toolbar-actions">
           <button
-            className="secondary-button"
-            type="button"
-            disabled={busy}
-            onClick={() => void refreshRefs()}
-          >
-            <RefreshCw className="ico-fetch" aria-hidden="true" size={15} /> Refresh
-          </button>
-          <button
-            className="secondary-button"
+            className="topbar-btn"
             type="button"
             disabled={busy || autoFetching}
             onClick={() => void run("Fetch", () => api.gitFetch(path))}
@@ -10586,7 +10886,7 @@ function GitWorkbench({
             <RefreshCw className="ico-fetch" aria-hidden="true" size={15} /> Fetch
           </button>
           <button
-            className="secondary-button"
+            className="topbar-btn"
             type="button"
             disabled={busy}
             onClick={() => void run("Pull", pullWithSubmodules(false))}
@@ -10594,15 +10894,7 @@ function GitWorkbench({
             <Download className="ico-pull" aria-hidden="true" size={15} /> Pull
           </button>
           <button
-            className="secondary-button"
-            type="button"
-            disabled={busy}
-            onClick={() => void run("Pull --rebase", pullWithSubmodules(true))}
-          >
-            Pull rebase
-          </button>
-          <button
-            className="primary-button"
+            className="topbar-btn primary"
             type="button"
             disabled={busy}
             onClick={() =>
@@ -10612,7 +10904,24 @@ function GitWorkbench({
             <GitPullRequestArrow aria-hidden="true" size={15} /> Push
           </button>
           <button
-            className="secondary-button"
+            className="topbar-btn"
+            type="button"
+            disabled={busy}
+            onClick={() => void refreshRefs()}
+            title="Refresh"
+          >
+            <RefreshCw className="ico-fetch" aria-hidden="true" size={15} />
+          </button>
+          <button
+            className="topbar-btn"
+            type="button"
+            disabled={busy}
+            onClick={() => void run("Pull --rebase", pullWithSubmodules(true))}
+          >
+            Pull rebase
+          </button>
+          <button
+            className="topbar-btn"
             type="button"
             disabled={busy}
             onClick={() =>
@@ -10621,11 +10930,11 @@ function GitWorkbench({
           >
             <GitPullRequestArrow className="ico-push" aria-hidden="true" size={15} /> Force push
           </button>
-          <button className="secondary-button" type="button" disabled={busy} onClick={saveStash}>
+          <button className="topbar-btn" type="button" disabled={busy} onClick={saveStash}>
             <Archive className="ico-stash" aria-hidden="true" size={15} /> Stash
           </button>
         </div>
-      </div>
+      </header>
 
       {repoState?.operation ? (
         <div className="git-conflict-banner">
@@ -10711,187 +11020,261 @@ function GitWorkbench({
         style={{ "--git-sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
       >
         <aside className="git-sidebar">
-          <button
-            className={view === "local" ? "git-nav active" : "git-nav"}
-            type="button"
-            onClick={() => setView("local")}
-          >
-            Local Changes <span>{changedCount}</span>
-          </button>
-          <button
-            className={view === "commits" ? "git-nav active" : "git-nav"}
-            type="button"
-            onClick={() => setView("commits")}
-          >
-            All Commits
-          </button>
-
-          <div className="git-section-head">
-            <span>Branches</span>
+          <div className="sidebar-tabs" role="tablist" aria-label="Git views">
             <button
-              className="ghost-button icon-only"
+              className={sidebarMode === "commits" ? "sidebar-tab active" : "sidebar-tab"}
               type="button"
-              title="Nova branch"
-              aria-label="Nova branch"
-              onClick={() => setNewBranchModal({ source: currentBranch ?? "" })}
+              role="tab"
+              aria-selected={sidebarMode === "commits"}
+              onClick={() => setSidebarMode("commits")}
             >
-              <Plus aria-hidden="true" size={14} />
+              Commits
+            </button>
+            <button
+              className={sidebarMode === "branches" ? "sidebar-tab active" : "sidebar-tab"}
+              type="button"
+              role="tab"
+              aria-selected={sidebarMode === "branches"}
+              onClick={() => setSidebarMode("branches")}
+            >
+              Branches
+            </button>
+            <button
+              className={sidebarMode === "stashes" ? "sidebar-tab active" : "sidebar-tab"}
+              type="button"
+              role="tab"
+              aria-selected={sidebarMode === "stashes"}
+              onClick={() => setSidebarMode("stashes")}
+            >
+              Stashes
             </button>
           </div>
-          <div className="git-ref-list">
-            <GitRefTree
-              nodes={branchTree}
-              leafIcon={<GitBranch aria-hidden="true" size={13} />}
-              onCheckout={(full) => requestCheckout(full)}
-              onMerge={(full) => void run(`Merge ${full}`, () => api.gitMergeBranch(path, full))}
-              onContext={(leaf, event) => openMenu(event, branchMenuItems(leaf))}
-            />
-          </div>
 
-          {remoteBranches.length ? (
-            <>
-              <div className="git-section-head">
-                <span>Remotes</span>
-              </div>
-              <div className="git-ref-list">
-                <GitRefTree
-                  nodes={remoteTree}
-                  leafIcon={<GitFork aria-hidden="true" size={13} />}
-                  onCheckout={(full) => requestCheckout(full)}
-                />
-              </div>
-            </>
-          ) : null}
-
-          {tags.length ? (
-            <>
-              <div className="git-section-head">
-                <span>Tags</span>
-              </div>
-              <div className="git-ref-list">
-                {tags.map((t) => (
-                  <div className="git-ref-row" key={t.name}>
-                    <button
-                      type="button"
-                      onClick={() => selectCommit(t.sha)}
-                      onContextMenu={(event) => openMenu(event, tagMenuItems(t.name, t.sha))}
-                    >
-                      {t.name}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : null}
-
-          {stashes.length ? (
-            <>
-              <div className="git-section-head">
-                <span>Stashes</span>
-              </div>
-              <div className="git-ref-list">
-                {stashes.map((s) => (
-                  <div
-                    className={
-                      selectedStash?.index === s.index ? "git-ref-row active" : "git-ref-row"
-                    }
-                    key={s.label}
-                  >
-                    <button
-                      type="button"
-                      title="Clique para ver os arquivos. Botão direito para pop/apply/drop."
-                      onClick={() => selectStash(s)}
-                      onContextMenu={(event) => openMenu(event, stashMenuItems(s.index))}
-                    >
-                      <Archive aria-hidden="true" size={13} />
-                      {s.message}
-                      <small>{s.label}</small>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : null}
-
-          {submodules.length ? (
-            <>
-              <div className="git-section-head">
-                <span>Submódulos</span>
+          <div className="sidebar-content">
+            {sidebarMode === "commits" ? (
+              <div className="commit-list">
                 <button
-                  className="git-ref-action"
+                  className={view === "local" ? "commit-item active" : "commit-item"}
                   type="button"
-                  title="submodule sync + update --init --recursive"
-                  disabled={busy}
-                  onClick={() =>
-                    void run("Submódulos atualizados", async () => {
-                      await api.gitSyncSubmodules(path);
-                      return api.gitUpdateAllSubmodules(path, true);
-                    })
-                  }
+                  onClick={() => {
+                    setView("local");
+                    setSelectedSha(null);
+                    setSelectedStash(null);
+                  }}
                 >
-                  atualizar todos
+                  <span className="commit-hash">worktree</span>
+                  <span className="commit-msg">Local Changes</span>
+                  <span className="commit-meta">
+                    <span className="commit-author">{changedCount} arquivos</span>
+                    <span>{localGitRefreshLabel(diffProps.refreshState ?? "idle")}</span>
+                  </span>
                 </button>
-              </div>
-              <div className="git-ref-list">
-                {submodules.map((sub) => (
-                  <div className="git-ref-row submodule-row" key={sub.path}>
-                    <span className="git-ref-name" title={`${sub.status} · ${sub.sha}`}>
-                      {sub.path}
-                      {sub.status !== "ok" ? (
-                        <small className="submodule-flag"> {sub.status}</small>
-                      ) : null}
-                      {sub.detached ? (
-                        <small className="submodule-flag detached"> detached</small>
-                      ) : sub.branch ? (
-                        <small className="submodule-branch"> {sub.branch}</small>
-                      ) : null}
+                <input
+                  className="git-commit-search"
+                  type="search"
+                  value={commitQuery}
+                  placeholder="Buscar commits"
+                  onChange={(e) => setCommitQuery(e.target.value)}
+                />
+                {visibleCommits.map((commit) => (
+                  <button
+                    key={commit.sha}
+                    type="button"
+                    className={selectedSha === commit.sha ? "commit-item active" : "commit-item"}
+                    onClick={() => selectCommit(commit.sha)}
+                    onContextMenu={(event) => openMenu(event, commitMenuItems(commit))}
+                  >
+                    <span className="commit-hash">{commit.short_sha}</span>
+                    <span className="commit-msg">{commit.subject}</span>
+                    <span className="commit-meta">
+                      <span className="commit-author">{commit.author_name}</span>
+                      <span>{commit.date.slice(0, 10)}</span>
                     </span>
-                    <button
-                      className="git-ref-action"
-                      type="button"
-                      title="submodule update --init --recursive"
-                      disabled={busy}
-                      onClick={() =>
-                        void run("Submódulo atualizado", () =>
-                          api.gitUpdateSubmodule(path, sub.path, true),
-                        )
-                      }
-                    >
-                      update
-                    </button>
-                    <button
-                      className="git-ref-action"
-                      type="button"
-                      title="submodule update --remote (seguir branch rastreada)"
-                      disabled={busy}
-                      onClick={() =>
-                        void run("Submódulo (branch) atualizado", () =>
-                          api.gitUpdateSubmoduleRemote(path, sub.path),
-                        )
-                      }
-                    >
-                      remote
-                    </button>
-                    {sub.detached ? (
+                  </button>
+                ))}
+                {commits.length >= limit ? (
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => setLimit((n) => n + 200)}
+                  >
+                    Carregar mais
+                  </button>
+                ) : null}
+              </div>
+            ) : sidebarMode === "branches" ? (
+              <>
+                <div className="git-section-head">
+                  <span>Branches</span>
+                  <button
+                    className="ghost-button icon-only"
+                    type="button"
+                    title="Nova branch"
+                    aria-label="Nova branch"
+                    onClick={() => setNewBranchModal({ source: currentBranch ?? "" })}
+                  >
+                    <Plus aria-hidden="true" size={14} />
+                  </button>
+                </div>
+                <div className="git-ref-list">
+                  <GitRefTree
+                    nodes={branchTree}
+                    leafIcon={<GitBranch aria-hidden="true" size={13} />}
+                    onCheckout={(full) => requestCheckout(full)}
+                    onMerge={(full) =>
+                      void run(`Merge ${full}`, () => api.gitMergeBranch(path, full))
+                    }
+                    onContext={(leaf, event) => openMenu(event, branchMenuItems(leaf))}
+                  />
+                </div>
+
+                {remoteBranches.length ? (
+                  <>
+                    <div className="git-section-head">
+                      <span>Remotes</span>
+                    </div>
+                    <div className="git-ref-list">
+                      <GitRefTree
+                        nodes={remoteTree}
+                        leafIcon={<GitFork aria-hidden="true" size={13} />}
+                        onCheckout={(full) => requestCheckout(full)}
+                      />
+                    </div>
+                  </>
+                ) : null}
+
+                {tags.length ? (
+                  <>
+                    <div className="git-section-head">
+                      <span>Tags</span>
+                    </div>
+                    <div className="git-ref-list">
+                      {tags.map((tag) => (
+                        <div className="git-ref-row" key={tag.name}>
+                          <button
+                            type="button"
+                            onClick={() => selectCommit(tag.sha)}
+                            onContextMenu={(event) =>
+                              openMenu(event, tagMenuItems(tag.name, tag.sha))
+                            }
+                          >
+                            {tag.name}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+
+                {submodules.length ? (
+                  <>
+                    <div className="git-section-head">
+                      <span>Submódulos</span>
                       <button
                         className="git-ref-action"
                         type="button"
-                        title="checkout da branch rastreada (sai do detached HEAD)"
+                        title="submodule sync + update --init --recursive"
                         disabled={busy}
                         onClick={() =>
-                          void run("Submódulo na branch", () =>
-                            api.gitCheckoutSubmoduleBranch(path, sub.path),
-                          )
+                          void run("Submódulos atualizados", async () => {
+                            await api.gitSyncSubmodules(path);
+                            return api.gitUpdateAllSubmodules(path, true);
+                          })
                         }
                       >
-                        branch
+                        atualizar todos
                       </button>
-                    ) : null}
-                  </div>
-                ))}
+                    </div>
+                    <div className="git-ref-list">
+                      {submodules.map((sub) => (
+                        <div className="git-ref-row submodule-row" key={sub.path}>
+                          <span className="git-ref-name" title={`${sub.status} · ${sub.sha}`}>
+                            {sub.path}
+                            {sub.status !== "ok" ? (
+                              <small className="submodule-flag"> {sub.status}</small>
+                            ) : null}
+                            {sub.detached ? (
+                              <small className="submodule-flag detached"> detached</small>
+                            ) : sub.branch ? (
+                              <small className="submodule-branch"> {sub.branch}</small>
+                            ) : null}
+                          </span>
+                          <button
+                            className="git-ref-action"
+                            type="button"
+                            title="submodule update --init --recursive"
+                            disabled={busy}
+                            onClick={() =>
+                              void run("Submódulo atualizado", () =>
+                                api.gitUpdateSubmodule(path, sub.path, true),
+                              )
+                            }
+                          >
+                            update
+                          </button>
+                          <button
+                            className="git-ref-action"
+                            type="button"
+                            title="submodule update --remote (seguir branch rastreada)"
+                            disabled={busy}
+                            onClick={() =>
+                              void run("Submódulo (branch) atualizado", () =>
+                                api.gitUpdateSubmoduleRemote(path, sub.path),
+                              )
+                            }
+                          >
+                            remote
+                          </button>
+                          {sub.detached ? (
+                            <button
+                              className="git-ref-action"
+                              type="button"
+                              title="checkout da branch rastreada (sai do detached HEAD)"
+                              disabled={busy}
+                              onClick={() =>
+                                void run("Submódulo na branch", () =>
+                                  api.gitCheckoutSubmoduleBranch(path, sub.path),
+                                )
+                              }
+                            >
+                              branch
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+              </>
+            ) : (
+              <div className="commit-list">
+                <button className="secondary-button" type="button" onClick={saveStash} disabled={busy}>
+                  <Archive aria-hidden="true" size={14} /> Criar stash
+                </button>
+                {stashes.length ? (
+                  stashes.map((stash) => (
+                    <button
+                      className={
+                        selectedStash?.index === stash.index ? "commit-item active" : "commit-item"
+                      }
+                      key={stash.label}
+                      type="button"
+                      onClick={() => selectStash(stash)}
+                      onContextMenu={(event) => openMenu(event, stashMenuItems(stash.index))}
+                    >
+                      <span className="commit-hash">{stash.label}</span>
+                      <span className="commit-msg">{stash.message}</span>
+                      <span className="commit-meta">
+                        <span className="commit-author">stash</span>
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <div className="empty-note">Nenhum stash salvo.</div>
+                )}
               </div>
-            </>
-          ) : null}
+            )}
+          </div>
         </aside>
 
         <div
@@ -10908,7 +11291,33 @@ function GitWorkbench({
               <DiffPanel
                 {...diffProps}
                 commitSlot={
-                  <div className="git-commit-bar">
+                  <div className="commit-panel git-commit-bar">
+                    <div className="commit-panel-header">
+                      <span className="commit-panel-title">Commit Message</span>
+                      <button
+                        className="ai-commit-btn"
+                        type="button"
+                        disabled={busy || aiCommitBusy || !aiProfileValue}
+                        title="Gerar mensagem de commit com IA a partir das mudanças"
+                        onClick={async () => {
+                          setAiCommitBusy(true);
+                          const message = await onRequestAiCommit(aiProfileValue);
+                          if (message) {
+                            const split = splitCommitMessage(message);
+                            setCommitSubject(split.subject);
+                            setCommitDescription(split.description);
+                          }
+                          setAiCommitBusy(false);
+                        }}
+                      >
+                        {aiCommitBusy ? (
+                          <span className="flow-run-spinner" aria-hidden="true" />
+                        ) : (
+                          <Sparkles aria-hidden="true" size={15} />
+                        )}
+                        AI Commit
+                      </button>
+                    </div>
                     <div className="git-commit-fields">
                       <input
                         value={commitSubject}
@@ -10923,6 +11332,7 @@ function GitWorkbench({
                         }}
                       />
                       <textarea
+                        className="commit-textarea"
                         ref={commitDescriptionRef}
                         value={commitDescription}
                         placeholder="Description"
@@ -10930,7 +11340,7 @@ function GitWorkbench({
                         onChange={(event) => setCommitDescription(event.target.value)}
                       />
                     </div>
-                    <div className="git-commit-actions">
+                    <div className="commit-actions git-commit-actions">
                       <label className="git-toggle">
                         <input
                           type="checkbox"
@@ -10958,30 +11368,14 @@ function GitWorkbench({
                         </select>
                       ) : null}
                       <button
-                        className="secondary-button"
+                        className="topbar-btn"
                         type="button"
-                        disabled={busy || aiCommitBusy || !aiProfileValue}
-                        title="Gerar mensagem de commit com IA a partir das mudanças"
-                        onClick={async () => {
-                          setAiCommitBusy(true);
-                          const message = await onRequestAiCommit(aiProfileValue);
-                          if (message) {
-                            const split = splitCommitMessage(message);
-                            setCommitSubject(split.subject);
-                            setCommitDescription(split.description);
-                          }
-                          setAiCommitBusy(false);
-                        }}
+                        onClick={() => diffProps.onStageAll?.()}
                       >
-                        {aiCommitBusy ? (
-                          <span className="flow-run-spinner" aria-hidden="true" />
-                        ) : (
-                          <Sparkles aria-hidden="true" size={15} />
-                        )}
-                        AI Commit
+                        Stage All
                       </button>
                       <button
-                        className="primary-button"
+                        className="topbar-btn primary"
                         type="button"
                         disabled={busy}
                         onClick={() => void doCommit()}
@@ -11620,6 +12014,8 @@ function DiffPanel({
   };
   const refreshLabel = localGitRefreshLabel(refreshState ?? "idle");
   const refreshBusy = refreshState === "checking" || refreshState === "loading";
+  const totalAdditions = changedFiles.reduce((sum, file) => sum + (file.additions ?? 0), 0);
+  const totalDeletions = changedFiles.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
 
   // Drag the file-list/diff splitter (mutates the CSS var directly during drag).
   function startListResize(event: React.MouseEvent) {
@@ -11647,56 +12043,61 @@ function DiffPanel({
   }
 
   return (
-    <div className="panel-stack diff-panel-stack">
-      <div className="diff-toolbar">
-        <div className="count-strip compact" aria-label="Patch counts">
-          <span>{counts.unstaged} unstaged</span>
-          <span>{counts.staged} staged</span>
-          <span>{counts.untracked} untracked</span>
-          {counts.conflicts ? <span>{counts.conflicts} conflicts</span> : null}
+    <div className="diff-panel-stack">
+      <div className="diff-header">
+        <span className="diff-title">Changes</span>
+        <div className="diff-stats">
+          <span className="diff-stat added">+{totalAdditions}</span>
+          <span className="diff-stat removed">-{totalDeletions}</span>
           <span>{counts.total} files</span>
         </div>
         <span className={`git-local-refresh ${refreshState ?? "idle"}`} aria-live="polite">
           {refreshBusy ? <span className="flow-run-spinner" aria-hidden="true" /> : null}
           {refreshLabel}
         </span>
+        <button className="topbar-btn" type="button" onClick={onRefresh} disabled={diffBusy}>
+          <RefreshCw aria-hidden="true" size={14} />
+          Refresh
+        </button>
       </div>
 
-      <div
-        className="patch-layout"
-        ref={layoutRef}
-        style={{ "--patch-list-w": `${listWidth}px` } as React.CSSProperties}
-      >
-        <section className="patch-file-list" aria-label="Changed files">
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={onRefresh}
-            disabled={diffBusy}
-          >
-            <RefreshCw aria-hidden="true" size={16} />
-            Refresh
-          </button>
-          <div className="changed-file-groups">
-            <ChangedFileGroup
-              files={groups.unstaged}
-              label="Unstaged"
-              onSelect={onSelect}
-              onToggleFile={onToggleFile}
-              onContextFile={onContextFile}
-              onStageAll={onStageAll}
-              selectedFile={selectedFile}
-            />
-            <ChangedFileGroup
-              files={groups.staged}
-              label="Staged"
-              onSelect={onSelect}
-              onToggleFile={onToggleFile}
-              onContextFile={onContextFile}
-              onStageAll={onUnstageAll}
-              selectedFile={selectedFile}
-            />
-          </div>
+      <section className="diff-files" aria-label="Changed files">
+        {changedFiles.length ? (
+          changedFiles.map((file) => {
+            const active = selectedFile?.path === file.path && selectedFile.area === file.area;
+            const { Icon, color } = fileIcon(file.path);
+            return (
+              <button
+                key={`${file.area}:${file.path}`}
+                className={active ? "diff-file active" : "diff-file"}
+                type="button"
+                onClick={() => onSelect(file)}
+                onContextMenu={(event) => onContextFile?.(file, event)}
+                onDoubleClick={() => onToggleFile(file)}
+              >
+                <span
+                  className={file.area === "staged" ? "diff-file-check checked" : "diff-file-check"}
+                  aria-hidden="true"
+                >
+                  {file.area === "staged" ? "✓" : ""}
+                </span>
+                <Icon
+                  aria-hidden="true"
+                  className={`diff-file-icon s-${file.status[0]}`}
+                  size={16}
+                  style={{ color }}
+                />
+                <span className="diff-file-name">{file.path}</span>
+                <span className="diff-file-stats">
+                  <span style={{ color: "var(--clia-green)" }}>+{file.additions ?? 0}</span>
+                  <span style={{ color: "var(--clia-danger)" }}>-{file.deletions ?? 0}</span>
+                </span>
+              </button>
+            );
+          })
+        ) : (
+          <div className="empty-note">No changed files.</div>
+        )}
           {untrackedTruncated && onLoadAllUntracked ? (
             <button
               className="ghost-button git-load-untracked"
@@ -11706,18 +12107,10 @@ function DiffPanel({
               Load all untracked ({counts.untracked})
             </button>
           ) : null}
-        </section>
+      </section>
 
-        <div
-          className="patch-resizer"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Redimensionar lista de arquivos"
-          onMouseDown={startListResize}
-        />
-
-        <section className="patch-viewer">
-          <div className="patch-meta">
+      <section className="patch-viewer diff-content">
+        <div className="patch-meta">
             <div>
               <strong>{selectedFile?.path ?? "No changed file selected"}</strong>
               <span>
@@ -11774,9 +12167,8 @@ function DiffPanel({
               </div>
             )}
           </div>
-          {commitSlot}
-        </section>
-      </div>
+      </section>
+      {commitSlot}
 
       <details className="imported-patch-details">
         <summary>Importar patch (avançado)</summary>
