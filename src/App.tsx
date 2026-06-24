@@ -6120,6 +6120,27 @@ function AddProjectModal({
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [progress, setProgress] = useState<string[]>([]);
+  const [needAuth, setNeedAuth] = useState(false);
+  const [username, setUsername] = useState("");
+  const [token, setToken] = useState("");
+  const cloneIdRef = useRef<string>("");
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void listen<{ clone_id: string; line: string }>("clone://progress", (event) => {
+      if (disposed || event.payload.clone_id !== cloneIdRef.current) return;
+      setProgress((lines) => [...lines.slice(-200), event.payload.line]);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   function basename(value: string): string {
     return (
@@ -6153,9 +6174,24 @@ function AddProjectModal({
           setError("Informe a URL do repositório.");
           return;
         }
-        const result = await api.cloneGitProject(workspaceId, url, name.trim() || undefined);
+        setProgress([]);
+        const cloneId = crypto.randomUUID();
+        cloneIdRef.current = cloneId;
+        const result = await api.cloneGitProjectStreamed({
+          workspace_id: workspaceId,
+          remote_url: url,
+          name: name.trim() || null,
+          clone_id: cloneId,
+          username: needAuth ? username.trim() || null : null,
+          token: needAuth ? token.trim() || null : null,
+        });
         if (!result.ok) {
-          setError(result.error);
+          if (result.error.includes("AUTH_REQUIRED")) {
+            setNeedAuth(true);
+            setError("Repositório privado: informe usuário e token e clone de novo.");
+          } else {
+            setError(result.error);
+          }
           return;
         }
         onAdded(result.value);
@@ -6175,6 +6211,7 @@ function AddProjectModal({
       }
     } finally {
       setBusy(false);
+      cloneIdRef.current = "";
     }
   }
 
@@ -6223,15 +6260,42 @@ function AddProjectModal({
 
         <div className="task-modal-body">
           {mode === "clone" ? (
-            <label className="field">
-              <span>{t("project.modal.remote")}</span>
-              <input
-                value={remoteUrl}
-                placeholder="https://github.com/usuario/repo.git"
-                autoFocus
-                onChange={(event) => setRemoteUrl(event.target.value)}
-              />
-            </label>
+            <>
+              <label className="field">
+                <span>{t("project.modal.remote")}</span>
+                <input
+                  value={remoteUrl}
+                  placeholder="https://github.com/usuario/repo.git"
+                  autoFocus
+                  onChange={(event) => setRemoteUrl(event.target.value)}
+                />
+              </label>
+              {needAuth ? (
+                <div className="task-modal-row">
+                  <label className="field">
+                    <span>Usuário</span>
+                    <input value={username} onChange={(event) => setUsername(event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <span>Token / senha</span>
+                    <input
+                      type="password"
+                      value={token}
+                      onChange={(event) => setToken(event.target.value)}
+                    />
+                  </label>
+                </div>
+              ) : null}
+              {progress.length ? (
+                <div className="agent-inline-stream">
+                  {progress.slice(-12).map((line, index) => (
+                    <div key={index} className="agent-msg">
+                      <pre>{line}</pre>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </>
           ) : (
             <div className="field">
               <span>{t("project.modal.path")}</span>
@@ -6265,9 +6329,20 @@ function AddProjectModal({
         </div>
 
         <div className="modal-actions">
-          <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>
-            {t("common.close")}
-          </button>
+          {busy && mode === "clone" ? (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void api.cancelClone(cloneIdRef.current)}
+            >
+              <X aria-hidden="true" size={16} />
+              Cancelar
+            </button>
+          ) : (
+            <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>
+              {t("common.close")}
+            </button>
+          )}
           <button
             className="primary-button"
             type="button"
