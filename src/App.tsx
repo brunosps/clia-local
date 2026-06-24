@@ -3729,13 +3729,16 @@ export function App() {
                 }}
               >
                 <Boxes aria-hidden="true" size={16} />
-                <span className="context-crumb-name">
-                  {activeWorkspace?.name ?? t("topbar.noWorkspace")}
+                <span className="context-crumb-text">
+                  <span className="context-crumb-label">Workspace</span>
+                  <span className="context-crumb-name">
+                    {activeWorkspace?.name ?? t("topbar.noWorkspace")}
+                  </span>
                 </span>
                 <ChevronDown aria-hidden="true" size={14} />
               </button>
               <span className="context-crumb-sep" aria-hidden="true">
-                ›
+                /
               </span>
               <button
                 className="context-crumb"
@@ -3771,8 +3774,11 @@ export function App() {
                 }}
               >
                 <FolderGit2 aria-hidden="true" size={16} />
-                <span className="context-crumb-name">
-                  {activeProject ? projectDisplayName(activeProject) : t("topbar.noProject")}
+                <span className="context-crumb-text">
+                  <span className="context-crumb-label">Projeto</span>
+                  <span className="context-crumb-name">
+                    {activeProject ? projectDisplayName(activeProject) : t("topbar.noProject")}
+                  </span>
                 </span>
                 <ChevronDown aria-hidden="true" size={14} />
               </button>
@@ -3818,7 +3824,10 @@ export function App() {
                 </>
               ) : null}
               {activeTab === "queue" && activeAgentWorking ? (
-                <span className="status-pill ready">{t("topbar.agentWorking")}</span>
+                <span className="status-pill ready agent-working-pill">
+                  <span className="agent-working-dot" aria-hidden="true" />
+                  {t("topbar.agentWorking")}
+                </span>
               ) : null}
               <button
                 className="secondary-button icon-button"
