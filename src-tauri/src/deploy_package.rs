@@ -2096,6 +2096,9 @@ mod tests {
                 name: "web".to_string(),
                 path: root.display().to_string(),
                 remote_url: None,
+                parent_project_id: None,
+                is_submodule: false,
+                submodule_path: None,
                 created_at: "now".to_string(),
             },
             detection: DeployProjectDetection {
@@ -2163,6 +2166,9 @@ mod tests {
                 name: "desktop".to_string(),
                 path: root.display().to_string(),
                 remote_url: None,
+                parent_project_id: None,
+                is_submodule: false,
+                submodule_path: None,
                 created_at: "now".to_string(),
             },
             detection: DeployProjectDetection {

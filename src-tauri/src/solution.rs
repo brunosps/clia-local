@@ -1752,6 +1752,9 @@ mod tests {
             name: "demo".to_string(),
             path: project.display().to_string(),
             remote_url: None,
+            parent_project_id: None,
+            is_submodule: false,
+            submodule_path: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         }];
 
@@ -1913,6 +1916,9 @@ mod tests {
             name: "app".to_string(),
             path: project_root.display().to_string(),
             remote_url: None,
+            parent_project_id: None,
+            is_submodule: false,
+            submodule_path: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
 
@@ -1998,6 +2004,9 @@ mod tests {
             name: "app".to_string(),
             path: project_root.display().to_string(),
             remote_url: None,
+            parent_project_id: None,
+            is_submodule: false,
+            submodule_path: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
         let package = source.join("workspace.wksdw");
