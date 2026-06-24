@@ -24,6 +24,11 @@ export type Project = {
   name: string;
   path: string;
   remote_url?: string | null;
+  /** When set, this project is a git submodule of that parent project. */
+  parent_project_id?: number | null;
+  is_submodule?: boolean;
+  /** Submodule path relative to the parent project root (e.g. "vendor/lib"). */
+  submodule_path?: string | null;
   created_at: string;
 };
 

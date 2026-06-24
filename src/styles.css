@@ -11479,3 +11479,11 @@ h2 {
   color: var(--clia-text);
   font-size: 13px;
 }
+
+/* clia-local: submodule rows in the QuickSwitch palette */
+.quick-switch-row.is-submodule {
+  padding-left: 22px;
+}
+.quick-switch-row.is-submodule .quick-switch-kind {
+  color: var(--clia-teal, #2dd4bf);
+}

@@ -3750,7 +3750,9 @@ export function App() {
                   const rect = event.currentTarget.getBoundingClientRect();
                   const items: MenuItem[] = [
                     ...projects.map((project) => ({
-                      label: projectDisplayName(project),
+                      label: project.is_submodule
+                        ? `↳ ${projectDisplayName(project)}  ·submodule`
+                        : projectDisplayName(project),
                       icon:
                         project.id === activeProject?.id ? (
                           <Check aria-hidden="true" size={14} />

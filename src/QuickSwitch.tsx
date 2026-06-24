@@ -123,17 +123,18 @@ export function QuickSwitch({
               );
             }
             if (row.kind === "project") {
+              const submodule = Boolean(row.project.is_submodule);
               return (
                 <button
                   key={`proj-${row.project.id}`}
                   type="button"
-                  className={className}
+                  className={submodule ? `${className} is-submodule` : className}
                   onMouseEnter={() => setSelected(index)}
                   onClick={() => activate(row)}
                 >
                   <FolderGit2 aria-hidden="true" size={15} />
                   <span className="quick-switch-label">{projectDisplayName(row.project)}</span>
-                  <span className="quick-switch-kind">projeto</span>
+                  <span className="quick-switch-kind">{submodule ? "submodule" : "projeto"}</span>
                   {row.project.id === activeProjectId ? (
                     <Check aria-hidden="true" size={14} />
                   ) : null}
