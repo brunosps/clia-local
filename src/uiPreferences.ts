@@ -1,12 +1,4 @@
-export type TabPreference =
-  | "queue"
-  | "code"
-  | "git"
-  | "deploy"
-  | "knowledge"
-  | "agents"
-  | "skills"
-  | "settings";
+export type TabPreference = "queue" | "code" | "git" | "deploy" | "agents" | "settings";
 export type SourceSideTabPreference = "explorer" | "search";
 export type GitViewPreference = "local" | "commits";
 export type GitDetailTabPreference = "commit" | "changes" | "tree";
@@ -40,16 +32,7 @@ export const WORKSPACE_COLOR_PRESETS = [
   { label: "Grafite", color: "#7b8794" },
 ] as const;
 
-const VALID_TABS: TabPreference[] = [
-  "queue",
-  "code",
-  "git",
-  "deploy",
-  "knowledge",
-  "agents",
-  "skills",
-  "settings",
-];
+const VALID_TABS: TabPreference[] = ["queue", "code", "git", "deploy", "agents", "settings"];
 const VALID_THEMES: ThemeMode[] = ["clia", "black"];
 const VALID_GIT_VIEWS: GitViewPreference[] = ["local", "commits"];
 const VALID_GIT_DETAIL_TABS: GitDetailTabPreference[] = ["commit", "changes", "tree"];
@@ -74,6 +57,7 @@ export function clampNumberPreference(
 
 export function parseTabPreference(value: string | null | undefined): TabPreference | null {
   if (value === "workbench") return "queue";
+  if (value === "knowledge" || value === "skills") return "queue";
   if (value === "flows" || value === "machines") return "deploy";
   if (value === "cloud") return "settings";
   return VALID_TABS.includes(value as TabPreference) ? (value as TabPreference) : null;

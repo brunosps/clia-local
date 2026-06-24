@@ -25,17 +25,6 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct CloudMapping {
-    pub organization_id: String,
-    pub cloud_kind: String,
-    pub cloud_id: String,
-    pub local_id: i64,
-    pub local_workspace_id: Option<i64>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct RequirementCard {
     pub id: i64,
     pub workspace_id: i64,
@@ -45,6 +34,9 @@ pub struct RequirementCard {
     pub title: String,
     pub slug: String,
     pub body: String,
+    pub priority: String,
+    pub checklist_json: String,
+    pub agent_prompt: String,
     pub status: String,
     pub prd_slug: Option<String>,
     /// Which workbench flow this card follows (`.dw/flows/<id>.json`). `None` =
@@ -54,18 +46,6 @@ pub struct RequirementCard {
     pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-}
-
-pub struct CloudRequirementCardInput<'a> {
-    pub local_card_id: Option<i64>,
-    pub local_project_id: Option<i64>,
-    pub public_id: &'a str,
-    pub title: &'a str,
-    pub body: &'a str,
-    pub status: &'a str,
-    pub flow_id: Option<&'a str>,
-    pub created_at: Option<&'a str>,
-    pub updated_at: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -538,97 +518,6 @@ impl Database {
             params![key, value, updated_at],
         )?;
         Ok(())
-    }
-
-    pub fn cloud_mapping(
-        &self,
-        organization_id: &str,
-        cloud_kind: &str,
-        cloud_id: &str,
-    ) -> anyhow::Result<Option<CloudMapping>> {
-        let conn = self.connect()?;
-        conn.query_row(
-            "select organization_id, cloud_kind, cloud_id, local_id, local_workspace_id,
-                    created_at, updated_at
-             from cloud_mappings
-             where organization_id = ?1
-               and cloud_kind = ?2
-               and cloud_id = ?3",
-            params![organization_id.trim(), cloud_kind.trim(), cloud_id.trim()],
-            cloud_mapping_from_row,
-        )
-        .optional()
-        .map_err(Into::into)
-    }
-
-    pub fn cloud_mapping_by_cloud_id(
-        &self,
-        cloud_kind: &str,
-        cloud_id: &str,
-    ) -> anyhow::Result<Option<CloudMapping>> {
-        let conn = self.connect()?;
-        conn.query_row(
-            "select organization_id, cloud_kind, cloud_id, local_id, local_workspace_id,
-                    created_at, updated_at
-             from cloud_mappings
-             where cloud_kind = ?1
-               and cloud_id = ?2
-             order by updated_at desc
-             limit 1",
-            params![cloud_kind.trim(), cloud_id.trim()],
-            cloud_mapping_from_row,
-        )
-        .optional()
-        .map_err(Into::into)
-    }
-
-    pub fn local_project_id_for_cloud(
-        &self,
-        organization_id: &str,
-        cloud_project_id: &str,
-    ) -> anyhow::Result<Option<i64>> {
-        Ok(self
-            .cloud_mapping(organization_id, "project", cloud_project_id)?
-            .map(|mapping| mapping.local_id))
-    }
-
-    pub fn upsert_cloud_mapping(
-        &self,
-        organization_id: &str,
-        cloud_kind: &str,
-        cloud_id: &str,
-        local_id: i64,
-        local_workspace_id: Option<i64>,
-    ) -> anyhow::Result<CloudMapping> {
-        let organization_id = organization_id.trim();
-        let cloud_kind = cloud_kind.trim();
-        let cloud_id = cloud_id.trim();
-        if organization_id.is_empty() || cloud_kind.is_empty() || cloud_id.is_empty() {
-            anyhow::bail!("cloud mapping requires organization, kind and id");
-        }
-
-        let now = Utc::now().to_rfc3339();
-        let conn = self.connect()?;
-        conn.execute(
-            "insert into cloud_mappings (
-               organization_id, cloud_kind, cloud_id, local_id, local_workspace_id, created_at,
-               updated_at
-             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-             on conflict(organization_id, cloud_kind, cloud_id) do update set
-               local_id = excluded.local_id,
-               local_workspace_id = excluded.local_workspace_id,
-               updated_at = excluded.updated_at",
-            params![
-                organization_id,
-                cloud_kind,
-                cloud_id,
-                local_id,
-                local_workspace_id,
-                now
-            ],
-        )?;
-        self.cloud_mapping(organization_id, cloud_kind, cloud_id)?
-            .ok_or_else(|| anyhow::anyhow!("cloud mapping was not saved"))
     }
 
     pub fn list_projects(&self, workspace_id: i64) -> anyhow::Result<Vec<Project>> {
@@ -1388,7 +1277,8 @@ impl Database {
         backfill_requirement_public_ids(&conn)?;
         let mut stmt = conn.prepare(
             "select id, workspace_id, project_id, public_id, title, slug, body, status, prd_slug,
-                    archived_from_status, archived_at, created_at, updated_at, flow_id
+                    archived_from_status, archived_at, created_at, updated_at, flow_id,
+                    priority, checklist_json, agent_prompt
              from requirement_cards
              where workspace_id = ?1
              order by updated_at desc, id desc",
@@ -1411,6 +1301,9 @@ impl Database {
                 created_at: row.get(11)?,
                 updated_at: row.get(12)?,
                 flow_id: row.get(13)?,
+                priority: row.get(14)?,
+                checklist_json: row.get(15)?,
+                agent_prompt: row.get(16)?,
             })
         })?;
         let mut cards = collect_rows(rows)?;
@@ -1498,119 +1391,6 @@ impl Database {
         Ok(card)
     }
 
-    pub fn upsert_cloud_requirement_card(
-        &self,
-        workspace_id: i64,
-        input: CloudRequirementCardInput<'_>,
-    ) -> anyhow::Result<RequirementCard> {
-        let public_id = input.public_id.trim();
-        if public_id.is_empty() {
-            anyhow::bail!("cloud card public_id is required");
-        }
-
-        let now = Utc::now().to_rfc3339();
-        let title = input.title.trim();
-        let slug = slugify_store_text(title);
-        let body = input.body.trim();
-        let status = normalize_cloud_requirement_status(input.status);
-        let flow_id = input
-            .flow_id
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let created_at = input
-            .created_at
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&now);
-        let updated_at = input
-            .updated_at
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&now);
-
-        let conn = self.workspace_connect_by_id(workspace_id)?;
-        let project_id = match input.local_project_id {
-            Some(project_id) => conn
-                .query_row(
-                    "select id from projects where id = ?1 and workspace_id = ?2",
-                    params![project_id, workspace_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?,
-            None => None,
-        };
-
-        let existing_id = match input.local_card_id {
-            Some(local_card_id) => conn
-                .query_row(
-                    "select id from requirement_cards where id = ?1 and workspace_id = ?2",
-                    params![local_card_id, workspace_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?,
-            None => None,
-        };
-        let existing_id = match existing_id {
-            Some(card_id) => Some(card_id),
-            None => conn
-                .query_row(
-                    "select id from requirement_cards where workspace_id = ?1 and public_id = ?2",
-                    params![workspace_id, public_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?,
-        };
-
-        let card_id = if let Some(card_id) = existing_id {
-            conn.execute(
-                "update requirement_cards
-                 set project_id = ?1,
-                     public_id = ?2,
-                     title = ?3,
-                     slug = ?4,
-                     body = ?5,
-                     status = ?6,
-                     flow_id = ?7,
-                     updated_at = ?8
-                 where id = ?9",
-                params![
-                    project_id, public_id, title, slug, body, status, flow_id, updated_at, card_id
-                ],
-            )?;
-            card_id
-        } else {
-            conn.execute(
-                "insert into requirement_cards (
-                   workspace_id, project_id, public_id, title, slug, body, status, prd_slug,
-                   created_at, updated_at, flow_id
-                 ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, null, ?8, ?9, ?10)",
-                params![
-                    workspace_id,
-                    project_id,
-                    public_id,
-                    title,
-                    slug,
-                    body,
-                    status,
-                    created_at,
-                    updated_at,
-                    flow_id
-                ],
-            )?;
-            conn.last_insert_rowid()
-        };
-
-        if let Some(project_id) = project_id {
-            conn.execute(
-                "insert or ignore into requirement_card_projects (card_id, project_id)
-                 values (?1, ?2)",
-                params![card_id, project_id],
-            )?;
-        }
-
-        self.get_requirement_card_with_conn(&conn, card_id)
-    }
-
     pub fn update_requirement_card_status(
         &self,
         id: i64,
@@ -1653,6 +1433,80 @@ impl Database {
             anyhow::bail!("requirement card not found: {id}");
         }
         self.get_requirement_card_with_conn(&conn, id)
+    }
+
+    /// Update the editable fields of a task card. Every argument is optional;
+    /// `None` leaves the existing value untouched (SQL `coalesce`).
+    pub fn update_requirement_card(
+        &self,
+        id: i64,
+        title: Option<&str>,
+        body: Option<&str>,
+        priority: Option<&str>,
+        checklist_json: Option<&str>,
+        agent_prompt: Option<&str>,
+    ) -> anyhow::Result<RequirementCard> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.workspace_connect_for_card(id)?;
+        let title = title.map(str::trim).filter(|value| !value.is_empty());
+        let slug = title.map(slugify_store_text);
+        let changed = conn.execute(
+            "update requirement_cards
+             set title = coalesce(?1, title),
+                 slug = coalesce(?2, slug),
+                 body = coalesce(?3, body),
+                 priority = coalesce(?4, priority),
+                 checklist_json = coalesce(?5, checklist_json),
+                 agent_prompt = coalesce(?6, agent_prompt),
+                 updated_at = ?7
+             where id = ?8",
+            params![
+                title,
+                slug,
+                body.map(str::trim),
+                priority,
+                checklist_json,
+                agent_prompt,
+                now,
+                id
+            ],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("requirement card not found: {id}");
+        }
+        self.get_requirement_card_with_conn(&conn, id)
+    }
+
+    /// Replace the set of projects a task is linked to (must keep at least the
+    /// caller-provided ids). The first id becomes the primary `project_id`.
+    pub fn set_requirement_card_projects(
+        &self,
+        id: i64,
+        project_ids: &[i64],
+    ) -> anyhow::Result<RequirementCard> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.workspace_connect_for_card(id)?;
+        let ids = unique_project_ids(project_ids);
+        let tx = conn.transaction()?;
+        tx.execute(
+            "delete from requirement_card_projects where card_id = ?1",
+            [id],
+        )?;
+        for project_id in &ids {
+            tx.execute(
+                "insert or ignore into requirement_card_projects (card_id, project_id)
+                 values (?1, ?2)",
+                params![id, project_id],
+            )?;
+        }
+        let primary_project_id = ids.first().copied();
+        tx.execute(
+            "update requirement_cards set project_id = ?1, updated_at = ?2 where id = ?3",
+            params![primary_project_id, now, id],
+        )?;
+        let card = self.get_requirement_card_with_conn(&tx, id)?;
+        tx.commit()?;
+        Ok(card)
     }
 
     pub fn archive_requirement_card(&self, id: i64) -> anyhow::Result<RequirementCard> {
@@ -1897,34 +1751,6 @@ impl Database {
         collect_rows(rows)
     }
 
-    pub fn find_cloud_knowledge_source(
-        &self,
-        cloud_document_id: &str,
-    ) -> anyhow::Result<Option<KnowledgeSource>> {
-        let cloud_key = format!("clia-cloud:{}", cloud_document_id.trim());
-        if cloud_document_id.trim().is_empty() {
-            return Ok(None);
-        }
-        for workspace in self.list_workspaces()? {
-            let conn = self.workspace_connect(&workspace)?;
-            let source = conn
-                .query_row(
-                    "select id, workspace_id, project_id, blueprint_id, scope, name, file_path,
-                            original_path, created_at
-                     from knowledge_sources
-                     where original_path = ?1
-                     limit 1",
-                    params![cloud_key],
-                    knowledge_source_from_row,
-                )
-                .optional()?;
-            if source.is_some() {
-                return Ok(source);
-            }
-        }
-        Ok(None)
-    }
-
     pub fn add_knowledge_source(
         &self,
         workspace_id: i64,
@@ -2012,60 +1838,6 @@ impl Database {
                 source_name,
                 managed_path.display().to_string(),
                 source_path.display().to_string(),
-                created_at
-            ],
-        )?;
-        let id = conn.last_insert_rowid();
-        self.get_knowledge_source_with_conn(&conn, id)
-    }
-
-    pub fn upsert_cloud_knowledge_source(
-        &self,
-        workspace_id: i64,
-        project_id: Option<i64>,
-        cloud_document_id: &str,
-        scope: &str,
-        name: &str,
-        file_path: &str,
-    ) -> anyhow::Result<KnowledgeSource> {
-        let workspace = self.get_workspace(workspace_id)?;
-        let conn = self.workspace_connect(&workspace)?;
-        let cloud_key = format!("clia-cloud:{}", cloud_document_id.trim());
-        if cloud_document_id.trim().is_empty() {
-            anyhow::bail!("cloud document id is required");
-        }
-        let existing_id = conn
-            .query_row(
-                "select id from knowledge_sources
-                 where workspace_id = ?1 and original_path = ?2
-                 limit 1",
-                params![workspace_id, cloud_key],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        if let Some(id) = existing_id {
-            conn.execute(
-                "update knowledge_sources
-                 set project_id = ?1, scope = ?2, name = ?3, file_path = ?4
-                 where id = ?5",
-                params![project_id, scope.trim(), name.trim(), file_path.trim(), id],
-            )?;
-            return self.get_knowledge_source_with_conn(&conn, id);
-        }
-
-        let created_at = Utc::now().to_rfc3339();
-        conn.execute(
-            "insert into knowledge_sources (
-               workspace_id, project_id, blueprint_id, scope, name, file_path, original_path,
-               created_at
-             ) values (?1, ?2, null, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                workspace_id,
-                project_id,
-                scope.trim(),
-                name.trim(),
-                file_path.trim(),
-                cloud_key,
                 created_at
             ],
         )?;
@@ -3139,7 +2911,8 @@ impl Database {
         let project_ids = self.list_requirement_project_ids_with_conn(conn, id)?;
         conn.query_row(
             "select id, workspace_id, project_id, public_id, title, slug, body, status, prd_slug,
-                    archived_from_status, archived_at, created_at, updated_at, flow_id
+                    archived_from_status, archived_at, created_at, updated_at, flow_id,
+                    priority, checklist_json, agent_prompt
              from requirement_cards
              where id = ?1",
             [id],
@@ -3160,6 +2933,9 @@ impl Database {
                     created_at: row.get(11)?,
                     updated_at: row.get(12)?,
                     flow_id: row.get(13)?,
+                    priority: row.get(14)?,
+                    checklist_json: row.get(15)?,
+                    agent_prompt: row.get(16)?,
                 })
             },
         )
@@ -3530,6 +3306,9 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
               title text not null,
               slug text not null,
               body text not null default '',
+              priority text not null default 'medium',
+              checklist_json text not null default '[]',
+              agent_prompt text not null default '',
               status text not null,
               prd_slug text,
               archived_from_status text,
@@ -3727,6 +3506,24 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
     ensure_column(conn, "requirement_cards", "archived_from_status", "text")?;
     ensure_column(conn, "requirement_cards", "archived_at", "text")?;
     ensure_column(conn, "requirement_cards", "flow_id", "text")?;
+    ensure_column(
+        conn,
+        "requirement_cards",
+        "priority",
+        "text not null default 'medium'",
+    )?;
+    ensure_column(
+        conn,
+        "requirement_cards",
+        "checklist_json",
+        "text not null default '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "requirement_cards",
+        "agent_prompt",
+        "text not null default ''",
+    )?;
     ensure_column(conn, "workspace_machines", "access_user", "text")?;
     ensure_column(conn, "agent_profiles", "reasoning_effort", "text")?;
     ensure_column(
@@ -3796,24 +3593,6 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
            value text not null,
            updated_at text not null
          )",
-        [],
-    )?;
-    conn.execute(
-        "create table if not exists cloud_mappings (
-           organization_id text not null,
-           cloud_kind text not null,
-           cloud_id text not null,
-           local_id integer not null,
-           local_workspace_id integer,
-           created_at text not null,
-           updated_at text not null,
-           primary key (organization_id, cloud_kind, cloud_id)
-         )",
-        [],
-    )?;
-    conn.execute(
-        "create index if not exists idx_cloud_mappings_local
-         on cloud_mappings(cloud_kind, local_id)",
         [],
     )?;
     Ok(())
@@ -4549,22 +4328,6 @@ fn normalize_project_blueprint_status(status: &str) -> anyhow::Result<&'static s
     }
 }
 
-fn normalize_cloud_requirement_status(status: &str) -> &'static str {
-    match status.trim().to_ascii_lowercase().as_str() {
-        "draft" | "backlog" => "draft",
-        "brainstorming" => "brainstorming",
-        "planned" => "planned",
-        "running" | "in_progress" | "blocked" => "running",
-        "reviewing" => "reviewing",
-        "qa" => "qa",
-        "ready_for_pr" => "ready_for_pr",
-        "local_pr" => "local_pr",
-        "done" => "done",
-        "archived" => "archived",
-        _ => "draft",
-    }
-}
-
 fn valid_json_or_default(value: &str, default: &str) -> String {
     serde_json::from_str::<serde_json::Value>(value)
         .map(|_| value.trim().to_string())
@@ -4818,18 +4581,6 @@ fn knowledge_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Knowle
         file_path: row.get(6)?,
         original_path: row.get(7)?,
         created_at: row.get(8)?,
-    })
-}
-
-fn cloud_mapping_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CloudMapping> {
-    Ok(CloudMapping {
-        organization_id: row.get(0)?,
-        cloud_kind: row.get(1)?,
-        cloud_id: row.get(2)?,
-        local_id: row.get(3)?,
-        local_workspace_id: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
     })
 }
 
@@ -5441,72 +5192,6 @@ mod tests {
             db.get_app_state("last_workspace_id").expect("get"),
             Some("42".to_string())
         );
-    }
-
-    #[test]
-    fn cloud_requirement_cards_upsert_as_intake_by_public_id() {
-        let (db, root) = temp_db();
-        let workspace_root = root.join("workspace");
-        let project_root = workspace_root.join("app");
-        std::fs::create_dir_all(&project_root).expect("create project dir");
-        let workspace = db
-            .create_workspace("Workspace", &workspace_root.display().to_string())
-            .expect("create workspace");
-        let project = db
-            .add_project(
-                workspace.id,
-                "App",
-                &project_root.display().to_string(),
-                None,
-            )
-            .expect("create project");
-
-        let card = db
-            .upsert_cloud_requirement_card(
-                workspace.id,
-                CloudRequirementCardInput {
-                    local_card_id: None,
-                    local_project_id: Some(project.id),
-                    public_id: "CLIA-7",
-                    title: "Cloud intake",
-                    body: "Context from portal",
-                    status: "backlog",
-                    flow_id: None,
-                    created_at: Some("2026-06-15T10:00:00Z"),
-                    updated_at: Some("2026-06-15T10:00:00Z"),
-                },
-            )
-            .expect("upsert cloud intake");
-
-        assert_eq!(card.public_id, "CLIA-7");
-        assert_eq!(card.status, "draft");
-        assert_eq!(card.flow_id, None);
-        assert_eq!(card.project_id, Some(project.id));
-        assert_eq!(card.project_ids, vec![project.id]);
-
-        let updated = db
-            .upsert_cloud_requirement_card(
-                workspace.id,
-                CloudRequirementCardInput {
-                    local_card_id: Some(card.id),
-                    local_project_id: Some(project.id),
-                    public_id: "CLIA-7",
-                    title: "Cloud intake routed",
-                    body: "Updated context",
-                    status: "planned",
-                    flow_id: Some("dev-workflow"),
-                    created_at: None,
-                    updated_at: Some("2026-06-15T11:00:00Z"),
-                },
-            )
-            .expect("update cloud card");
-
-        assert_eq!(updated.id, card.id);
-        assert_eq!(updated.title, "Cloud intake routed");
-        assert_eq!(updated.status, "planned");
-        assert_eq!(updated.flow_id.as_deref(), Some("dev-workflow"));
-
-        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

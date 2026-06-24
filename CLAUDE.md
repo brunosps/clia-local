@@ -8,9 +8,9 @@ Contexto para um agente de IA continuar este projeto. Leia isto antes de mexer n
 pareamento de device** — tudo roda na máquina (SQLite + git CLI + agentes locais).
 
 Foi criado como **fork enxuto** de `../clia-wks/app/` (o app desktop do monorepo
-`clia-wks`, que tem portal na nuvem). A camada de nuvem foi arrancada e as features que
-dependiam do portal foram re-localizadas. **Não há código compartilhado vivo com o
-monorepo** — é uma cópia independente.
+`clia-wks`, que tinha portal na nuvem). A camada de nuvem foi **arrancada por completo** e
+as features que dependiam do portal foram re-localizadas. **Não há código compartilhado
+vivo com o monorepo** — é uma cópia independente.
 
 > Regra de ouro: **não reintroduza nuvem.** Nada de HTTP para portal, sync, device login,
 > websockets, analyze/opportunities. Se uma feature precisar de dados, ela vem do SQLite
@@ -22,14 +22,14 @@ Tauri 2 · React 19 · TypeScript · Rust. Frontend em `src/`, backend Rust em `
 
 | Caminho | Papel |
 |---------|-------|
-| `src/App.tsx` | **Monolito de ~12k linhas** — quase toda a UI e o estado vivem aqui. |
+| `src/App.tsx` | **Monolito de ~11k linhas** — quase toda a UI e o estado vivem aqui. |
 | `src/tauri.ts` | Camada `api.*`: wrappers de `invoke` para cada comando Tauri. Todos passam por `invokeSafe` → retorna `{ ok: true, value } \| { ok: false, error }` (nunca lança). |
 | `src/types.ts` | Tipos TS compartilhados (espelham os structs Rust). |
-| `src/queue.ts` | `buildQueue()` + tipos `QueueCard`/`QueueBucket` da fila kanban. |
+| `src/queue.ts` | Fila de tarefas (kanban): `buildQueue()` sobre `RequirementCard[]`, `QUEUE_BUCKETS`, `statusBucket`, `parseChecklist`/`serializeChecklist`, `bucketCanonicalStatus` + tipos `QueueCard`/`QueueBucket`. |
 | `src/source/`, `src/monaco/`, `src/lsp/` | Editor de código (Monaco), LSP. |
 | `src/*.test.ts(x)` | Testes Vitest (lógica pura: queue, diff, git graph, etc.). |
 | `src-tauri/src/lib.rs` | ~5k linhas: registro de **todos** os `#[tauri::command]` no `generate_handler!` + `app_data_dir()`. |
-| `src-tauri/src/store.rs` | ~6.7k linhas: SQLite (rusqlite, bundled). Schema + migrations + queries. |
+| `src-tauri/src/store.rs` | ~6.5k linhas: SQLite (rusqlite, bundled). Schema + migrations + queries. |
 | `src-tauri/src/git.rs` | Git via **git CLI nativo** (`Command::new("git")`), não libgit2. |
 | `src-tauri/src/agent.rs` | Spawn de Codex/Claude/Copilot como processos; streaming via eventos Tauri (`agent://event` etc.). |
 | `src-tauri/src/deploy*.rs`, `machine.rs`, `winbox_provider.rs` | Deploy local em VMs (Winbox). Pesado (~10k linhas). |
@@ -47,31 +47,59 @@ Tauri 2 · React 19 · TypeScript · Rust. Frontend em `src/`, backend Rust em `
 
 `queue` · `code` · `git` · `deploy` · `agents` · `settings`.
 
-Removidos do fork: **knowledge** e **skills** (saíram do `navItems`).
+Removidos do fork: **knowledge** e **skills** — fora do `navItems` **e** do union `Tab`
+(em `App.tsx`) e do `TabPreference`/`VALID_TABS` (em `uiPreferences.ts`; preferências
+antigas `knowledge`/`skills` migram para `queue`).
 
-## Convenções deste fork (importante)
+## A Fila de tarefas (kanban local)
 
-1. **Modo single-user local.** Não há login. O app inicia "pareado" via duas constantes em
-   `App.tsx` (perto de `APP_VERSION`): `LOCAL_USER_ID = "local"` e `LOCAL_WIRED_STATUS`
-   (status sintético `paired/connected`). O estado inicial de `wiredAuthChecked` /
-   `wiredAuthSessionUnlocked` é `true`.
+A aba **Queue** é um quadro **kanban de tarefas locais**, escopado ao **workspace ativo**.
+Não há nuvem em nenhuma parte do fluxo.
 
-2. **A Queue é local.** `refreshWiredCloudBootstrap()` (em `App.tsx`) **NÃO** chama a nuvem
-   — ela monta um `WiredCloudBootstrap` sintético a partir de `api.listWorkspaces()` +
-   `api.listRequirementCards(wsId)`, com `current_user_id = "local"` e cada card
-   `assignee_user_id = "local"`. O `QueuePanel`/`buildQueue` originais foram reaproveitados
-   sem alterar a forma dos dados. Mudar status de card → `api.updateRequirementCardStatus`.
-   Criar card → handler `createQueueCard()` → `api.createRequirementCard` (ID público
-   reservado **localmente** por `store.rs::reserve_next_public_id`, sem nuvem).
+- **Carregamento:** `loadWorkspaceTasks()` (em `App.tsx`) lê
+  `api.listRequirementCards(activeWorkspace.id)`; o board mostra só o workspace ativo. A
+  lista de projetos vem do estado `projects`. (Substituiu o antigo `WiredCloudBootstrap`
+  sintético, que foi removido.)
+- **Board:** `QueuePanel` → 4 colunas fixas **A fazer / Fazendo / Validando / Feito**
+  (`QUEUE_BUCKETS`) com **drag-and-drop** (HTML5) entre colunas. Mover status é **manual
+  (humano)** — o agente nunca avança o card sozinho. **Arquivar** via
+  `api.archiveRequirementCard`.
+- **`buildQueue` (`queue.ts`):** mapeia `status → bucket` (tolerante a status legados via
+  `statusBucket`), exclui arquivados, filtra por projeto e ordena por prioridade. Os status
+  canônicos escritos no drag são `todo`/`doing`/`validating`/`done` (`bucketCanonicalStatus`).
+- **Modelo de dados:** reaproveita a tabela `requirement_cards` + colunas novas
+  `priority`, `checklist_json`, `agent_prompt` (migração additiva via `ensure_column`).
+  Anexos ficam em `requirement_attachments` (já existia), copiados para
+  `<workspace>/.dw/gui/attachments/<card_id>/` — **fora dos repositórios de projeto**, então
+  não sujam o git de nenhum projeto.
+- **TaskModal (`App.tsx`):** clicar num card abre um modal com título, descrição (`body`),
+  **checklist** de subtarefas, prioridade (Alta/Média/Baixa), **projetos** (≥1), status,
+  **prompt do agente** e **anexos**. Botão **"Executar com agente"** com seletor de agente
+  (quando há >1 profile) e **streaming inline** (filtra `agent://event` pela sessão lançada
+  via `sendAgentPrompt`, que roda no projeto ativo). Salvar persiste por
+  `api.updateRequirementCard` + `api.setRequirementCardProjects` + (se o status mudou)
+  `api.updateRequirementCardStatus`.
+- **Criar tarefa:** `createQueueCard()` → `api.createRequirementCard` (ID público reservado
+  **localmente** por `store.rs::reserve_next_public_id`, sem nuvem) → abre o TaskModal para
+  detalhar a tarefa nova.
+- **Comandos Tauri da tarefa:** `create_requirement_card`, `update_requirement_card`,
+  `update_requirement_card_status`, `set_requirement_card_projects`,
+  `archive_requirement_card`/`restore_requirement_card`, e os de anexo
+  (`add`/`list`/`remove`/`preview`/`download_requirement_attachment`).
 
-3. **Os gates de nuvem foram removidos.** No render principal de `App.tsx` não existem mais
-   os blocos `WiredLoginGate` nem `CloudWorkspaceInstallGate` — o app vai direto pra UI.
-   Criar/abrir workspace é local (`createWorkspace` / `setWorkspaceModalOpen`).
+## Convenções deste fork
 
-4. **Chamadas de nuvem residuais são no-op seguro.** `tauri.ts` ainda exporta wrappers como
-   `cloudStatus`, `syncWorkspaceToCloud`, `wiredCloudBootstrap`, etc. Os comandos
-   correspondentes **não existem** no backend, então `invokeSafe` devolve `{ ok: false }`.
-   Nenhuma rede é alcançada. **São código morto** — pode podar, mas não precisa.
+1. **Modo single-user local.** Não há login nem pareamento de device — o app vai **direto
+   pra UI**. Todo o estado sintético de auth (`LOCAL_WIRED_STATUS`, `wiredAuth*`,
+   `WiredCloudBootstrap`, etc.) e os gates (`WiredLoginGate`, `CloudWorkspaceInstallGate`)
+   foram **removidos**. Criar/abrir workspace é local (`createWorkspace` /
+   `setWorkspaceModalOpen`).
+
+2. **Zero código de nuvem.** Não há mais nenhum `WiredCloud*`/`Cloud*` no frontend nem
+   `cloud_*` no backend. Os únicos "cloud" que sobram no Rust são `linux_cloud` /
+   `cloud_init` (família de imagem / provisionamento de VM Ubuntu) — **sem relação** com a
+   nuvem CLIA. Idem `ureq` (downloads do RTK, probe de VNC local, `fetch_url`): é rede local
+   legítima, não portal.
 
 ## Build / run / verify
 
@@ -83,26 +111,28 @@ corepack pnpm test              # vitest run
 corepack pnpm build:web         # tsc + vite build → dist/
 corepack pnpm build             # bundle desktop completo (tauri build) — lento (LTO)
 cargo check  --manifest-path src-tauri/Cargo.toml
+cargo test   --manifest-path src-tauri/Cargo.toml --lib
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings   # ver "dívidas" abaixo
 ```
 
-Estado verde conhecido (último check): `cargo check` 0 erros, `pnpm typecheck` 0 erros,
-`pnpm build:web` ok, `tauri dev` abre a janela e cria o SQLite local.
+Estado verde conhecido (último check): `cargo check` 0 erros, `cargo test --lib` 199 ok,
+`pnpm typecheck` 0 erros, `pnpm test` 211 ok, `pnpm build:web` ok, `tauri dev` abre a janela
+e cria o SQLite local.
 
-## Dívidas conhecidas (não bloqueiam build; bloqueiam `clippy -D warnings`)
+## Dívidas conhecidas (não bloqueiam o build)
 
-- **`src-tauri/src/store.rs`**: ~8 warnings de dead-code de helpers de card de nuvem órfãos
-  (`CloudMapping`, `CloudRequirementCardInput`, `normalize_cloud_requirement_status`,
-  `cloud_mapping_from_row`, métodos não usados em ~`store.rs:543`). Podar quando for mexer ali.
-- **`src/App.tsx` / `src/tauri.ts`**: componentes e handlers das telas removidas continuam
-  no arquivo como **código morto não renderizado** (`WiredLoginGate`,
-  `CloudWorkspaceInstallGate`, `KnowledgeBasePanel`, `SkillsPanel`, e os device-login
-  handlers `startRequiredWiredLogin` etc.), além dos wrappers de nuvem em `tauri.ts` e dos
-  branches `activeTab === "knowledge"/"skills"`. O type `Tab` ainda lista `knowledge`/`skills`.
-  Limpeza opcional: remover esses blocos e apertar o union `Tab`.
+- O **dead-code de nuvem foi removido** (structs/tabela/helpers `cloud_*` em `store.rs`,
+  wrappers em `tauri.ts`, tipos `Cloud*`/`Wired*` em `types.ts`, componentes e handlers em
+  `App.tsx`, chaves `flows.*` de portal no i18n, e a dep `tungstenite`). Os módulos órfãos
+  `capabilities-status.*` e `task-status.*` também foram deletados.
+- Restam **3 warnings de `clippy`** de dead-code **de skills** (não de nuvem):
+  `WorkspaceSkillInstallInput`, `install_workspace_skill`, `skill_names` em `store.rs`.
+  Inofensivos; podar quando mexer ali.
 
 ## Histórico
 
-Fork criado a partir de `clia-wks/app/` (sem `.git` original). Primeiro commit:
-`feat: clia-local — fork local-only do app (sem nuvem)`. Veja `README.md` para o resumo
-de produto e `DESIGN.md` para os tokens de UI (paleta dark-only, extraída de `src/styles.css`).
+Fork criado a partir de `clia-wks/app/` (sem `.git` original). Commits relevantes:
+`feat: clia-local — fork local-only do app (sem nuvem)` e a limpeza total de nuvem +
+redesenho da Fila como kanban de tarefas locais. Veja `README.md` para o resumo de produto
+e `DESIGN.md` para os tokens de UI (paleta dark-only via CSS custom properties `--clia-*`
+em `src/styles.css`).

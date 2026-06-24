@@ -18,275 +18,6 @@ export type Workspace = {
   created_at: string;
 };
 
-export type CloudStatus = {
-  portal_url: string;
-  configured: boolean;
-  has_token: boolean;
-  last_sync_at?: string | null;
-};
-
-export type CloudSyncResult = {
-  ok: boolean;
-  portal_url: string;
-  workspace_id: number;
-  imported_projects: number;
-  imported_cards: number;
-  imported_events: number;
-  imported_workflows: number;
-  server_revision?: string | null;
-  message: string;
-};
-
-export type WiredStatus = {
-  portal_url: string;
-  paired: boolean;
-  connected: boolean;
-  device_id?: string | null;
-  user_email?: string | null;
-  organization_id?: string | null;
-  pending_user_code?: string | null;
-  last_connected_at?: string | null;
-};
-
-export type WiredDeviceLoginStart = {
-  device_code: string;
-  user_code: string;
-  verification_uri: string;
-  verification_uri_complete: string;
-  expires_in: number;
-  portal_url: string;
-};
-
-export type WiredDeviceLoginPoll = {
-  status: string;
-  device_id?: string | null;
-  user_name?: string | null;
-  user_email?: string | null;
-  organization_id?: string | null;
-};
-
-export type WiredAgentProfile = {
-  id: string;
-  label: string;
-  provider: string;
-  model?: string | null;
-};
-
-export type WiredConnectInput = {
-  workspace_id: number;
-  workspace_name: string;
-  project_id?: number | null;
-  project_name?: string | null;
-  agent_profiles: WiredAgentProfile[];
-};
-
-export type WiredTaskRequest = {
-  task_id: string;
-  kind?: string | null;
-  mode: "auto" | "supervised" | "workflow_command" | "raw_prompt" | string;
-  workspace_id: string;
-  project_id?: string | null;
-  card_id?: string | null;
-  assignee_user_id?: string | null;
-  agent_profile_id?: string | null;
-  agent_profile_label?: string | null;
-  payload: Record<string, unknown>;
-  expires_at: string;
-};
-
-export type WiredTaskDocumentInput = {
-  title: string;
-  slug?: string | null;
-  kind?: string | null;
-  body?: string | null;
-};
-
-export type WiredTaskStatusInput = {
-  task_id: string;
-  status: string;
-  local_session_id?: number | null;
-  summary?: string | null;
-  error_message?: string | null;
-  result?: Record<string, unknown> | null;
-  documents?: WiredTaskDocumentInput[];
-};
-
-export type WiredCardStatusInput = {
-  card_id: string;
-  status: string;
-};
-
-export type WiredCloudOrganization = {
-  id: string;
-  name: string;
-  slug?: string;
-  domain?: string;
-  current_user_role?: string;
-  can_manage?: boolean;
-};
-
-export type WiredCloudWorkspace = {
-  id: string;
-  name: string;
-  slug?: string;
-  team_id?: string | null;
-  team_name?: string | null;
-  workflow_id?: string;
-  workflow_label?: string;
-  workflow_version?: number;
-  projects_count?: number;
-  open_cards?: number;
-  sync_origin?: string;
-  local_root_path?: string | null;
-  last_synced_at?: string | null;
-  installed?: boolean;
-  local_workspace_id?: number | null;
-};
-
-export type WiredCloudProject = {
-  id: string;
-  workspace_id: string;
-  workspace_name?: string;
-  name: string;
-  slug?: string;
-  repository_url?: string | null;
-  local_path?: string | null;
-  open_cards?: number;
-  last_synced_at?: string | null;
-  installed?: boolean;
-  local_project_id?: number | null;
-};
-
-export type WiredCloudBootstrap = {
-  server_revision?: string | null;
-  current_user_id?: string | null;
-  organization: WiredCloudOrganization;
-  workspaces: WiredCloudWorkspace[];
-  projects: WiredCloudProject[];
-  cards: WiredCloudCard[];
-  documents: WiredCloudDocument[];
-  capabilities: WiredCloudCapability[];
-  workflows: Record<string, unknown>[];
-  workflow_assignments: Record<string, unknown>[];
-  workflow_migration_reviews: Record<string, unknown>[];
-  default_base_dir: string;
-};
-
-export type WiredCloudCard = {
-  id: string;
-  public_id?: string | null;
-  title?: string | null;
-  name?: string | null;
-  body?: string | null;
-  description?: string | null;
-  status?: string | null;
-  priority?: string | null;
-  updated_at?: string | null;
-  workspace_id?: string | null;
-  workspace_name?: string | null;
-  project_id?: string | null;
-  project_name?: string | null;
-  assignee_user_id?: string | null;
-  assignee_name?: string | null;
-  owner_user_id?: string | null;
-  document_ids?: string[];
-  wired_task_status?: string | null;
-  wired_task_kind?: string | null;
-  [key: string]: unknown;
-};
-
-export type WiredCloudDocument = {
-  id: string;
-  workspace_id: string;
-  project_id?: string | null;
-  card_id?: string | null;
-  kind?: string;
-  title: string;
-  slug: string;
-  body?: string;
-  updated_at?: string | null;
-};
-
-export type WiredCloudCapability = {
-  id: string;
-  workspace_id: string;
-  skill_id: string;
-  framework_id?: string | null;
-  label: string;
-  targets?: WorkspaceSkillTarget[] | string[] | unknown;
-  auto?: boolean;
-  install_spec?: Record<string, unknown> | unknown;
-};
-
-export type WiredCloudProjectCloneSelection = {
-  project_id: string;
-  clone: boolean;
-};
-
-export type WiredCloudInstallInput = {
-  base_dir: string;
-  workspace_ids: string[];
-  project_clone_selections: WiredCloudProjectCloneSelection[];
-};
-
-export type WiredCloudWorkspaceInstallResult = {
-  cloud_id: string;
-  name: string;
-  local_workspace_id?: number | null;
-  root_path?: string | null;
-  status: string;
-  message: string;
-};
-
-export type WiredCloudProjectInstallResult = {
-  cloud_id: string;
-  workspace_id: string;
-  name: string;
-  remote_url?: string | null;
-  local_project_id?: number | null;
-  path?: string | null;
-  status: string;
-  message: string;
-};
-
-export type WiredCloudCapabilityInstallResult = {
-  capability_id: string;
-  workspace_id: string;
-  skill_id: string;
-  label: string;
-  targets: string[];
-  status: string;
-  message: string;
-};
-
-export type WiredCloudDocumentInstallFailure = {
-  document_id: string;
-  workspace_id: string;
-  title: string;
-  message: string;
-};
-
-export type WiredCloudCapabilityChecklistItem = {
-  capability_id: string;
-  workspace_id: string;
-  skill_id: string;
-  label: string;
-  targets: string[];
-  instructions: string;
-};
-
-export type WiredCloudInstallReport = {
-  workspaces: WiredCloudWorkspaceInstallResult[];
-  projects: WiredCloudProjectInstallResult[];
-  imported_cards: number;
-  imported_workflows: number;
-  imported_documents: number;
-  failed_documents: WiredCloudDocumentInstallFailure[];
-  installed_capabilities: WiredCloudCapabilityInstallResult[];
-  pending_capabilities: WiredCloudCapabilityChecklistItem[];
-  server_revision?: string | null;
-};
-
 export type Project = {
   id: number;
   workspace_id: number;
@@ -589,6 +320,12 @@ export type RequirementCard = {
   title: string;
   slug: string;
   body: string;
+  /** Task priority. high | medium | low. */
+  priority: string;
+  /** JSON-encoded ChecklistItem[] of subtasks. */
+  checklist_json: string;
+  /** Free-form instructions appended to the agent prompt when running this task. */
+  agent_prompt: string;
   status: RequirementStatus | string;
   prd_slug?: string | null;
   /** Which workbench flow this card follows; null/undefined = shared intake backlog. */
@@ -597,6 +334,13 @@ export type RequirementCard = {
   archived_at?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+/** A single subtask inside a task card's checklist (`checklist_json`). */
+export type ChecklistItem = {
+  id: string;
+  text: string;
+  done: boolean;
 };
 
 export type RequirementStageForm = {

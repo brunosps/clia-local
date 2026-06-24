@@ -5,7 +5,6 @@ import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
   Bot,
-  BookOpen,
   Boxes,
   Check,
   CheckCircle2,
@@ -16,19 +15,15 @@ import {
   FolderPlus,
   ChevronRight,
   CircleDot,
-  ClipboardList,
-  Cloud,
   Code2,
   Columns3,
   Copy,
   Download,
   Eye,
-  ExternalLink,
   FileText,
   Folder,
   FolderOpen,
   ListChecks,
-  Package,
   Pencil,
   GitFork,
   GitBranch,
@@ -81,6 +76,17 @@ import {
   parseFlowInterviewResponse,
   type FlowInterviewTurn,
 } from "./flowInterview";
+import {
+  analyzeInterviewPrompt,
+  analyzeAnswerPrompt,
+  parseAnalyzeInterviewResponse,
+} from "./analyzeInterview";
+import {
+  suggestionInterviewPrompt,
+  suggestionAnswerPrompt,
+  parseSuggestionInterviewResponse,
+  type SuggestionItem,
+} from "./suggestionInterview";
 import {
   buildLocalProjectBlueprintPlan,
   buildProjectBlueprintPrompt,
@@ -175,7 +181,6 @@ import {
   workspaceSkillFilePath,
 } from "./workspaceSkills";
 import { api } from "./tauri";
-import { wiredTaskStatusView } from "./task-status";
 import type {
   AgentMessage,
   AgentMetricEvent,
@@ -225,16 +230,10 @@ import type {
   WorkspaceSkill,
   WorkspaceSkillTarget,
   WorkspaceSolutionImportReport,
-  WiredCloudBootstrap,
-  WiredCloudCapability,
-  WiredCloudCard,
-  WiredCloudInstallReport,
-  WiredCloudWorkspace,
-  WiredStatus,
-  WiredTaskDocumentInput,
-  WiredTaskRequest,
+  RequirementCard,
+  ChecklistItem,
+  RequirementAttachment,
 } from "./types";
-import { deriveCapabilityStatuses, normalizeCapabilityTargets } from "./capabilities-status";
 import { computeGraph } from "./gitGraph";
 import {
   composeDwPlanCommand,
@@ -260,7 +259,15 @@ import {
   pickActiveWorkspace,
   projectDisplayName,
 } from "./workspace";
-import { buildQueue, installedWorkspaceIds, type QueueBucket, type QueueCard } from "./queue";
+import {
+  buildQueue,
+  bucketCanonicalStatus,
+  parseChecklist,
+  serializeChecklist,
+  QUEUE_BUCKETS,
+  type QueueBucket,
+  type QueueCard,
+} from "./queue";
 
 const DeployPackagesPanel = lazy(() => import("./DeployPackagesPanel"));
 const MonacoSource = lazy(() =>
@@ -275,62 +282,7 @@ const MarkdownPreview = lazy(() =>
 
 const defaultProjectPath = import.meta.env.VITE_DEFAULT_PROJECT_PATH || "/home/bruno/code/clia-wks";
 
-function wiredPayloadString(payload: Record<string, unknown>, keys: string[]) {
-  for (const key of keys) {
-    const value = payload[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-function wiredTaskTitle(task: WiredTaskRequest) {
-  return (
-    wiredPayloadString(task.payload, ["card_title", "title", "summary"]) ||
-    (task.kind === "analyze-project" ? "Analisar projeto" : "") ||
-    (task.kind === "opportunities" ? "Mapear oportunidades" : "") ||
-    `Tarefa WIRED ${task.task_id.slice(0, 8)}`
-  );
-}
-
-function wiredTaskPrompt(task: WiredTaskRequest) {
-  if (task.mode === "raw_prompt") {
-    return wiredPayloadString(task.payload, ["raw_prompt", "prompt", "command"]);
-  }
-  const command = wiredPayloadString(task.payload, ["command", "workflow_command"]);
-  if (command) return command;
-  if (task.kind === "analyze-project") return "dw-analyze-project";
-  if (task.kind === "opportunities") return "dw-opportunities";
-  return [
-    wiredPayloadString(task.payload, ["card_title", "title"]),
-    wiredPayloadString(task.payload, ["card_body", "body", "description"]),
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function wiredTaskPreview(task: WiredTaskRequest) {
-  const prompt = wiredTaskPrompt(task);
-  if (prompt) return prompt;
-  return JSON.stringify(task.payload, null, 2);
-}
-
-type WiredTaskFeedStatus = "received" | "running" | "done" | "failed" | "rejected";
-
-type WiredTaskFeedEntry = {
-  task: WiredTaskRequest;
-  status: WiredTaskFeedStatus;
-};
-
-type WiredRevokedEvent = {
-  message?: string;
-  status?: WiredStatus | null;
-};
-
-type WiredStatusEvent = {
-  connected?: boolean;
-};
-
-type Tab = "queue" | "knowledge" | "code" | "git" | "deploy" | "agents" | "skills" | "settings";
+type Tab = "queue" | "code" | "git" | "deploy" | "agents" | "settings";
 type LocalGitRefreshState = "idle" | "cached" | "checking" | "loading" | "stale" | "error";
 type DiffRefreshOptions = {
   background?: boolean;
@@ -340,8 +292,6 @@ type DiffRefreshOptions = {
 const DEFAULT_UNTRACKED_LIMIT = 500;
 const EMPTY_PALETTE_COMMANDS: DwCommand[] = [];
 const EMPTY_PALETTE_SKILLS: DwSkill[] = [];
-// clia-local: the live cloud task feed does not exist locally — a stable empty array.
-const EMPTY_WIRED_TASK_FEED: WiredTaskFeedEntry[] = [];
 type DwArtifactPreview = { relativePath: string; content: string };
 type AgentProfileDraft = {
   name: string;
@@ -482,19 +432,6 @@ const DEFAULT_EXPLORER_WIDTH = 300;
 const DEFAULT_GIT_SIDEBAR_WIDTH = 240;
 const DEFAULT_PATCH_LIST_WIDTH = 320;
 const APP_VERSION = packageInfo.version;
-// clia-local: single-user local mode. There is no cloud/device pairing — the app
-// runs "paired" against the local SQLite store and the queue reads local cards.
-const LOCAL_USER_ID = "local";
-const LOCAL_WIRED_STATUS: WiredStatus = {
-  portal_url: "",
-  paired: true,
-  connected: true,
-  device_id: "local",
-  user_email: null,
-  organization_id: "local",
-  pending_user_code: null,
-  last_connected_at: null,
-};
 const PANE_WIDTH_BOUNDS = {
   explorer: { min: 200, max: 560 },
   gitSidebar: { min: 200, max: 560 },
@@ -520,6 +457,7 @@ export function App() {
   );
   const [activeFlowId, setActiveFlowId] = useState<string>("dev-workflow");
   const workbench = flowRegistry.schemas[activeFlowId] ?? DEFAULT_WORKBENCH_SCHEMA;
+  const activeFlowMeta = flowRegistry.flows.find((flow) => flow.id === activeFlowId) ?? null;
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<Workspace | null>(null);
@@ -556,31 +494,12 @@ export function App() {
   const { notice, dialog: noticeDialog } = useNotice();
   const { confirm: appConfirm, dialog: appConfirmDialog } = useConfirm();
   const { prompt: appPrompt, dialog: appPromptDialog } = usePrompt();
-  const [wiredAuthChecked, setWiredAuthChecked] = useState(true);
-  const [wiredAuthStatus, setWiredAuthStatus] = useState<WiredStatus | null>(LOCAL_WIRED_STATUS);
-  const [wiredAuthPortalUrl, setWiredAuthPortalUrl] = useState("http://127.0.0.1:5000");
-  const [wiredAuthBusy, setWiredAuthBusy] = useState(false);
-  const [wiredAuthError, setWiredAuthError] = useState("");
-  const [wiredAuthMessage, setWiredAuthMessage] = useState("");
-  const [wiredAuthSessionUnlocked, setWiredAuthSessionUnlocked] = useState(true);
-  const [wiredAuthExpiresAt, setWiredAuthExpiresAt] = useState<number | null>(null);
-  const [wiredAuthExpired, setWiredAuthExpired] = useState(false);
-  const [wiredAuthSecondsLeft, setWiredAuthSecondsLeft] = useState<number | null>(null);
-  const wiredPollRef = useRef<() => Promise<void>>(async () => {});
-  const wiredPollInFlightRef = useRef(false);
-  const [wiredAuthResuming, setWiredAuthResuming] = useState(false);
-  const wiredResumeAttemptedRef = useRef(false);
+  const [cards, setCards] = useState<RequirementCard[]>([]);
+  const [cardsLoaded, setCardsLoaded] = useState(false);
+  const [cardsError, setCardsError] = useState("");
+  const [queueProjectFilter, setQueueProjectFilter] = useState<number | null>(null);
+  const [openTaskId, setOpenTaskId] = useState<number | null>(null);
   const [localRegistryChecked, setLocalRegistryChecked] = useState(false);
-  const [wiredCloudBootstrap, setWiredCloudBootstrap] = useState<WiredCloudBootstrap | null>(null);
-  const [wiredCloudBootstrapChecked, setWiredCloudBootstrapChecked] = useState(false);
-  const [cloudInstallBaseDir, setCloudInstallBaseDir] = useState("");
-  const [cloudInstallWorkspaceIds, setCloudInstallWorkspaceIds] = useState<string[]>([]);
-  const [cloudInstallProjectIds, setCloudInstallProjectIds] = useState<string[]>([]);
-  const [cloudInstallBusy, setCloudInstallBusy] = useState(false);
-  const [cloudInstallError, setCloudInstallError] = useState("");
-  const [cloudInstallReport, setCloudInstallReport] = useState<WiredCloudInstallReport | null>(
-    null,
-  );
   const settleAiCommit = useCallback(
     (message: string | null, failure?: string, options: { stopSession?: boolean } = {}) => {
       const resolve = aiCommitResolveRef.current;
@@ -600,92 +519,26 @@ export function App() {
     },
     [notice],
   );
-  const seedWiredCloudInstallState = useCallback((bootstrap: WiredCloudBootstrap) => {
-    const workspaceIds = bootstrap.workspaces
-      .filter((workspace) => !workspace.installed)
-      .map((workspace) => workspace.id);
-    const selectedWorkspaceIds =
-      workspaceIds.length > 0
-        ? workspaceIds
-        : bootstrap.workspaces.map((workspace) => workspace.id);
-    const selectedWorkspaceSet = new Set(selectedWorkspaceIds);
-    const projectIds = bootstrap.projects
-      .filter(
-        (project) =>
-          selectedWorkspaceSet.has(project.workspace_id) &&
-          !project.installed &&
-          Boolean(project.repository_url?.trim()),
-      )
-      .map((project) => project.id);
-    setCloudInstallWorkspaceIds(selectedWorkspaceIds);
-    setCloudInstallProjectIds(projectIds);
-    setCloudInstallBaseDir(bootstrap.default_base_dir || "");
-  }, []);
-  // clia-local: build the queue bootstrap from the LOCAL store (workspaces +
-  // requirement cards) instead of the cloud portal. The data is shaped exactly as
-  // the existing QueuePanel/buildQueue expect, with a single synthetic local user
-  // so every local card is "assigned to you".
-  const refreshWiredCloudBootstrap = useCallback(async () => {
-    setWiredCloudBootstrapChecked(false);
-    setCloudInstallError("");
-    const wsResult = await api.listWorkspaces();
-    if (!wsResult.ok) {
-      setWiredCloudBootstrap(null);
-      setCloudInstallError(wsResult.error);
-      setWiredCloudBootstrapChecked(true);
+  // clia-local: load the active workspace's tasks (requirement cards) from the
+  // LOCAL store. The board is scoped to the active workspace; projects come from
+  // the existing `projects` state.
+  const loadWorkspaceTasks = useCallback(async (): Promise<RequirementCard[] | null> => {
+    if (!activeWorkspace) {
+      setCards([]);
+      setCardsLoaded(true);
+      return [];
+    }
+    setCardsError("");
+    const result = await api.listRequirementCards(activeWorkspace.id);
+    if (!result.ok) {
+      setCardsError(result.error);
+      setCardsLoaded(true);
       return null;
     }
-    const workspaces = wsResult.value;
-    const cloudWorkspaces: WiredCloudWorkspace[] = workspaces.map((ws) => ({
-      id: String(ws.id),
-      name: ws.name,
-      installed: true,
-      local_workspace_id: ws.id,
-      local_root_path: ws.root_path,
-    }));
-    const cards: WiredCloudCard[] = [];
-    for (const ws of workspaces) {
-      const cardsResult = await api.listRequirementCards(ws.id);
-      if (!cardsResult.ok) continue;
-      for (const card of cardsResult.value) {
-        if (card.archived_at) continue;
-        cards.push({
-          id: String(card.id),
-          public_id: card.public_id,
-          title: card.title,
-          body: card.body,
-          status: card.status,
-          priority: "medium",
-          updated_at: card.updated_at,
-          workspace_id: String(card.workspace_id),
-          workspace_name: ws.name,
-          assignee_user_id: LOCAL_USER_ID,
-          assignee_name: "Você",
-          document_ids: [],
-          wired_task_status: null,
-          wired_task_kind: null,
-        });
-      }
-    }
-    const bootstrap: WiredCloudBootstrap = {
-      current_user_id: LOCAL_USER_ID,
-      organization: { id: "local", name: "Local" },
-      workspaces: cloudWorkspaces,
-      projects: [],
-      cards,
-      documents: [],
-      capabilities: [],
-      workflows: [],
-      workflow_assignments: [],
-      workflow_migration_reviews: [],
-      default_base_dir: "",
-    };
-    setWiredCloudBootstrap(bootstrap);
-    setWiredAuthError("");
-    setWiredCloudBootstrapChecked(true);
-    return bootstrap;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    setCards(result.value);
+    setCardsLoaded(true);
+    return result.value;
+  }, [activeWorkspace]);
   const [flowBuilder, setFlowBuilder] = useState<{ mode: "new" | "edit"; flowId: string } | null>(
     null,
   );
@@ -722,11 +575,18 @@ export function App() {
   } | null>(null);
   const flowInterviewSessionIdRef = useRef<number | null>(null);
   const parsedFlowMessageIdRef = useRef<number | null>(null);
+  // clia-local: per-project analysis (dw-analyze-project) + opportunities, run via
+  // the local agent. `projectAnalyzed` derives from the flow's analyzeMarker on disk.
+  const [analysisModalOpen, setAnalysisModalOpen] = useState(false);
+  const [projectAnalyzed, setProjectAnalyzed] = useState<boolean | null>(null);
+  const [analysisMessages, setAnalysisMessages] = useState<AgentMessage[]>([]);
+  const analysisSessionIdRef = useRef<number | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreview | null>(null);
   const [dwArtifactPreview, setDwArtifactPreview] = useState<DwArtifactPreview | null>(null);
   const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSource[]>([]);
   const [projectBlueprints, setProjectBlueprints] = useState<ProjectBlueprint[]>([]);
   const [projectBlueprintModalOpen, setProjectBlueprintModalOpen] = useState(false);
+  const [addProjectModalOpen, setAddProjectModalOpen] = useState(false);
   const [projectBlueprintTitle, setProjectBlueprintTitle] = useState("");
   const [projectBlueprintIdea, setProjectBlueprintIdea] = useState("");
   const [projectBlueprintSourceIds, setProjectBlueprintSourceIds] = useState<number[]>([]);
@@ -762,21 +622,6 @@ export function App() {
   const [agentComposer, setAgentComposer] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentError, setAgentError] = useState("");
-  const [wiredTasks, setWiredTasks] = useState<WiredTaskRequest[]>([]);
-  const [wiredTaskFeed, setWiredTaskFeed] = useState<WiredTaskFeedEntry[]>([]);
-  const markWiredTask = useCallback((task: WiredTaskRequest, status: WiredTaskFeedStatus) => {
-    setWiredTaskFeed((entries) => [
-      { task, status },
-      ...entries.filter((entry) => entry.task.task_id !== task.task_id),
-    ].slice(0, 15));
-  }, []);
-  const wiredSessionTasksRef = useRef<Map<number, WiredTaskRequest>>(new Map());
-  const wiredAutoTaskIdsRef = useRef<Set<string>>(new Set());
-  const startWiredTaskRef = useRef<(task: WiredTaskRequest) => Promise<void>>(async () => {});
-  const reportWiredTaskCompletionRef = useRef<
-    (task: WiredTaskRequest, sessionId: number, status: string) => Promise<void>
-  >(async () => {});
-  const wiredConnectScopeRef = useRef<string | null>(null);
   const [, setReport] = useState<PreflightReport | null>(null);
   // Legacy text status/graph (kept warm for other views; GitWorkbench fetches its own structured data).
   const [, setGitStatus] = useState("");
@@ -846,8 +691,6 @@ export function App() {
     agentProfiles.find((profile) => profile.id === activeAgentProfileId) ??
     agentProfiles[0] ??
     null;
-  startWiredTaskRef.current = startWiredTask;
-  reportWiredTaskCompletionRef.current = reportWiredTaskCompletion;
   const selectedAiCommitProfileId = useMemo(
     () =>
       resolveAiCommitProfileId(agentProfiles, aiCommitProfileId, activeAgentProfile?.id ?? null),
@@ -867,33 +710,6 @@ export function App() {
     [agentSessions, activeAgentProfile?.id, activeAgentSessionId],
   );
   const activeAgentWorking = hasRunningAgentSession(agentSessions);
-  const wiredAgentProfiles = useMemo(
-    () =>
-      agentProfiles.map((profile) => ({
-        id: String(profile.id),
-        label: profile.name,
-        provider: profile.provider,
-        model: profile.model ?? null,
-      })),
-    [agentProfiles],
-  );
-  const wiredAgentProfilesKey = useMemo(
-    () => JSON.stringify(wiredAgentProfiles),
-    [wiredAgentProfiles],
-  );
-  const activeWiredTask =
-    activeTab === "queue" ? null : (wiredTasks.find((task) => task.mode !== "auto") ?? null);
-  const activeCloudCapabilities = useMemo(
-    () =>
-      wiredCloudBootstrap?.capabilities.filter((capability) => {
-        if (!activeWorkspace) return false;
-        const mapping = wiredCloudBootstrap.workspaces.find(
-          (workspace) => workspace.local_workspace_id === activeWorkspace.id,
-        );
-        return mapping ? capability.workspace_id === mapping.id : false;
-      }) ?? [],
-    [activeWorkspace, wiredCloudBootstrap],
-  );
   const currentPath = projectPath.trim();
   const workspaceAccentColor =
     activeWorkspace && workspaceAccent?.workspaceId === activeWorkspace.id
@@ -1031,131 +847,31 @@ export function App() {
     void api.setAppState(THEME_APP_STATE_KEY, nextThemeMode);
   }, []);
 
-  // clia-local: no device pairing. Start "paired" against the local store and load
-  // the local queue bootstrap (workspaces + requirement cards) on mount.
+  // clia-local: load the active workspace's tasks on mount and whenever the
+  // active workspace changes (loadWorkspaceTasks depends on activeWorkspace).
   useEffect(() => {
-    setWiredAuthChecked(true);
-    setWiredAuthSessionUnlocked(true);
-    void refreshWiredCloudBootstrap();
-  }, [refreshWiredCloudBootstrap]);
+    void loadWorkspaceTasks();
+  }, [loadWorkspaceTasks]);
 
-  // Auto-resume a paired session: if a saved token exists, validate it via the
-  // bootstrap and unlock the app, so the login gate is skipped on every launch.
-  // A revoked/expired token fails the bootstrap (the Rust side clears the
-  // pairing), bringing the gate back. Attempted once per mount.
-  useEffect(() => {
-    if (
-      !wiredAuthChecked ||
-      !wiredAuthStatus?.paired ||
-      wiredAuthSessionUnlocked ||
-      wiredResumeAttemptedRef.current
-    ) {
+  // clia-local: a project is "analyzed" when the active flow's analyzeMarker
+  // (e.g. .dw/rules/index.md) exists on disk. Re-checked on project/flow change.
+  async function refreshAnalysisStatus() {
+    const analyzeCommand = activeFlowMeta?.analyzeCommand;
+    if (!activeProject || !analyzeCommand) {
+      setProjectAnalyzed(null);
       return;
     }
-    wiredResumeAttemptedRef.current = true;
-    void (async () => {
-      setWiredAuthResuming(true);
-      const bootstrap = await refreshWiredCloudBootstrap();
-      if (bootstrap) {
-        setWiredAuthSessionUnlocked(true);
-      }
-      setWiredAuthResuming(false);
-    })();
-  }, [
-    wiredAuthChecked,
-    wiredAuthStatus?.paired,
-    wiredAuthSessionUnlocked,
-    refreshWiredCloudBootstrap,
-  ]);
+    const marker = activeFlowMeta?.analyzeMarker ?? ".dw/rules/index.md";
+    const sep = activeProject.path.includes("\\") ? "\\" : "/";
+    const markerPath = `${activeProject.path.replace(/[\\/]+$/, "")}${sep}${marker}`;
+    const result = await api.readTextFile(markerPath);
+    setProjectAnalyzed(result.ok);
+  }
 
   useEffect(() => {
-    if (!wiredAuthChecked || !wiredAuthStatus?.paired || !wiredAuthSessionUnlocked) return;
-    const handle = window.setTimeout(() => {
-      void refreshWiredCloudBootstrap();
-    }, 0);
-    return () => window.clearTimeout(handle);
-  }, [
-    refreshWiredCloudBootstrap,
-    wiredAuthChecked,
-    wiredAuthSessionUnlocked,
-    wiredAuthStatus?.paired,
-  ]);
-
-  // Auto-poll the device login so the user doesn't have to click "Validar
-  // login": once a code is pending, poll until authorized or expired. Kept in a
-  // ref (latest-callback pattern) so the interval always runs current logic.
-  wiredPollRef.current = async () => {
-    if (wiredPollInFlightRef.current) return;
-    wiredPollInFlightRef.current = true;
-    const result = await api.pollWiredDeviceLogin();
-    wiredPollInFlightRef.current = false;
-    if (!result.ok) {
-      setWiredAuthError(result.error);
-      return;
-    }
-    setWiredAuthError("");
-    const pollStatus = result.value.status;
-    if (pollStatus === "authorized") {
-      await onWiredAuthorized(result.value);
-    } else if (pollStatus === "expired_token") {
-      setWiredAuthExpired(true);
-    } else if (pollStatus !== "authorization_pending") {
-      setWiredAuthMessage(`Pareamento: ${pollStatus}. Gere um novo código.`);
-      setWiredAuthExpired(true);
-    }
-  };
-
-  useEffect(() => {
-    if (!wiredAuthStatus?.pending_user_code || wiredAuthSessionUnlocked || wiredAuthExpired) {
-      return;
-    }
-    void wiredPollRef.current();
-    const interval = window.setInterval(() => void wiredPollRef.current(), 3000);
-    return () => window.clearInterval(interval);
-  }, [wiredAuthStatus?.pending_user_code, wiredAuthSessionUnlocked, wiredAuthExpired]);
-
-  useEffect(() => {
-    if (!wiredAuthExpiresAt || wiredAuthSessionUnlocked || wiredAuthExpired) {
-      return;
-    }
-    const tick = () => {
-      const left = Math.max(0, Math.ceil((wiredAuthExpiresAt - Date.now()) / 1000));
-      setWiredAuthSecondsLeft(left);
-      if (left <= 0) setWiredAuthExpired(true);
-    };
-    tick();
-    const interval = window.setInterval(tick, 1000);
-    return () => window.clearInterval(interval);
-  }, [wiredAuthExpiresAt, wiredAuthSessionUnlocked, wiredAuthExpired]);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen<WiredRevokedEvent>("wired://revoked", (event) => {
-      if (disposed) return;
-      const status = event.payload?.status ?? null;
-      setWiredAuthChecked(true);
-      setWiredAuthStatus(status);
-      if (status?.portal_url) setWiredAuthPortalUrl(status.portal_url);
-      setWiredAuthError(event.payload?.message ?? "Acesso WIRED revogado no portal.");
-      setWiredAuthMessage("");
-      setWiredAuthSessionUnlocked(false);
-      setWiredCloudBootstrap(null);
-      setWiredCloudBootstrapChecked(false);
-      setCloudInstallError("");
-      setCloudInstallReport(null);
-      wiredConnectScopeRef.current = null;
-      setWiredTasks([]);
-      setWiredTaskFeed([]);
-    }).then((listener) => {
-      if (disposed) listener();
-      else unlisten = listener;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
+    void refreshAnalysisStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProject?.id, activeFlowId]);
 
   useEffect(() => {
     selectedChangedFileRef.current = selectedChangedFile;
@@ -1317,143 +1033,6 @@ export function App() {
     agentSessionsRef.current = agentSessions;
   }, [agentSessions]);
 
-  useEffect(() => {
-    const workspace = activeWorkspace;
-    if (!workspace) {
-      wiredConnectScopeRef.current = null;
-      void api.disconnectWiredWorkspace();
-      return;
-    }
-    const scope = `${workspace.id}:${activeProject?.id ?? "workspace"}:${wiredAgentProfilesKey}`;
-    if (wiredConnectScopeRef.current === scope) return;
-    let cancelled = false;
-    void (async () => {
-      const status = await api.wiredStatus();
-      if (cancelled || !status.ok || !status.value.paired) return;
-      const result = await api.connectWiredWorkspace({
-        workspace_id: workspace.id,
-        workspace_name: workspace.name,
-        project_id: activeProject?.id ?? null,
-        project_name: activeProject ? projectDisplayName(activeProject) : null,
-        agent_profiles: wiredAgentProfiles,
-      });
-      if (cancelled) return;
-      if (result.ok) {
-        wiredConnectScopeRef.current = scope;
-      } else {
-        console.warn("CLIA WIRED connect failed", result.error);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeWorkspace, activeProject, wiredAgentProfiles, wiredAgentProfilesKey]);
-
-  async function connectCurrentWorkspaceWired() {
-    const workspace = activeWorkspace;
-    if (!workspace) return;
-    setWiredAuthBusy(true);
-    setWiredAuthError("");
-    wiredConnectScopeRef.current = null;
-    await api.disconnectWiredWorkspace();
-    const result = await api.connectWiredWorkspace({
-      workspace_id: workspace.id,
-      workspace_name: workspace.name,
-      project_id: activeProject?.id ?? null,
-      project_name: activeProject ? projectDisplayName(activeProject) : null,
-      agent_profiles: wiredAgentProfiles,
-    });
-    if (result.ok) {
-      setWiredAuthStatus(result.value);
-      setWiredAuthPortalUrl(result.value.portal_url);
-      wiredConnectScopeRef.current = `${workspace.id}:${activeProject?.id ?? "workspace"}:${wiredAgentProfilesKey}`;
-      await refreshWiredCloudBootstrap();
-    } else {
-      setWiredAuthError(result.error);
-    }
-    setWiredAuthBusy(false);
-  }
-
-  async function signOutWired() {
-    setWiredAuthBusy(true);
-    const result = await api.clearWiredPairing();
-    if (result.ok) {
-      setWiredAuthStatus(result.value);
-      setWiredAuthSessionUnlocked(false);
-      setWiredCloudBootstrap(null);
-      setWiredCloudBootstrapChecked(false);
-      wiredConnectScopeRef.current = null;
-    } else {
-      setWiredAuthError(result.error);
-    }
-    setWiredAuthBusy(false);
-  }
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen<WiredStatusEvent>("wired://status", (event) => {
-      if (disposed) return;
-      setWiredAuthStatus((current) =>
-        current ? { ...current, connected: Boolean(event.payload.connected) } : current,
-      );
-    }).then((listener) => {
-      if (disposed) listener();
-      else unlisten = listener;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen("wired://card_updated", () => {
-      if (!disposed) void refreshWiredCloudBootstrap();
-    }).then((listener) => {
-      if (disposed) listener();
-      else unlisten = listener;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [refreshWiredCloudBootstrap]);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void listen<WiredTaskRequest>("wired://task_requested", (event) => {
-      if (disposed || !event.payload?.task_id) return;
-      const task = event.payload;
-      markWiredTask(task, "received");
-      setWiredTasks((items) =>
-        items.some((item) => item.task_id === task.task_id) ? items : [...items, task],
-      );
-    }).then((listener) => {
-      if (disposed) listener();
-      else unlisten = listener;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [markWiredTask]);
-
-  useEffect(() => {
-    const task = wiredTasks.find(
-      (item) => item.mode === "auto" && !wiredAutoTaskIdsRef.current.has(item.task_id),
-    );
-    if (!task) return;
-    const profileAvailable = task.agent_profile_id
-      ? agentProfiles.some((profile) => String(profile.id) === task.agent_profile_id)
-      : Boolean(activeAgentProfile);
-    if (!profileAvailable) return;
-    wiredAutoTaskIdsRef.current.add(task.task_id);
-    void startWiredTaskRef.current(task);
-  }, [activeAgentProfile, agentProfiles, wiredTasks]);
 
   useEffect(() => {
     const workspaceId = activeWorkspace?.id;
@@ -2036,12 +1615,7 @@ export function App() {
   // every load, which would otherwise re-fire this effect and refetch forever.
   // Explicit reloads happen via selectWorkspace/selectProject/refresh actions.
   useEffect(() => {
-    if (
-      !wiredAuthChecked ||
-      !wiredAuthStatus?.paired ||
-      !wiredCloudBootstrapChecked ||
-      !wiredCloudBootstrap
-    ) {
+    if (!cardsLoaded) {
       return;
     }
     const handle = window.setTimeout(() => {
@@ -2049,7 +1623,7 @@ export function App() {
     }, 0);
     return () => window.clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wiredAuthChecked, wiredAuthStatus?.paired, wiredCloudBootstrapChecked, wiredCloudBootstrap]);
+  }, [cardsLoaded]);
 
   useEffect(() => {
     let disposed = false;
@@ -2131,6 +1705,16 @@ export function App() {
             : [...messages, nextMessage],
         );
       }
+      if (
+        nextMessage &&
+        shouldAppendAgentMessage(analysisSessionIdRef.current, event.payload.session_id)
+      ) {
+        setAnalysisMessages((messages) =>
+          messages.some((message) => message.id === nextMessage.id)
+            ? messages
+            : [...messages, nextMessage],
+        );
+      }
       if (event.payload.kind === "error" && isActiveSession) {
         setAgentError(event.payload.content);
       }
@@ -2174,17 +1758,6 @@ export function App() {
               : "O agente terminou sem retornar uma mensagem de commit.");
           settleAiCommit(null, failure);
         });
-      }
-      const wiredTask = wiredSessionTasksRef.current.get(event.payload.session.id);
-      if (wiredTask && ["done", "failed", "stopped"].includes(event.payload.session.status)) {
-        wiredSessionTasksRef.current.delete(event.payload.session.id);
-        const status =
-          event.payload.session.status === "done"
-            ? "done"
-            : event.payload.session.status === "stopped"
-              ? "cancelled"
-              : "failed";
-        void reportWiredTaskCompletionRef.current(wiredTask, event.payload.session.id, status);
       }
       setAgentSessions((sessions) => upsertAgentSession(sessions, event.payload.session));
     }).then((unlisten) => {
@@ -2490,136 +2063,6 @@ export function App() {
     return result.value;
   }
 
-  async function approveWiredTask(task: WiredTaskRequest) {
-    await startWiredTask(task);
-  }
-
-  async function reportWiredTaskCompletion(
-    task: WiredTaskRequest,
-    sessionId: number,
-    status: string,
-  ) {
-    let documents: WiredTaskDocumentInput[] = [];
-    if (status === "done") {
-      const messagesResult = await api.listAgentMessages(sessionId);
-      if (messagesResult.ok) {
-        const assistantMessage = [...messagesResult.value]
-          .reverse()
-          .find((message) => message.role === "assistant" && message.content.trim());
-        if (assistantMessage) {
-          const kind =
-            task.kind === "analyze-project"
-              ? "analysis"
-              : task.kind === "opportunities"
-                ? "opportunities"
-                : task.kind === "interview"
-                  ? "interview"
-                  : task.kind === "prd"
-                    ? "prd"
-                    : "doc";
-          documents = [
-            {
-              title: `${wiredTaskTitle(task)} - resultado`,
-              slug: `wired-${task.task_id.slice(0, 8)}-${kind}`,
-              kind,
-              body: assistantMessage.content,
-            },
-          ];
-        }
-      }
-    }
-    const result = await api.reportWiredTaskStatus({
-      task_id: task.task_id,
-      status,
-      local_session_id: sessionId,
-      summary: status === "done" ? `Sessão local ${sessionId} concluída.` : null,
-      error_message:
-        status === "done" ? null : `Sessão local ${sessionId} terminou com status ${status}.`,
-      result: {
-        kind: task.kind ?? null,
-        local_session_id: sessionId,
-      },
-      documents,
-    });
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    markWiredTask(task, status === "done" ? "done" : "failed");
-    void refreshWiredCloudBootstrap();
-  }
-
-  async function startWiredTask(task: WiredTaskRequest) {
-    const profile =
-      (task.agent_profile_id
-        ? agentProfiles.find((item) => String(item.id) === task.agent_profile_id)
-        : activeAgentProfile) ?? null;
-    if (!profile) {
-      const message = "Perfil de agente WIRED indisponível neste GUI.";
-      setError(message);
-      markWiredTask(task, "failed");
-      void api.reportWiredTaskStatus({
-        task_id: task.task_id,
-        status: "failed",
-        error_message: message,
-        result: { kind: task.kind ?? null },
-      });
-      setWiredTasks((items) => items.filter((item) => item.task_id !== task.task_id));
-      return;
-    }
-    const prompt = wiredTaskPrompt(task);
-    if (!prompt.trim()) {
-      const message = "Tarefa WIRED sem comando ou prompt executável.";
-      setError(message);
-      markWiredTask(task, "failed");
-      void api.reportWiredTaskStatus({
-        task_id: task.task_id,
-        status: "failed",
-        error_message: message,
-        result: { kind: task.kind ?? null },
-      });
-      setWiredTasks((items) => items.filter((item) => item.task_id !== task.task_id));
-      return;
-    }
-    const session = await sendAgentPrompt(prompt, undefined, profile, { stayOnTab: false });
-    if (!session) {
-      markWiredTask(task, "failed");
-      void api.reportWiredTaskStatus({
-        task_id: task.task_id,
-        status: "failed",
-        error_message: "Falha ao iniciar a sessão local do agente.",
-        result: { kind: task.kind ?? null },
-      });
-      setWiredTasks((items) => items.filter((item) => item.task_id !== task.task_id));
-      return;
-    }
-    wiredSessionTasksRef.current.set(session.id, task);
-    setWiredTasks((items) => items.filter((item) => item.task_id !== task.task_id));
-    markWiredTask(task, "running");
-    void api.reportWiredTaskStatus({
-      task_id: task.task_id,
-      status: "running",
-      local_session_id: session.id,
-      summary: `Sessão local ${session.id} iniciada.`,
-      result: { kind: task.kind ?? null },
-    });
-  }
-
-  async function rejectWiredTask(task: WiredTaskRequest) {
-    const result = await api.reportWiredTaskStatus({
-      task_id: task.task_id,
-      status: "rejected",
-      error_message: "Execução rejeitada no GUI local.",
-      result: { kind: task.kind ?? null },
-    });
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    markWiredTask(task, "rejected");
-    setWiredTasks((items) => items.filter((item) => item.task_id !== task.task_id));
-  }
-
   async function createCodexProfile(draft: AgentProfileDraft) {
     if (!activeWorkspace) {
       setError("Selecione um workspace antes de criar um agente.");
@@ -2754,6 +2197,28 @@ export function App() {
     activeAgentSessionIdRef.current = result.value.id;
     setActiveAgentSessionId(result.value.id);
     setAgentMessages([]);
+  }
+
+  // clia-local: adicionar projeto = clonar do GitHub OU registrar uma pasta local.
+  // Reaproveita api.cloneGitProject / api.addLocalProject (backend já existente).
+  function openAddProjectModal() {
+    if (!activeWorkspace) {
+      void notice({
+        title: "Nenhum workspace",
+        body: "Crie ou selecione um workspace antes de adicionar um projeto.",
+      });
+      return;
+    }
+    setAddProjectModalOpen(true);
+  }
+
+  async function handleProjectAdded(project: Project) {
+    if (activeWorkspace) {
+      const result = await api.listProjects(activeWorkspace.id);
+      if (result.ok) setProjects(result.value);
+    }
+    selectProject(project);
+    setActiveTab("code");
   }
 
   function openProjectBlueprintModal(blueprint?: ProjectBlueprint | null) {
@@ -3106,22 +2571,38 @@ export function App() {
     if (!workspace) {
       await notice({
         title: "Nenhum workspace",
-        body: "Crie ou selecione um workspace antes de adicionar cards.",
+        body: "Crie ou selecione um workspace antes de adicionar tarefas.",
       });
       return;
     }
     const title = await appPrompt({
-      title: "Novo card",
-      label: "Título do card",
+      title: "Nova tarefa",
+      label: "Título da tarefa",
       confirmLabel: "Criar",
     });
     if (!title?.trim()) return;
-    const result = await api.createRequirementCard(workspace.id, null, [], title.trim(), "");
+    const projectIds = activeProject ? [activeProject.id] : [];
+    const result = await api.createRequirementCard(
+      workspace.id,
+      activeProject?.id ?? null,
+      projectIds,
+      title.trim(),
+      "",
+    );
     if (!result.ok) {
-      await notice({ title: "Erro ao criar card", body: result.error });
+      await notice({ title: "Erro ao criar tarefa", body: result.error });
       return;
     }
-    await refreshWiredCloudBootstrap();
+    await loadWorkspaceTasks();
+    // Open the new task so the user can fill description, checklist, projects,
+    // priority, prompt and attachments before working on it.
+    setOpenTaskId(result.value.id);
+  }
+
+  // clia-local: run a task on a local agent. Assembles prompt upstream (TaskModal);
+  // streams into the existing agent message state so the modal can show it inline.
+  async function runTaskWithAgent(prompt: string, profile: AgentProfile | null) {
+    return sendAgentPrompt(prompt, null, profile, { stayOnTab: true });
   }
 
   async function pickDirectory(setPath: (value: string) => void) {
@@ -3276,6 +2757,70 @@ export function App() {
 
   // Start the URL→flow interview: fetch the docs (Rust, with agent WebFetch
   // fallback) and ask the agent to drive an H1-H4 interview toward a flow JSON.
+  // clia-local: analysis/opportunities interview — start a fresh agent session or
+  // answer the current one. The buffer (analysisMessages) is fed by the agent
+  // event listener and parsed in ProjectAnalysisModal.
+  async function startAnalysisSession(message: string): Promise<boolean> {
+    if (!activeWorkspace || !activeProject || !activeAgentProfile) return false;
+    setAnalysisMessages([]);
+    analysisSessionIdRef.current = null;
+    const result = await api.sendAgentMessage({
+      profile_id: activeAgentProfile.id,
+      session_id: null,
+      workspace_id: activeWorkspace.id,
+      project_id: activeProject.id,
+      scope: "chat",
+      title: `Análise: ${projectDisplayName(activeProject)}`,
+      project_path: activeProject.path,
+      message,
+    });
+    if (!result.ok) {
+      setError(result.error);
+      return false;
+    }
+    analysisSessionIdRef.current = result.value.id;
+    return true;
+  }
+
+  async function answerAnalysisSession(message: string): Promise<boolean> {
+    if (!activeWorkspace || !activeProject || !activeAgentProfile) return false;
+    const sessionId = analysisSessionIdRef.current;
+    if (!sessionId) return false;
+    const result = await api.sendAgentMessage({
+      profile_id: activeAgentProfile.id,
+      session_id: sessionId,
+      workspace_id: activeWorkspace.id,
+      project_id: activeProject.id,
+      scope: "chat",
+      title: `Análise: ${projectDisplayName(activeProject)}`,
+      project_path: activeProject.path,
+      message,
+    });
+    if (!result.ok) {
+      setError(result.error);
+      return false;
+    }
+    return true;
+  }
+
+  async function createTasksFromSuggestions(items: SuggestionItem[]): Promise<number> {
+    if (!activeWorkspace || !activeProject) return 0;
+    let created = 0;
+    for (const item of items) {
+      const body = item.kind ? `[${item.kind}] ${item.body}` : item.body;
+      const result = await api.createRequirementCard(
+        activeWorkspace.id,
+        activeProject.id,
+        [activeProject.id],
+        item.title,
+        body,
+      );
+      if (result.ok) created += 1;
+    }
+    await loadWorkspaceTasks();
+    return created;
+  }
+
   async function startFlowInterview(profileId: number, url: string) {
     if (!activeWorkspace || !activeProject) {
       setError("Selecione um workspace e um projeto antes de criar o fluxo.");
@@ -4098,212 +3643,6 @@ export function App() {
     void refreshDiffReview(currentPath, { autoSelect: false, untrackedLimit: 0 });
   }
 
-  async function refreshRequiredWiredAuth() {
-    const result = await api.wiredStatus();
-    setWiredAuthChecked(true);
-    if (!result.ok) {
-      setWiredAuthError(result.error);
-      return null;
-    }
-    setWiredAuthStatus(result.value);
-    setWiredAuthPortalUrl(result.value.portal_url);
-    setWiredAuthError("");
-    return result.value;
-  }
-
-  async function startRequiredWiredLogin() {
-    setWiredAuthBusy(true);
-    setWiredAuthError("");
-    setWiredAuthMessage("");
-    setWiredAuthSessionUnlocked(false);
-    setWiredCloudBootstrap(null);
-    setWiredCloudBootstrapChecked(false);
-    const result = await api.startWiredDeviceLogin(wiredAuthPortalUrl);
-    if (!result.ok) {
-      setWiredAuthError(result.error);
-      setWiredAuthBusy(false);
-      return;
-    }
-    setWiredAuthPortalUrl(result.value.portal_url);
-    setWiredAuthExpiresAt(Date.now() + result.value.expires_in * 1000);
-    setWiredAuthExpired(false);
-    setWiredAuthMessage("Código gerado. Abra o portal e autorize — o app detecta sozinho.");
-    await refreshRequiredWiredAuth();
-    setWiredAuthBusy(false);
-  }
-
-  async function onWiredAuthorized(value: {
-    user_email?: string | null;
-    user_name?: string | null;
-  }) {
-    setWiredAuthMessage(`Login validado para ${value.user_email ?? value.user_name ?? "usuário"}.`);
-    await refreshRequiredWiredAuth();
-    const bootstrap = await refreshWiredCloudBootstrap();
-    if (bootstrap) {
-      setWiredAuthSessionUnlocked(true);
-    }
-  }
-
-  async function validateRequiredWiredLogin() {
-    setWiredAuthBusy(true);
-    setWiredAuthError("");
-    const result = await api.pollWiredDeviceLogin();
-    if (!result.ok) {
-      setWiredAuthError(result.error);
-      setWiredAuthBusy(false);
-      return;
-    }
-    if (result.value.status === "authorized") {
-      await onWiredAuthorized(result.value);
-    } else if (result.value.status === "expired_token") {
-      setWiredAuthExpired(true);
-    } else {
-      setWiredAuthMessage(`Login ainda ${result.value.status}.`);
-      await refreshRequiredWiredAuth();
-    }
-    setWiredAuthBusy(false);
-  }
-
-  async function openRequiredWiredPortal(url: string) {
-    setWiredAuthBusy(true);
-    setWiredAuthError("");
-    const result = await api.openExternalUrl(url);
-    if (!result.ok) {
-      setWiredAuthError(result.error);
-    } else {
-      setWiredAuthMessage("Portal aberto no navegador.");
-    }
-    setWiredAuthBusy(false);
-  }
-
-  function toggleCloudInstallWorkspace(workspaceId: string, selected: boolean) {
-    setCloudInstallWorkspaceIds((items) => {
-      const next = new Set(items);
-      if (selected) next.add(workspaceId);
-      else next.delete(workspaceId);
-      return Array.from(next);
-    });
-    if (!wiredCloudBootstrap) return;
-    const workspaceProjectIds = wiredCloudBootstrap.projects
-      .filter((project) => project.workspace_id === workspaceId)
-      .map((project) => project.id);
-    setCloudInstallProjectIds((items) => {
-      const next = new Set(items);
-      if (selected) {
-        for (const project of wiredCloudBootstrap.projects) {
-          if (
-            project.workspace_id === workspaceId &&
-            !project.installed &&
-            project.repository_url?.trim()
-          ) {
-            next.add(project.id);
-          }
-        }
-      } else {
-        for (const projectId of workspaceProjectIds) next.delete(projectId);
-      }
-      return Array.from(next);
-    });
-  }
-
-  function toggleCloudInstallProject(projectId: string, selected: boolean) {
-    setCloudInstallProjectIds((items) => {
-      const next = new Set(items);
-      if (selected) next.add(projectId);
-      else next.delete(projectId);
-      return Array.from(next);
-    });
-  }
-
-  async function pickCloudInstallBaseDir() {
-    const result = await api.pickDirectory();
-    if (!result.ok) {
-      setCloudInstallError(result.error);
-      return;
-    }
-    if (result.value) setCloudInstallBaseDir(result.value);
-  }
-
-  async function installCloudWorkspaces() {
-    if (!wiredCloudBootstrap) return;
-    setCloudInstallBusy(true);
-    setCloudInstallError("");
-    setCloudInstallReport(null);
-    const projectSelection = wiredCloudBootstrap.projects.map((project) => ({
-      project_id: project.id,
-      clone: cloudInstallProjectIds.includes(project.id),
-    }));
-    const result = await api.installWiredCloudWorkspaces({
-      base_dir: cloudInstallBaseDir,
-      workspace_ids: cloudInstallWorkspaceIds,
-      project_clone_selections: projectSelection,
-    });
-    if (!result.ok) {
-      setCloudInstallError(result.error);
-      setCloudInstallBusy(false);
-      return;
-    }
-
-    setCloudInstallReport(result.value);
-    const workspaceResult = await api.listWorkspaces();
-    if (workspaceResult.ok) {
-      setWorkspaces(workspaceResult.value);
-      setLocalRegistryChecked(true);
-      const firstInstalledId =
-        result.value.workspaces.find((workspace) => workspace.local_workspace_id != null)
-          ?.local_workspace_id ?? null;
-      const nextWorkspace =
-        workspaceResult.value.find((workspace) => workspace.id === firstInstalledId) ??
-        workspaceResult.value[0] ??
-        null;
-      if (nextWorkspace) {
-        await selectWorkspace(nextWorkspace);
-      }
-    } else {
-      setCloudInstallError(workspaceResult.error);
-    }
-    await refreshWiredCloudBootstrap();
-    setCloudInstallBusy(false);
-  }
-
-  async function installQueueWorkspace(workspaceId: string) {
-    if (!wiredCloudBootstrap) return;
-    setCloudInstallBusy(true);
-    setCloudInstallError("");
-    const projectSelection = wiredCloudBootstrap.projects
-      .filter((project) => project.workspace_id === workspaceId)
-      .map((project) => ({
-        project_id: project.id,
-        clone: !project.installed && Boolean(project.repository_url?.trim()),
-      }));
-    const result = await api.installWiredCloudWorkspaces({
-      base_dir: cloudInstallBaseDir || wiredCloudBootstrap.default_base_dir,
-      workspace_ids: [workspaceId],
-      project_clone_selections: projectSelection,
-    });
-    if (!result.ok) {
-      setCloudInstallError(result.error);
-      setCloudInstallBusy(false);
-      return;
-    }
-    setCloudInstallReport(result.value);
-    const workspaceResult = await api.listWorkspaces();
-    if (workspaceResult.ok) {
-      setWorkspaces(workspaceResult.value);
-      setLocalRegistryChecked(true);
-    } else {
-      setCloudInstallError(workspaceResult.error);
-    }
-    await refreshWiredCloudBootstrap();
-    setCloudInstallBusy(false);
-  }
-
-  const activeWiredTaskProfile =
-    activeWiredTask?.agent_profile_id != null
-      ? (agentProfiles.find((profile) => String(profile.id) === activeWiredTask.agent_profile_id) ??
-        null)
-      : activeAgentProfile;
-
   // clia-local: no cloud login or cloud-install gates. The app goes straight to the
   // workspace UI; creating/opening workspaces is fully local.
 
@@ -4422,7 +3761,7 @@ export function App() {
                     {
                       label: t("project.modal.title"),
                       icon: <Plus aria-hidden="true" size={14} />,
-                      onSelect: () => openProjectBlueprintModal(null),
+                      onSelect: () => openAddProjectModal(),
                     },
                   ];
                   openHeaderMenu(
@@ -4437,35 +3776,56 @@ export function App() {
                 </span>
                 <ChevronDown aria-hidden="true" size={14} />
               </button>
+              {activeProject && activeFlowMeta?.analyzeCommand ? (
+                <button
+                  type="button"
+                  className={
+                    projectAnalyzed === false
+                      ? "analysis-pill pending"
+                      : projectAnalyzed
+                        ? "analysis-pill done"
+                        : "analysis-pill"
+                  }
+                  onClick={() => setAnalysisModalOpen(true)}
+                  title="Análise do projeto"
+                >
+                  <Sparkles aria-hidden="true" size={13} />
+                  {projectAnalyzed === false
+                    ? "Análise pendente"
+                    : projectAnalyzed
+                      ? "Analisado"
+                      : "Análise…"}
+                </button>
+              ) : null}
             </nav>
             <div className="topbar-actions">
               {activeWorkspace ? (
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={() => openProjectBlueprintModal(null)}
-                  disabled={projectBlueprintBusy}
-                >
-                  <FolderPlus aria-hidden="true" size={17} />
-                  {t("topbar.newProject")}
-                </button>
+                <>
+                  <button className="secondary-button" type="button" onClick={openAddProjectModal}>
+                    <FolderPlus aria-hidden="true" size={17} />
+                    {t("topbar.newProject")}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => openProjectBlueprintModal(null)}
+                    disabled={projectBlueprintBusy}
+                    title={t("topbar.generateProject")}
+                  >
+                    <Sparkles aria-hidden="true" size={17} />
+                    {t("topbar.generateProject")}
+                  </button>
+                </>
               ) : null}
               {activeTab === "queue" && activeAgentWorking ? (
                 <span className="status-pill ready">{t("topbar.agentWorking")}</span>
               ) : null}
-              <WiredConnectionBadge
-                status={wiredAuthStatus}
-                bootstrap={wiredCloudBootstrap}
-                busy={wiredAuthBusy}
-                onReconnect={() => void connectCurrentWorkspaceWired()}
-                onSignOut={() => void signOutWired()}
-              />
               <button
                 className="secondary-button icon-button"
                 type="button"
                 onClick={() =>
                   activeTab === "queue"
-                    ? void refreshWiredCloudBootstrap()
+                    ? void loadWorkspaceTasks()
                     : void refreshProject(currentPath, activeProject)
                 }
                 disabled={busy || registryBusy || (!activeWorkspace && !currentPath)}
@@ -4517,7 +3877,7 @@ export function App() {
               }}
               onAddProject={() => {
                 setQuickSwitchOpen(false);
-                openProjectBlueprintModal(null);
+                openAddProjectModal();
               }}
               onClose={() => setQuickSwitchOpen(false)}
             />
@@ -4565,6 +3925,38 @@ export function App() {
               setImportRoot={setWorkspaceImportRoot}
               setImportSource={setWorkspaceImportSource}
               t={t}
+            />
+          ) : null}
+
+          {addProjectModalOpen && activeWorkspace ? (
+            <AddProjectModal
+              workspaceId={activeWorkspace.id}
+              onClose={() => setAddProjectModalOpen(false)}
+              onAdded={(project) => {
+                setAddProjectModalOpen(false);
+                void handleProjectAdded(project);
+              }}
+              t={t}
+            />
+          ) : null}
+
+          {analysisModalOpen && activeProject && activeFlowMeta?.analyzeCommand ? (
+            <ProjectAnalysisModal
+              projectName={projectDisplayName(activeProject)}
+              analyzeCommand={activeFlowMeta.analyzeCommand}
+              suggestCommand={activeFlowMeta.suggestCommand}
+              analyzed={projectAnalyzed}
+              hasAgent={Boolean(activeAgentProfile)}
+              messages={analysisMessages}
+              onClose={() => setAnalysisModalOpen(false)}
+              onConfigureAgent={() => {
+                setAnalysisModalOpen(false);
+                setActiveTab("agents");
+              }}
+              onStart={startAnalysisSession}
+              onAnswer={answerAnalysisSession}
+              onAnalyzed={() => void refreshAnalysisStatus()}
+              onCreateTasks={createTasksFromSuggestions}
             />
           ) : null}
 
@@ -4679,79 +4071,20 @@ export function App() {
               onClose={() => setDwArtifactPreview(null)}
             />
           ) : null}
-          {activeWiredTask ? (
-            <div className="modal-backdrop elevated" role="presentation">
-              <section
-                className="modal-panel wired-task-modal"
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="wired-task-title"
-              >
-                <div className="modal-heading">
-                  <div>
-                    <span className="section-label">CLIA WIRED</span>
-                    <h2 id="wired-task-title">{wiredTaskTitle(activeWiredTask)}</h2>
-                    <p>
-                      {activeWiredTask.kind ?? "workflow"} · {activeWiredTask.mode} ·{" "}
-                      {activeWiredTaskProfile?.name ??
-                        activeWiredTask.agent_profile_label ??
-                        "perfil local não encontrado"}
-                    </p>
-                  </div>
-                  <button
-                    className="secondary-button icon-button"
-                    type="button"
-                    onClick={() => void rejectWiredTask(activeWiredTask)}
-                    aria-label="Rejeitar tarefa WIRED"
-                    title="Rejeitar"
-                  >
-                    <X aria-hidden="true" size={16} />
-                  </button>
-                </div>
-
-                <dl className="wired-task-facts">
-                  <div>
-                    <dt>Workspace</dt>
-                    <dd>{activeWorkspace?.name ?? activeWiredTask.workspace_id}</dd>
-                  </div>
-                  <div>
-                    <dt>Projeto</dt>
-                    <dd>
-                      {activeProject
-                        ? projectDisplayName(activeProject)
-                        : (activeWiredTask.project_id ?? "-")}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Expira</dt>
-                    <dd>{new Date(activeWiredTask.expires_at).toLocaleString()}</dd>
-                  </div>
-                </dl>
-
-                <pre className="wired-task-preview">{wiredTaskPreview(activeWiredTask)}</pre>
-
-                <div className="modal-actions">
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={() => void rejectWiredTask(activeWiredTask)}
-                    disabled={agentBusy}
-                  >
-                    <X aria-hidden="true" size={16} />
-                    Rejeitar
-                  </button>
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={() => void approveWiredTask(activeWiredTask)}
-                    disabled={agentBusy || !activeWiredTaskProfile}
-                  >
-                    <Play aria-hidden="true" size={16} />
-                    Aprovar e executar
-                  </button>
-                </div>
-              </section>
-            </div>
+          {openTaskId != null ? (
+            <TaskModal
+              cardId={openTaskId}
+              cards={cards}
+              projects={projects}
+              agentProfiles={agentProfiles}
+              activeProfileId={activeAgentProfile?.id ?? null}
+              activeProjectId={activeProject?.id ?? null}
+              agentMessages={agentMessages}
+              agentBusy={agentBusy}
+              onClose={() => setOpenTaskId(null)}
+              onSaved={() => void loadWorkspaceTasks()}
+              onRunAgent={runTaskWithAgent}
+            />
           ) : null}
 
           <section
@@ -4767,36 +4100,28 @@ export function App() {
               />
             ) : activeTab === "queue" ? (
               <QueuePanel
-                bootstrap={wiredCloudBootstrap}
-                bootstrapChecked={wiredCloudBootstrapChecked}
-                busy={false}
-                currentUserId={wiredCloudBootstrap?.current_user_id ?? null}
-                error={cloudInstallError}
-                wiredTaskFeed={EMPTY_WIRED_TASK_FEED}
-                onApproveWiredTask={() => {}}
-                onInstallWorkspace={() => {}}
-                onOpenPortal={() => {}}
-                onRejectWiredTask={() => {}}
+                cards={cards}
+                projects={projects}
+                loaded={cardsLoaded}
+                error={cardsError}
+                projectFilter={queueProjectFilter}
+                onChangeProjectFilter={setQueueProjectFilter}
                 onCreateCard={() => void createQueueCard()}
-                onRefresh={() => void refreshWiredCloudBootstrap()}
-                onSetStatus={async (card, status) => {
-                  const result = await api.updateRequirementCardStatus(Number(card.id), status);
+                onRefresh={() => void loadWorkspaceTasks()}
+                onOpenTask={(cardId) => setOpenTaskId(cardId)}
+                onMoveCard={async (card, bucket) => {
+                  const result = await api.updateRequirementCardStatus(
+                    card.cardId,
+                    bucketCanonicalStatus(bucket),
+                  );
                   if (!result.ok) throw new Error(result.error);
-                  await refreshWiredCloudBootstrap();
+                  await loadWorkspaceTasks();
                 }}
-                workflow={workbench}
-              />
-            ) : activeTab === "knowledge" ? (
-              <KnowledgeBasePanel
-                blueprints={projectBlueprints}
-                busy={projectBlueprintBusy}
-                knowledgeSources={knowledgeSources}
-                onMaterializeBlueprint={(blueprint) => void materializeProjectBlueprint(blueprint)}
-                onOpenBlueprint={(blueprint) => openProjectBlueprintModal(blueprint)}
-                onRefresh={() => void refreshKnowledgeBase(activeWorkspace, activeProject)}
-                t={t}
-                totalQuestions={PROJECT_BLUEPRINT_QUESTION_BANK.length}
-                batchSize={PROJECT_BLUEPRINT_BATCH_SIZE}
+                onArchive={async (card) => {
+                  const result = await api.archiveRequirementCard(card.cardId);
+                  if (!result.ok) throw new Error(result.error);
+                  await loadWorkspaceTasks();
+                }}
               />
             ) : activeTab === "code" ? (
               <>
@@ -4996,19 +4321,6 @@ export function App() {
                   projects={projects}
                 />
               </Suspense>
-            ) : activeTab === "skills" ? (
-              <SkillsPanel
-                busy={workspaceSkillsBusy}
-                capabilities={activeCloudCapabilities}
-                error={workspaceSkillsError}
-                hasWorkspace={Boolean(activeWorkspace)}
-                onExport={() => void exportWorkspaceSolution()}
-                onImport={() => void importWorkspaceSolution()}
-                onRefresh={() => void refreshWorkspaceSkills(activeWorkspace, activeProject)}
-                onSync={(name) => void syncWorkspaceSkill(name)}
-                skills={workspaceSkills}
-                t={t}
-              />
             ) : activeTab === "settings" ? (
               <WorkspaceSettingsPanel
                 busy={registryBusy}
@@ -5080,309 +4392,6 @@ function formatCountdown(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function WiredLoginGate({
-  busy,
-  checked,
-  error,
-  expired,
-  message,
-  onOpenPortal,
-  onPortalUrlChange,
-  onStart,
-  onValidate,
-  portalUrl,
-  secondsLeft,
-  status,
-}: {
-  busy: boolean;
-  checked: boolean;
-  error: string;
-  expired: boolean;
-  message: string;
-  onOpenPortal: (url: string) => void;
-  onPortalUrlChange: (value: string) => void;
-  onStart: () => void;
-  onValidate: () => void;
-  portalUrl: string;
-  secondsLeft: number | null;
-  status: WiredStatus | null;
-}) {
-  const normalizedPortalUrl = portalUrl.trim().replace(/\/+$/, "");
-  const approvalUrl = status?.pending_user_code
-    ? `${normalizedPortalUrl || "http://127.0.0.1:5000"}/app/device?user_code=${encodeURIComponent(
-        status.pending_user_code,
-      )}`
-    : "";
-  const hasCode = Boolean(status?.pending_user_code);
-  const step = hasCode ? 2 : 1;
-
-  return (
-    <main className="wired-login-shell">
-      <section className="wired-login-panel" aria-labelledby="wired-login-title">
-        <span className="wired-login-wire" aria-hidden="true" />
-        <header className="wired-login-head">
-          <img className="wired-login-logo" src={cliaSplashLogoUrl} alt="clia.dev" />
-          <span className="wired-login-eyebrow">Pareamento do dispositivo</span>
-          <h1 id="wired-login-title">Conecte ao portal</h1>
-          <p>Gere um código, aprove no navegador e este app conecta sozinho.</p>
-        </header>
-
-        <ol className="wired-login-steps">
-          <li className={step >= 1 ? "is-active" : ""}>
-            <span>1</span>Gerar código
-          </li>
-          <li className={step >= 2 ? "is-active" : ""}>
-            <span>2</span>Aprovar no portal
-          </li>
-          <li>
-            <span>3</span>Conectar
-          </li>
-        </ol>
-
-        {error ? <div className="error-banner compact">{error}</div> : null}
-        {message ? <div className="success-banner compact">{message}</div> : null}
-        {!checked ? <div className="status-pill">verificando login</div> : null}
-
-        <form
-          className="wired-login-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            onStart();
-          }}
-        >
-          <label className="wired-login-field">
-            <span>Portal</span>
-            <input
-              value={portalUrl}
-              onChange={(event) => onPortalUrlChange(event.target.value)}
-              placeholder="http://127.0.0.1:5000"
-              disabled={busy}
-            />
-          </label>
-
-          {hasCode ? (
-            <div className={`wired-login-code${expired ? " is-expired" : ""}`}>
-              <span className="wired-login-code-label">Seu código</span>
-              <strong className="wired-login-code-value">{status?.pending_user_code}</strong>
-              <button
-                type="button"
-                className="wired-login-open"
-                onClick={() => onOpenPortal(approvalUrl)}
-                disabled={!approvalUrl}
-              >
-                <ExternalLink aria-hidden="true" size={16} />
-                Abrir portal
-              </button>
-              <p className="wired-login-status">
-                {expired ? (
-                  <span className="is-expired">Código expirado — gere um novo.</span>
-                ) : (
-                  <>
-                    <span className="wired-login-pulse" aria-hidden="true" />
-                    Aguardando aprovação
-                    {secondsLeft != null ? ` · expira em ${formatCountdown(secondsLeft)}` : ""}
-                  </>
-                )}
-              </p>
-            </div>
-          ) : null}
-
-          <div className="wired-login-actions">
-            <button className="primary-button" type="submit" disabled={busy || !checked}>
-              <Cloud aria-hidden="true" size={17} />
-              {hasCode ? "Gerar novo código" : "Gerar código"}
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={onValidate}
-              disabled={busy || !hasCode}
-            >
-              <Check aria-hidden="true" size={17} />
-              Verificar agora
-            </button>
-          </div>
-        </form>
-      </section>
-    </main>
-  );
-}
-
-function CloudWorkspaceInstallGate({
-  baseDir,
-  bootstrap,
-  busy,
-  error,
-  loading,
-  onBaseDirChange,
-  onInstall,
-  onPickBaseDir,
-  onProjectToggle,
-  onRefresh,
-  onWorkspaceToggle,
-  report,
-  selectedProjectIds,
-  selectedWorkspaceIds,
-}: {
-  baseDir: string;
-  bootstrap: WiredCloudBootstrap | null;
-  busy: boolean;
-  error: string;
-  loading: boolean;
-  onBaseDirChange: (value: string) => void;
-  onInstall: () => void;
-  onPickBaseDir: () => void;
-  onProjectToggle: (projectId: string, selected: boolean) => void;
-  onRefresh: () => void;
-  onWorkspaceToggle: (workspaceId: string, selected: boolean) => void;
-  report: WiredCloudInstallReport | null;
-  selectedProjectIds: string[];
-  selectedWorkspaceIds: string[];
-}) {
-  const selectedWorkspaceSet = useMemo(() => new Set(selectedWorkspaceIds), [selectedWorkspaceIds]);
-  const selectedProjectSet = useMemo(() => new Set(selectedProjectIds), [selectedProjectIds]);
-  const projectsByWorkspace = useMemo(() => {
-    const grouped = new Map<string, NonNullable<WiredCloudBootstrap>["projects"]>();
-    for (const project of bootstrap?.projects ?? []) {
-      const items = grouped.get(project.workspace_id) ?? [];
-      items.push(project);
-      grouped.set(project.workspace_id, items);
-    }
-    return grouped;
-  }, [bootstrap]);
-  const selectedWorkspaceCount = selectedWorkspaceIds.length;
-  const selectedProjectCount = selectedProjectIds.length;
-  const installDisabled = busy || loading || !bootstrap || selectedWorkspaceCount === 0;
-
-  return (
-    <main className="wired-login-shell cloud-install-shell">
-      <section
-        className="wired-login-panel cloud-install-panel"
-        aria-labelledby="cloud-install-title"
-      >
-        <img className="wired-login-logo" src={cliaSplashLogoUrl} alt="clia.dev" />
-        <div className="wired-login-copy">
-          <span>CLIA WIRED</span>
-          <h1 id="cloud-install-title">Instalar workspaces</h1>
-          <p>
-            {bootstrap
-              ? `${bootstrap.organization.name}: ${bootstrap.workspaces.length} workspace(s) disponiveis.`
-              : "Baixando configuracoes da conta."}
-          </p>
-        </div>
-
-        {loading ? <div className="status-pill">carregando workspaces</div> : null}
-        {error ? <div className="error-banner compact">{error}</div> : null}
-
-        <div className="cloud-install-destination">
-          <label>
-            <span>Pasta base</span>
-            <input
-              value={baseDir}
-              onChange={(event) => onBaseDirChange(event.target.value)}
-              placeholder="~/clia-workspaces"
-              disabled={busy}
-            />
-          </label>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={onPickBaseDir}
-            disabled={busy}
-          >
-            <FolderOpen aria-hidden="true" size={17} />
-            Escolher
-          </button>
-        </div>
-
-        {bootstrap ? (
-          <div className="cloud-install-list">
-            {bootstrap.workspaces.map((workspace) => {
-              const workspaceSelected = selectedWorkspaceSet.has(workspace.id);
-              const projects = projectsByWorkspace.get(workspace.id) ?? [];
-              return (
-                <section className="cloud-install-workspace" key={workspace.id}>
-                  <label className="cloud-install-workspace-head">
-                    <input
-                      checked={workspaceSelected}
-                      disabled={busy}
-                      type="checkbox"
-                      onChange={(event) => onWorkspaceToggle(workspace.id, event.target.checked)}
-                    />
-                    <span>
-                      <strong>{workspace.name}</strong>
-                      <small>
-                        {workspace.team_name ?? "organizacao"} · {projects.length} projeto(s) ·{" "}
-                        {workspace.open_cards ?? 0} cards
-                      </small>
-                    </span>
-                  </label>
-
-                  {projects.length > 0 ? (
-                    <div className="cloud-install-projects">
-                      {projects.map((project) => {
-                        const hasRemote = Boolean(project.repository_url?.trim());
-                        const disabled =
-                          busy || !workspaceSelected || !hasRemote || project.installed;
-                        return (
-                          <label className="cloud-install-project" key={project.id}>
-                            <input
-                              checked={selectedProjectSet.has(project.id)}
-                              disabled={disabled}
-                              type="checkbox"
-                              onChange={(event) =>
-                                onProjectToggle(project.id, event.target.checked)
-                              }
-                            />
-                            <span>
-                              <strong>{project.name}</strong>
-                              <small>
-                                {project.installed
-                                  ? "instalado"
-                                  : hasRemote
-                                    ? project.repository_url
-                                    : "sem Git remote"}
-                              </small>
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                </section>
-              );
-            })}
-          </div>
-        ) : null}
-
-        {report ? (
-          <div className="success-banner compact">
-            Workspaces: {report.workspaces.length}. Projetos: {report.projects.length}. Cards:{" "}
-            {report.imported_cards}. Workflows: {report.imported_workflows}.
-          </div>
-        ) : null}
-
-        <div className="wired-login-actions">
-          <button
-            className="primary-button"
-            type="button"
-            onClick={onInstall}
-            disabled={installDisabled}
-          >
-            <Download aria-hidden="true" size={17} />
-            Instalar {selectedWorkspaceCount || ""} workspace(s)
-          </button>
-          <button className="secondary-button" type="button" onClick={onRefresh} disabled={busy}>
-            <RefreshCw aria-hidden="true" size={17} />
-            Atualizar
-          </button>
-          <span className="status-pill">{selectedProjectCount} clone(s)</span>
-        </div>
-      </section>
-    </main>
-  );
 }
 
 function WelcomeScreen({
@@ -5731,149 +4740,277 @@ function AboutCliaModal({
   );
 }
 
-function KnowledgeBasePanel({
-  batchSize,
-  blueprints,
-  busy,
-  knowledgeSources,
-  onMaterializeBlueprint,
-  onOpenBlueprint,
-  onRefresh,
-  t,
-  totalQuestions,
-}: {
-  batchSize: number;
-  blueprints: ProjectBlueprint[];
-  busy: boolean;
-  knowledgeSources: KnowledgeSource[];
-  onMaterializeBlueprint: (blueprint: ProjectBlueprint) => void;
-  onOpenBlueprint: (blueprint: ProjectBlueprint) => void;
-  onRefresh: () => void;
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
-  totalQuestions: number;
-}) {
+function PanelLoading({ label }: { label: string }) {
   return (
-    <div className="knowledge-panel">
-      <header className="knowledge-panel-header">
-        <div>
-          <div className="section-label">{t("knowledge.scope")}</div>
-          <h2>{t("knowledge.title")}</h2>
-          <p>
-            {t("knowledge.summary", {
-              sources: knowledgeSources.length,
-              blueprints: blueprints.length,
-              questions: totalQuestions,
-              batch: batchSize,
-            })}
-          </p>
-        </div>
-        <div className="skills-header-actions">
+    <div className="lazy-panel-loading" role="status" aria-live="polite">
+      <RefreshCw aria-hidden="true" size={18} />
+      <span>Carregando {label}...</span>
+    </div>
+  );
+}
+
+function FlowBuilderModal({
+  busy,
+  commands,
+  initialId,
+  initialLabel,
+  initialSchemaText,
+  initialAnalyzeCommand,
+  initialAnalyzeMarker,
+  mode,
+  onClose,
+  onSave,
+  skills,
+}: {
+  busy: boolean;
+  commands: DwCommand[];
+  initialId: string;
+  initialLabel: string;
+  initialSchemaText: string;
+  initialAnalyzeCommand: string;
+  initialAnalyzeMarker: string;
+  mode: "new" | "edit";
+  onClose: () => void;
+  onSave: (args: {
+    id: string;
+    label: string;
+    schemaText: string;
+    analyzeCommand?: string;
+    analyzeMarker?: string;
+  }) => void;
+  skills: DwSkill[];
+}) {
+  const [id, setId] = useState(initialId);
+  const [label, setLabel] = useState(initialLabel);
+  const [text, setText] = useState(initialSchemaText);
+  const [analyzeCommand, setAnalyzeCommand] = useState(initialAnalyzeCommand);
+  const [analyzeMarker, setAnalyzeMarker] = useState(initialAnalyzeMarker);
+  const parsed = parseWorkbenchSchema(text);
+  const invalid = parsed.usedDefault;
+
+  function appendPhase(action: WorkbenchAction, baseLabel: string) {
+    if (invalid) return;
+    const schema = parsed.schema;
+    const existing = new Set(schema.phases.map((phase) => phase.id));
+    const base = slugifyFlowId(baseLabel) || "phase";
+    let pid = base;
+    let n = 2;
+    while (existing.has(pid)) pid = `${base}-${n++}`;
+    const phase: WorkbenchPhase = {
+      id: pid,
+      label: baseLabel,
+      status: pid.replace(/-/g, "_"),
+      description: "",
+      fields: [],
+      action,
+    };
+    setText(JSON.stringify({ ...schema, phases: [...schema.phases, phase] }, null, 2));
+  }
+
+  function patchPhase(index: number, patch: Partial<WorkbenchPhase>) {
+    if (invalid) return;
+    const phases = parsed.schema.phases.map((phase, i) =>
+      i === index ? { ...phase, ...patch } : phase,
+    );
+    setText(JSON.stringify({ ...parsed.schema, phases }, null, 2));
+  }
+
+  function removePhase(index: number) {
+    if (invalid) return;
+    const phases = parsed.schema.phases.filter((_, i) => i !== index);
+    setText(JSON.stringify({ ...parsed.schema, phases }, null, 2));
+  }
+
+  const effectiveId = mode === "edit" ? initialId : slugifyFlowId(id);
+  const canSave = !busy && !invalid && Boolean(effectiveId);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="modal-panel flow-builder-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="flow-builder-title"
+      >
+        <div className="modal-heading">
+          <div>
+            <h2 id="flow-builder-title">
+              {mode === "edit" ? `Editar fluxo · ${initialId}` : "Novo fluxo custom"}
+            </h2>
+            <p>Clique numa skill/command para anexar uma fase, ou edite o JSON à mão.</p>
+          </div>
           <button
             className="secondary-button icon-button"
             type="button"
-            onClick={onRefresh}
-            disabled={busy}
-            aria-label={t("common.refresh")}
-            title={t("common.refresh")}
+            onClick={onClose}
+            aria-label="Fechar modal"
           >
-            <RefreshCw aria-hidden="true" size={16} />
+            <X aria-hidden="true" size={16} />
           </button>
         </div>
-      </header>
 
-      <div className="knowledge-layout">
-        <section className="knowledge-section">
-          <div className="knowledge-section-head">
-            <div>
-              <div className="section-label">{t("knowledge.sources")}</div>
-              <h3>{t("knowledge.attachments")}</h3>
+        <div className="flow-builder-body">
+          <aside className="flow-builder-palette" aria-label="Paleta de skills e commands">
+            <div className="section-label">Commands</div>
+            <div className="flow-palette-list">
+              {commands.length ? (
+                commands.map((command) => (
+                  <button
+                    key={command.name}
+                    type="button"
+                    className="flow-palette-item"
+                    disabled={invalid}
+                    title={command.description ?? command.command}
+                    onClick={() =>
+                      appendPhase(
+                        {
+                          type: "command",
+                          base: command.command,
+                          promptParts: [{ template: "{{card.title}}" }],
+                        },
+                        command.title || command.name,
+                      )
+                    }
+                  >
+                    <code>{command.command}</code>
+                    {command.description ? <small>{command.description}</small> : null}
+                  </button>
+                ))
+              ) : (
+                <span className="flow-palette-empty">Nenhum command em .dw/commands/</span>
+              )}
             </div>
-            {busy ? <span className="status-pill">{t("common.loading")}</span> : null}
-          </div>
-          <div className="knowledge-source-list">
-            {knowledgeSources.length ? (
-              knowledgeSources.map((source) => (
-                <div className="knowledge-source-row" key={source.id}>
-                  <div className="knowledge-row-icon">
-                    <FileText aria-hidden="true" size={18} />
-                  </div>
-                  <div className="knowledge-row-main">
-                    <strong>{source.name}</strong>
-                    <small title={source.file_path}>{source.file_path}</small>
-                  </div>
-                  <span className="knowledge-scope">{knowledgeSourceScopeLabel(source)}</span>
-                </div>
-              ))
-            ) : (
-              <div className="knowledge-empty">
-                <FileText aria-hidden="true" size={24} />
-                <strong>{t("knowledge.noAttachments")}</strong>
-                <small>Docs da cloud ainda nao foram materializados neste workspace.</small>
+            <div className="section-label">Skills</div>
+            <div className="flow-palette-list">
+              {skills.length ? (
+                skills.map((skill) => (
+                  <button
+                    key={skill.name}
+                    type="button"
+                    className="flow-palette-item"
+                    disabled={invalid}
+                    title={skill.description ?? skill.name}
+                    onClick={() =>
+                      appendPhase(
+                        {
+                          type: "skill",
+                          skill:
+                            skill.name.startsWith("/") || skill.name.startsWith("$")
+                              ? skill.name
+                              : `$${skill.name}`,
+                        },
+                        skill.name,
+                      )
+                    }
+                  >
+                    <code>{skill.name}</code>
+                    {skill.description ? <small>{skill.description}</small> : null}
+                  </button>
+                ))
+              ) : (
+                <span className="flow-palette-empty">Nenhuma skill encontrada</span>
+              )}
+            </div>
+          </aside>
+
+          <div className="flow-builder-editor">
+            <div className="flow-builder-meta">
+              <label>
+                <span>Id do fluxo</span>
+                <input
+                  value={id}
+                  disabled={mode === "edit"}
+                  placeholder="meu-fluxo"
+                  onChange={(event) => setId(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Nome</span>
+                <input
+                  value={label}
+                  placeholder="Meu fluxo"
+                  onChange={(event) => setLabel(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Comando de análise do projeto</span>
+                <input
+                  value={analyzeCommand}
+                  placeholder="/dw-analyze-project"
+                  onChange={(event) => setAnalyzeCommand(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Marcador de análise (caminho)</span>
+                <input
+                  value={analyzeMarker}
+                  placeholder=".dw/rules/index.md"
+                  onChange={(event) => setAnalyzeMarker(event.target.value)}
+                />
+              </label>
+            </div>
+            {invalid ? null : (
+              <div className="flow-stage-editor" aria-label="Etapas do fluxo">
+                {parsed.schema.phases.map((phase, index) => (
+                  <FlowStageEditor
+                    key={`${phase.id}-${index}`}
+                    phase={phase}
+                    onChange={(patch) => patchPhase(index, patch)}
+                    onRemove={() => removePhase(index)}
+                  />
+                ))}
               </div>
             )}
-          </div>
-        </section>
-
-        <section className="knowledge-section">
-          <div className="knowledge-section-head">
-            <div>
-              <div className="section-label">{t("knowledge.projects")}</div>
-              <h3>{t("knowledge.blueprints")}</h3>
+            <details className="flow-builder-advanced">
+              <summary>JSON avançado</summary>
+              <textarea
+                className="flow-builder-json"
+                spellCheck={false}
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+              />
+            </details>
+            <div className="flow-builder-status">
+              {invalid ? (
+                <span className="flow-builder-error">JSON inválido — sem fases válidas.</span>
+              ) : (
+                <span className="flow-builder-ok">
+                  {parsed.schema.phases.length} fase(s)
+                  {parsed.warnings.length ? ` · ${parsed.warnings.length} aviso(s)` : ""}
+                </span>
+              )}
+            </div>
+            {parsed.warnings.length ? (
+              <ul className="flow-builder-warnings">
+                {parsed.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : null}
+            <div className="flow-builder-actions">
+              <button className="secondary-button" type="button" onClick={onClose}>
+                Cancelar
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={!canSave}
+                onClick={() =>
+                  onSave({
+                    id: effectiveId,
+                    label,
+                    schemaText: text,
+                    analyzeCommand,
+                    analyzeMarker,
+                  })
+                }
+              >
+                Salvar fluxo
+              </button>
             </div>
           </div>
-          <div className="knowledge-blueprint-list">
-            {blueprints.length ? (
-              blueprints.map((blueprint) => {
-                const answerCount = parseProjectBlueprintAnswers(blueprint.answers_json).length;
-                const taskCount = projectBlueprintTaskCount(blueprint.tasks_json);
-                return (
-                  <div className="knowledge-blueprint-row" key={blueprint.id}>
-                    <button
-                      className="knowledge-blueprint-main"
-                      type="button"
-                      onClick={() => onOpenBlueprint(blueprint)}
-                    >
-                      <span>
-                        <strong>{blueprint.title}</strong>
-                        <small>
-                          {projectBlueprintStatusLabel(blueprint.status, t)} ·{" "}
-                          {t("blueprint.answerCount", { count: answerCount })}
-                          {taskCount ? ` · ${taskCount} task(s)` : ""}
-                        </small>
-                      </span>
-                      <ChevronRight aria-hidden="true" size={18} />
-                    </button>
-                    <div className="knowledge-blueprint-actions">
-                      {blueprint.status === "planned" ? (
-                        <button
-                          className="primary-button"
-                          type="button"
-                          disabled={busy}
-                          onClick={() => onMaterializeBlueprint(blueprint)}
-                        >
-                          <CheckCircle2 aria-hidden="true" size={16} />
-                          {t("blueprint.materialize")}
-                        </button>
-                      ) : blueprint.status === "materialized" ? (
-                        <span className="status-pill ready">{t("blueprint.materialized")}</span>
-                      ) : (
-                        <span className="status-pill">
-                          {projectBlueprintStatusLabel(blueprint.status, t)}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
-            ) : (
-              <div className="knowledge-empty">
-                <ClipboardList aria-hidden="true" size={24} />
-                <strong>{t("knowledge.noBlueprint")}</strong>
-              </div>
-            )}
-          </div>
-        </section>
-      </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -6151,213 +5288,6 @@ function ProjectBlueprintSourcePicker({
   );
 }
 
-function SkillsPanel({
-  busy,
-  capabilities,
-  error,
-  hasWorkspace,
-  onExport,
-  onImport,
-  onRefresh,
-  onSync,
-  skills,
-  t,
-}: {
-  busy: boolean;
-  capabilities: WiredCloudCapability[];
-  error: string;
-  hasWorkspace: boolean;
-  onExport: () => void;
-  onImport: () => void;
-  onRefresh: () => void;
-  onSync: (name: string) => void;
-  skills: WorkspaceSkill[];
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
-}) {
-  const skillGroups = useMemo(() => groupSkillSuggestions(skills), [skills]);
-  const capabilityStatuses = useMemo(
-    () => deriveCapabilityStatuses(capabilities, skills),
-    [capabilities, skills],
-  );
-  return (
-    <div className="skills-panel">
-      <header className="skills-panel-header">
-        <div>
-          <div className="section-label">{t("skills.scope")}</div>
-          <h2>{t("skills.title")}</h2>
-          <p>{t("skills.description")}</p>
-        </div>
-        <div className="skills-header-actions">
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={onImport}
-            disabled={!hasWorkspace || busy}
-          >
-            <Upload aria-hidden="true" size={16} />
-            {t("skills.import")}
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={onExport}
-            disabled={!hasWorkspace || busy}
-          >
-            <Download aria-hidden="true" size={16} />
-            {t("skills.export")}
-          </button>
-          <button
-            className="secondary-button icon-button"
-            type="button"
-            onClick={onRefresh}
-            disabled={!hasWorkspace || busy}
-            aria-label={t("common.refresh")}
-          >
-            <RefreshCw aria-hidden="true" size={16} />
-          </button>
-        </div>
-      </header>
-
-      {!hasWorkspace ? (
-        <div className="form-error" role="status">
-          {t("skills.noWorkspace")}
-        </div>
-      ) : null}
-      {error ? (
-        <div className="error-banner" role="status">
-          <span>{error}</span>
-        </div>
-      ) : null}
-
-      <section className="skills-section">
-        <div className="section-label">Manifesto cloud</div>
-        {capabilityStatuses.length ? (
-          <div className="skill-card-grid">
-            {capabilityStatuses.map((status) => (
-              <article className="skill-card" key={status.capability.id}>
-                <header>
-                  <div>
-                    <strong>{status.capability.label}</strong>
-                    <small>{status.capability.skill_id}</small>
-                  </div>
-                  <span
-                    className={
-                      status.status === "installed" ? "skill-target active" : "skill-target"
-                    }
-                  >
-                    {status.status === "installed"
-                      ? t("skills.installed")
-                      : status.status === "checklist"
-                        ? "Checklist"
-                        : "Pendente"}
-                  </span>
-                </header>
-                <div className="skill-targets">
-                  {normalizeCapabilityTargets(status.capability.targets).map((target) => (
-                    <span
-                      className={
-                        status.installedTargets.includes(target)
-                          ? "skill-target active"
-                          : "skill-target"
-                      }
-                      key={target}
-                    >
-                      {target}
-                    </span>
-                  ))}
-                </div>
-                <small>
-                  {status.capability.auto === false
-                    ? "Requer acao manual"
-                    : status.missingTargets.length
-                      ? `Faltando: ${status.missingTargets.join(", ")}`
-                      : "Instalada a partir do manifesto"}
-                </small>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <div className="terminal-empty">
-            <Package aria-hidden="true" />
-            <span>Nenhuma capability cloud neste workspace.</span>
-          </div>
-        )}
-      </section>
-
-      <section className="skills-section">
-        <div className="section-label">{t("skills.installedDiscovered")}</div>
-        {skillGroups.length ? (
-          <div className="skills-discovery-list">
-            {skillGroups.map((group) => (
-              <section className="skills-discovery-group" key={group.label}>
-                <header>
-                  <strong>{group.scopeLabel}</strong>
-                  <span>{group.frameworkLabel}</span>
-                </header>
-                <div className="skill-card-grid">
-                  {group.skills.map((skill) => (
-                    <article
-                      className="skill-card"
-                      key={`${skill.scope}:${skill.scope_label}:${skill.name}:${skill.path ?? ""}`}
-                    >
-                      <header>
-                        <div>
-                          <strong>{skill.name}</strong>
-                          <small>{skill.description || t("skills.noDescription")}</small>
-                        </div>
-                        {skill.exportable ? (
-                          <button
-                            className="secondary-button"
-                            type="button"
-                            disabled={busy}
-                            onClick={() => onSync(skill.name)}
-                          >
-                            Sync
-                          </button>
-                        ) : (
-                          <span className="skill-target">{skill.scope || "local"}</span>
-                        )}
-                      </header>
-                      <div className="skill-targets">
-                        {(
-                          ["workspace", "codex", "claude", "copilot"] as WorkspaceSkillTarget[]
-                        ).map((target) => (
-                          <span
-                            className={
-                              skill.installed_targets.includes(target)
-                                ? "skill-target active"
-                                : "skill-target"
-                            }
-                            key={target}
-                          >
-                            {target}
-                          </span>
-                        ))}
-                      </div>
-                      <small>
-                        {skill.file_count} arquivo(s) · {formatArtifactSize(skill.byte_count)}
-                        {` · ${skill.source}`}
-                        {skill.exportable ? ` · ${t("skills.exportable")}` : ""}
-                        {skill.path ? ` · ${skill.path}` : ""}
-                      </small>
-                    </article>
-                  ))}
-                </div>
-              </section>
-            ))}
-          </div>
-        ) : (
-          <div className="skill-card-grid">
-            <div className="terminal-empty">
-              <Package aria-hidden="true" />
-              <span>{t("skills.empty")}</span>
-            </div>
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
 
 const STARTER_FLOW_SCHEMA_TEXT = JSON.stringify(
   {
@@ -6508,491 +5438,122 @@ function FlowStageEditor({
   );
 }
 
-function PanelLoading({ label }: { label: string }) {
-  return (
-    <div className="lazy-panel-loading" role="status" aria-live="polite">
-      <RefreshCw aria-hidden="true" size={18} />
-      <span>Carregando {label}...</span>
-    </div>
-  );
-}
 
-function FlowBuilderModal({
-  busy,
-  commands,
-  initialId,
-  initialLabel,
-  initialSchemaText,
-  initialAnalyzeCommand,
-  initialAnalyzeMarker,
-  mode,
-  onClose,
-  onSave,
-  skills,
-}: {
-  busy: boolean;
-  commands: DwCommand[];
-  initialId: string;
-  initialLabel: string;
-  initialSchemaText: string;
-  initialAnalyzeCommand: string;
-  initialAnalyzeMarker: string;
-  mode: "new" | "edit";
-  onClose: () => void;
-  onSave: (args: {
-    id: string;
-    label: string;
-    schemaText: string;
-    analyzeCommand?: string;
-    analyzeMarker?: string;
-  }) => void;
-  skills: DwSkill[];
-}) {
-  const [id, setId] = useState(initialId);
-  const [label, setLabel] = useState(initialLabel);
-  const [text, setText] = useState(initialSchemaText);
-  const [analyzeCommand, setAnalyzeCommand] = useState(initialAnalyzeCommand);
-  const [analyzeMarker, setAnalyzeMarker] = useState(initialAnalyzeMarker);
-  const parsed = parseWorkbenchSchema(text);
-  const invalid = parsed.usedDefault;
-
-  function appendPhase(action: WorkbenchAction, baseLabel: string) {
-    if (invalid) return;
-    const schema = parsed.schema;
-    const existing = new Set(schema.phases.map((phase) => phase.id));
-    const base = slugifyFlowId(baseLabel) || "phase";
-    let pid = base;
-    let n = 2;
-    while (existing.has(pid)) pid = `${base}-${n++}`;
-    const phase: WorkbenchPhase = {
-      id: pid,
-      label: baseLabel,
-      status: pid.replace(/-/g, "_"),
-      description: "",
-      fields: [],
-      action,
-    };
-    setText(JSON.stringify({ ...schema, phases: [...schema.phases, phase] }, null, 2));
-  }
-
-  function patchPhase(index: number, patch: Partial<WorkbenchPhase>) {
-    if (invalid) return;
-    const phases = parsed.schema.phases.map((phase, i) =>
-      i === index ? { ...phase, ...patch } : phase,
-    );
-    setText(JSON.stringify({ ...parsed.schema, phases }, null, 2));
-  }
-
-  function removePhase(index: number) {
-    if (invalid) return;
-    const phases = parsed.schema.phases.filter((_, i) => i !== index);
-    setText(JSON.stringify({ ...parsed.schema, phases }, null, 2));
-  }
-
-  const effectiveId = mode === "edit" ? initialId : slugifyFlowId(id);
-  const canSave = !busy && !invalid && Boolean(effectiveId);
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section
-        className="modal-panel flow-builder-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="flow-builder-title"
-      >
-        <div className="modal-heading">
-          <div>
-            <h2 id="flow-builder-title">
-              {mode === "edit" ? `Editar fluxo · ${initialId}` : "Novo fluxo custom"}
-            </h2>
-            <p>Clique numa skill/command para anexar uma fase, ou edite o JSON à mão.</p>
-          </div>
-          <button
-            className="secondary-button icon-button"
-            type="button"
-            onClick={onClose}
-            aria-label="Fechar modal"
-          >
-            <X aria-hidden="true" size={16} />
-          </button>
-        </div>
-
-        <div className="flow-builder-body">
-          <aside className="flow-builder-palette" aria-label="Paleta de skills e commands">
-            <div className="section-label">Commands</div>
-            <div className="flow-palette-list">
-              {commands.length ? (
-                commands.map((command) => (
-                  <button
-                    key={command.name}
-                    type="button"
-                    className="flow-palette-item"
-                    disabled={invalid}
-                    title={command.description ?? command.command}
-                    onClick={() =>
-                      appendPhase(
-                        {
-                          type: "command",
-                          base: command.command,
-                          promptParts: [{ template: "{{card.title}}" }],
-                        },
-                        command.title || command.name,
-                      )
-                    }
-                  >
-                    <code>{command.command}</code>
-                    {command.description ? <small>{command.description}</small> : null}
-                  </button>
-                ))
-              ) : (
-                <span className="flow-palette-empty">Nenhum command em .dw/commands/</span>
-              )}
-            </div>
-            <div className="section-label">Skills</div>
-            <div className="flow-palette-list">
-              {skills.length ? (
-                skills.map((skill) => (
-                  <button
-                    key={skill.name}
-                    type="button"
-                    className="flow-palette-item"
-                    disabled={invalid}
-                    title={skill.description ?? skill.name}
-                    onClick={() =>
-                      appendPhase(
-                        {
-                          type: "skill",
-                          skill:
-                            skill.name.startsWith("/") || skill.name.startsWith("$")
-                              ? skill.name
-                              : `$${skill.name}`,
-                        },
-                        skill.name,
-                      )
-                    }
-                  >
-                    <code>{skill.name}</code>
-                    {skill.description ? <small>{skill.description}</small> : null}
-                  </button>
-                ))
-              ) : (
-                <span className="flow-palette-empty">Nenhuma skill encontrada</span>
-              )}
-            </div>
-          </aside>
-
-          <div className="flow-builder-editor">
-            <div className="flow-builder-meta">
-              <label>
-                <span>Id do fluxo</span>
-                <input
-                  value={id}
-                  disabled={mode === "edit"}
-                  placeholder="meu-fluxo"
-                  onChange={(event) => setId(event.target.value)}
-                />
-              </label>
-              <label>
-                <span>Nome</span>
-                <input
-                  value={label}
-                  placeholder="Meu fluxo"
-                  onChange={(event) => setLabel(event.target.value)}
-                />
-              </label>
-              <label>
-                <span>Comando de análise do projeto</span>
-                <input
-                  value={analyzeCommand}
-                  placeholder="/dw-analyze-project"
-                  onChange={(event) => setAnalyzeCommand(event.target.value)}
-                />
-              </label>
-              <label>
-                <span>Marcador de análise (caminho)</span>
-                <input
-                  value={analyzeMarker}
-                  placeholder=".dw/rules/index.md"
-                  onChange={(event) => setAnalyzeMarker(event.target.value)}
-                />
-              </label>
-            </div>
-            {invalid ? null : (
-              <div className="flow-stage-editor" aria-label="Etapas do fluxo">
-                {parsed.schema.phases.map((phase, index) => (
-                  <FlowStageEditor
-                    key={`${phase.id}-${index}`}
-                    phase={phase}
-                    onChange={(patch) => patchPhase(index, patch)}
-                    onRemove={() => removePhase(index)}
-                  />
-                ))}
-              </div>
-            )}
-            <details className="flow-builder-advanced">
-              <summary>JSON avançado</summary>
-              <textarea
-                className="flow-builder-json"
-                spellCheck={false}
-                value={text}
-                onChange={(event) => setText(event.target.value)}
-              />
-            </details>
-            <div className="flow-builder-status">
-              {invalid ? (
-                <span className="flow-builder-error">JSON inválido — sem fases válidas.</span>
-              ) : (
-                <span className="flow-builder-ok">
-                  {parsed.schema.phases.length} fase(s)
-                  {parsed.warnings.length ? ` · ${parsed.warnings.length} aviso(s)` : ""}
-                </span>
-              )}
-            </div>
-            {parsed.warnings.length ? (
-              <ul className="flow-builder-warnings">
-                {parsed.warnings.map((warning) => (
-                  <li key={warning}>{warning}</li>
-                ))}
-              </ul>
-            ) : null}
-            <div className="flow-builder-actions">
-              <button className="secondary-button" type="button" onClick={onClose}>
-                Cancelar
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={!canSave}
-                onClick={() =>
-                  onSave({
-                    id: effectiveId,
-                    label,
-                    schemaText: text,
-                    analyzeCommand,
-                    analyzeMarker,
-                  })
-                }
-              >
-                Salvar fluxo
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function WiredConnectionBadge({
-  bootstrap,
-  busy,
-  onReconnect,
-  onSignOut,
-  status,
-}: {
-  bootstrap: WiredCloudBootstrap | null;
-  busy: boolean;
-  onReconnect: () => void;
-  onSignOut: () => void;
-  status: WiredStatus | null;
-}) {
-  const [open, setOpen] = useState(false);
-  const connected = Boolean(status?.connected);
-  const label = connected ? "Conectado" : status?.paired ? "Pareado" : "Offline";
-  return (
-    <div className="wired-connection">
-      <button
-        className={connected ? "status-pill ready" : "status-pill"}
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className={connected ? "wired-dot on" : "wired-dot"} aria-hidden="true" />
-        {label}
-      </button>
-      {open ? (
-        <div className="wired-connection-popover" role="dialog" aria-label="Conexão WIRED">
-          <strong>{bootstrap?.organization.name ?? "CLIA WIRED"}</strong>
-          <span>{status?.user_email ?? "Sem usuário pareado"}</span>
-          <small>{status?.portal_url ?? "http://127.0.0.1:5000"}</small>
-          <div className="wired-connection-actions">
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={busy}
-              onClick={onReconnect}
-            >
-              <RefreshCw aria-hidden="true" size={14} />
-              Reconectar
-            </button>
-            <button className="secondary-button" type="button" disabled={busy} onClick={onSignOut}>
-              Sair
-            </button>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function wiredTaskFeedStatusView(entry: WiredTaskFeedEntry): {
-  label: string;
-  note: string | null;
-  tone: "neutral" | "waiting" | "running" | "success" | "danger";
-} {
-  if (entry.status === "received") {
-    return entry.task.mode === "auto"
-      ? { label: "auto", note: "executa automaticamente", tone: "neutral" }
-      : { label: "supervisionada", note: null, tone: "waiting" };
-  }
-  if (entry.status === "running") return { label: "executando", note: null, tone: "running" };
-  if (entry.status === "done") return { label: "concluída", note: null, tone: "success" };
-  if (entry.status === "failed") return { label: "falhou", note: null, tone: "danger" };
-  return { label: "rejeitada", note: null, tone: "danger" };
+function priorityLabel(priority: string): string {
+  if (priority === "high") return "Alta";
+  if (priority === "low") return "Baixa";
+  return "Média";
 }
 
 function QueuePanel({
-  bootstrap,
-  bootstrapChecked,
-  busy,
-  currentUserId,
+  cards,
+  projects,
+  loaded,
   error,
-  wiredTaskFeed,
-  onApproveWiredTask,
-  onInstallWorkspace,
-  onOpenPortal,
-  onRejectWiredTask,
+  projectFilter,
+  onChangeProjectFilter,
   onCreateCard,
   onRefresh,
-  onSetStatus,
-  workflow,
+  onOpenTask,
+  onMoveCard,
+  onArchive,
 }: {
-  bootstrap: WiredCloudBootstrap | null;
-  bootstrapChecked: boolean;
-  busy: boolean;
-  currentUserId: string | null;
+  cards: RequirementCard[];
+  projects: Project[];
+  loaded: boolean;
   error: string;
-  wiredTaskFeed: WiredTaskFeedEntry[];
-  onApproveWiredTask: (task: WiredTaskRequest) => void | Promise<void>;
-  onInstallWorkspace: (workspaceId: string) => void;
-  onOpenPortal: (card: QueueCard) => void | Promise<void>;
-  onRejectWiredTask: (task: WiredTaskRequest) => void | Promise<void>;
+  projectFilter: number | null;
+  onChangeProjectFilter: (projectId: number | null) => void;
   onCreateCard: () => void;
   onRefresh: () => void;
-  onSetStatus: (card: QueueCard, status: string) => Promise<void>;
-  workflow: WorkbenchSchema;
+  onOpenTask: (cardId: number) => void;
+  onMoveCard: (card: QueueCard, bucket: QueueBucket) => Promise<void>;
+  onArchive: (card: QueueCard) => Promise<void>;
 }) {
-  const [pending, setPending] = useState<Record<string, string>>({});
+  const [pendingId, setPendingId] = useState<number | null>(null);
   const [statusError, setStatusError] = useState("");
-  const queue = useMemo(() => {
-    if (!bootstrap) return buildQueue([], currentUserId, [], workflow);
-    const cards = bootstrap.cards.map((card) =>
-      pending[card.id] ? { ...card, status: pending[card.id] } : card,
-    );
-    return buildQueue(cards, currentUserId, installedWorkspaceIds(bootstrap.workspaces), workflow);
-  }, [bootstrap, currentUserId, pending, workflow]);
-  async function moveCard(card: QueueCard, bucket: QueueBucket) {
-    const status = card.bucketStatus[bucket];
+  const queue = useMemo(
+    () => buildQueue(cards, projects, { projectId: projectFilter }),
+    [cards, projects, projectFilter],
+  );
+
+  async function run(card: QueueCard, action: () => Promise<void>) {
     setStatusError("");
-    setPending((current) => ({ ...current, [card.id]: status }));
+    setPendingId(card.cardId);
     try {
-      await onSetStatus(card, status);
+      await action();
     } catch (error) {
       setStatusError(error instanceof Error ? error.message : String(error));
     } finally {
-      setPending((current) => {
-        const next = { ...current };
-        delete next[card.id];
-        return next;
-      });
+      setPendingId(null);
     }
   }
-  const loading = !bootstrapChecked;
+  function handleDrop(cardId: number, bucket: QueueBucket) {
+    const card = queue.items.find((item) => item.cardId === cardId);
+    if (!card || card.bucket === bucket) return;
+    void run(card, () => onMoveCard(card, bucket));
+  }
+
   return (
     <section className="queue-panel" aria-labelledby="queue-title">
       <header className="queue-header">
         <div>
           <span className="section-label">CLIA LOCAL</span>
-          <h1 id="queue-title">Minha fila</h1>
-          <p>Cards de requisito de todos os workspaces locais, ordenados por prioridade.</p>
+          <h1 id="queue-title">Tarefas</h1>
+          <p>Quadro do workspace ativo. Arraste uma tarefa entre as colunas para movê-la.</p>
         </div>
         <div className="queue-card-actions">
           <button className="primary-button" type="button" onClick={onCreateCard}>
             <Plus aria-hidden="true" size={16} />
-            Novo card
+            Nova tarefa
           </button>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={onRefresh}
-            disabled={loading}
-          >
+          <button className="secondary-button" type="button" onClick={onRefresh} disabled={!loaded}>
             <RefreshCw aria-hidden="true" size={16} />
             Atualizar
           </button>
         </div>
       </header>
+
+      {projects.length ? (
+        <div className="queue-filter" role="group" aria-label="Filtrar por projeto">
+          <button
+            className={projectFilter == null ? "chip active" : "chip"}
+            type="button"
+            onClick={() => onChangeProjectFilter(null)}
+          >
+            Todos os projetos
+          </button>
+          {projects.map((project) => (
+            <button
+              key={project.id}
+              className={projectFilter === project.id ? "chip active" : "chip"}
+              type="button"
+              onClick={() => onChangeProjectFilter(project.id)}
+            >
+              {project.name}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       {error || statusError ? (
         <div className="error-banner compact">{statusError || error}</div>
       ) : null}
-      {loading ? (
-        <PanelLoading label="Minha fila" />
-      ) : !currentUserId ? (
-        <div className="empty-note">Crie ou selecione um workspace para começar.</div>
-      ) : queue.items.length === 0 && wiredTaskFeed.length === 0 ? (
-        <div className="empty-note">Nenhuma tarefa para você agora.</div>
+
+      {!loaded ? (
+        <PanelLoading label="Tarefas" />
       ) : (
-        <div className="queue-list">
-          {wiredTaskFeed.map((entry) => {
-            const taskStatus = wiredTaskFeedStatusView(entry);
-            const showActions = entry.status === "received" && entry.task.mode !== "auto";
-            return (
-              <article className="queue-card wired-queue-task" key={entry.task.task_id}>
-                <div className="queue-card-main">
-                  <div className="queue-card-meta">
-                    <span className={`queue-task-badge ${taskStatus.tone}`}>
-                      {taskStatus.label}
-                    </span>
-                    <span>{entry.task.kind ?? "workflow"}</span>
-                    <span>{entry.task.task_id.slice(0, 8)}</span>
-                    {taskStatus.note ? <span>{taskStatus.note}</span> : null}
-                  </div>
-                  <h2>{wiredTaskTitle(entry.task)}</h2>
-                  <pre className="wired-task-inline-preview">{wiredTaskPreview(entry.task)}</pre>
-                </div>
-                {showActions ? (
-                  <div className="queue-card-actions">
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      disabled={busy}
-                      onClick={() => onRejectWiredTask(entry.task)}
-                    >
-                      <X aria-hidden="true" size={15} />
-                      Rejeitar
-                    </button>
-                    <button
-                      className="primary-button"
-                      type="button"
-                      disabled={busy}
-                      onClick={() => onApproveWiredTask(entry.task)}
-                    >
-                      <Play aria-hidden="true" size={15} />
-                      Executar
-                    </button>
-                  </div>
-                ) : null}
-              </article>
-            );
-          })}
-          {queue.items.map((card) => (
-            <QueueCardRow
-              busy={busy || Boolean(pending[card.id])}
-              card={card}
-              key={card.id}
-              onInstallWorkspace={onInstallWorkspace}
-              onOpenPortal={onOpenPortal}
-              onMove={moveCard}
+        <div className="kanban-board">
+          {QUEUE_BUCKETS.map((bucket) => (
+            <QueueColumn
+              key={bucket.id}
+              bucket={bucket.id}
+              label={bucket.label}
+              cards={queue.buckets[bucket.id]}
+              pendingId={pendingId}
+              onDropCardId={handleDrop}
+              onOpenTask={onOpenTask}
+              onArchive={(card) => void run(card, () => onArchive(card))}
             />
           ))}
         </div>
@@ -7001,86 +5562,1026 @@ function QueuePanel({
   );
 }
 
-function QueueCardRow({
-  busy,
-  card,
-  onInstallWorkspace,
-  onMove,
-  onOpenPortal,
+function QueueColumn({
+  bucket,
+  label,
+  cards,
+  pendingId,
+  onDropCardId,
+  onOpenTask,
+  onArchive,
 }: {
-  busy: boolean;
-  card: QueueCard;
-  onInstallWorkspace: (workspaceId: string) => void;
-  onMove: (card: QueueCard, bucket: QueueBucket) => void;
-  onOpenPortal: (card: QueueCard) => void | Promise<void>;
+  bucket: QueueBucket;
+  label: string;
+  cards: QueueCard[];
+  pendingId: number | null;
+  onDropCardId: (cardId: number, bucket: QueueBucket) => void;
+  onOpenTask: (cardId: number) => void;
+  onArchive: (card: QueueCard) => void;
 }) {
-  const buckets: Array<{ id: QueueBucket; label: string }> = [
-    { id: "pending", label: "Pendente" },
-    { id: "doing", label: "Fazendo" },
-    { id: "validating", label: "Validando" },
-    { id: "done", label: "Feito" },
-  ];
-  const taskStatus = wiredTaskStatusView(card.wiredTaskStatus);
+  const [over, setOver] = useState(false);
   return (
-    <article className={card.needsInstall ? "queue-card needs-install" : "queue-card"}>
-      <div className="queue-card-main">
-        <div className="queue-card-meta">
-          <span className={`priority-pill ${card.priority}`}>{card.priority}</span>
-          <span>{card.workspaceName}</span>
-          {card.projectName ? <span>{card.projectName}</span> : null}
-          <span>{card.publicId}</span>
-        </div>
-        {taskStatus ? (
-          <div className="queue-task-row">
-            <span className={`queue-task-badge ${taskStatus.tone}`}>{taskStatus.label}</span>
-            {card.wiredTaskKind ? <span>{card.wiredTaskKind}</span> : null}
-            {taskStatus.action ? <span>{taskStatus.action}</span> : null}
-          </div>
-        ) : null}
-        <h2>{card.title}</h2>
-        {card.body ? <p>{card.body}</p> : null}
-        {card.documentIds.length ? (
-          <div className="queue-documents">
-            <FileText aria-hidden="true" size={14} />
-            <span>
-              {card.documentIds.length === 1
-                ? "1 doc anexado"
-                : `${card.documentIds.length} docs anexados`}
-            </span>
-          </div>
-        ) : null}
+    <div
+      className={over ? "kanban-column over" : "kanban-column"}
+      onDragOver={(event) => {
+        event.preventDefault();
+        if (!over) setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setOver(false);
+        const cardId = Number(event.dataTransfer.getData("text/plain"));
+        if (Number.isFinite(cardId)) onDropCardId(cardId, bucket);
+      }}
+    >
+      <header className="kanban-column-head">
+        <span>{label}</span>
+        <span className="kanban-count">{cards.length}</span>
+      </header>
+      <div className="kanban-column-body">
+        {cards.map((card) => (
+          <TaskCardView
+            key={card.cardId}
+            card={card}
+            pending={pendingId === card.cardId}
+            onOpen={onOpenTask}
+            onArchive={onArchive}
+          />
+        ))}
+        {cards.length === 0 ? <p className="kanban-empty">—</p> : null}
       </div>
-      <div className="queue-card-actions">
-        {card.needsInstall && card.workspaceId ? (
-          <button
-            className="primary-button"
-            type="button"
-            disabled={busy}
-            onClick={() => onInstallWorkspace(card.workspaceId!)}
-          >
-            <Download aria-hidden="true" size={15} />
-            Instalar workspace
-          </button>
-        ) : null}
-        <div className="queue-status-buttons" role="group" aria-label="Status">
-          {buckets.map((bucket) => (
-            <button
-              className={card.bucket === bucket.id ? "secondary-button active" : "secondary-button"}
-              type="button"
-              key={bucket.id}
-              disabled={busy || card.bucket === bucket.id || card.needsInstall}
-              onClick={() => onMove(card, bucket.id)}
-            >
-              {bucket.label}
-            </button>
+    </div>
+  );
+}
+
+function TaskCardView({
+  card,
+  pending,
+  onOpen,
+  onArchive,
+}: {
+  card: QueueCard;
+  pending: boolean;
+  onOpen: (cardId: number) => void;
+  onArchive: (card: QueueCard) => void;
+}) {
+  return (
+    <article
+      className={pending ? "kanban-card pending" : "kanban-card"}
+      draggable
+      onDragStart={(event) => event.dataTransfer.setData("text/plain", String(card.cardId))}
+      onClick={() => onOpen(card.cardId)}
+    >
+      <div className="kanban-card-meta">
+        <span className={`priority-pill ${card.priority}`}>{priorityLabel(card.priority)}</span>
+        <span className="kanban-card-id">{card.publicId}</span>
+      </div>
+      <h3>{card.title}</h3>
+      {card.projectNames.length ? (
+        <div className="kanban-card-projects">
+          {card.projectNames.map((name) => (
+            <span key={name} className="chip small">
+              {name}
+            </span>
           ))}
         </div>
-        <button className="secondary-button" type="button" onClick={() => onOpenPortal(card)}>
-          <ExternalLink aria-hidden="true" size={15} />
-          Portal
+      ) : null}
+      <div className="kanban-card-foot">
+        {card.checklistTotal ? (
+          <span className="kanban-card-checklist">
+            <Check aria-hidden="true" size={13} /> {card.checklistDone}/{card.checklistTotal}
+          </span>
+        ) : (
+          <span />
+        )}
+        <button
+          className="ghost-button"
+          type="button"
+          title="Arquivar"
+          onClick={(event) => {
+            event.stopPropagation();
+            onArchive(card);
+          }}
+        >
+          <Archive aria-hidden="true" size={14} />
         </button>
       </div>
     </article>
+  );
+}
+
+function TaskModal({
+  cardId,
+  cards,
+  projects,
+  agentProfiles,
+  activeProfileId,
+  activeProjectId,
+  agentMessages,
+  agentBusy,
+  onClose,
+  onSaved,
+  onRunAgent,
+}: {
+  cardId: number;
+  cards: RequirementCard[];
+  projects: Project[];
+  agentProfiles: AgentProfile[];
+  activeProfileId: number | null;
+  activeProjectId: number | null;
+  agentMessages: AgentMessage[];
+  agentBusy: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+  onRunAgent: (prompt: string, profile: AgentProfile | null) => Promise<{ id: number } | null>;
+}) {
+  const card = cards.find((item) => item.id === cardId) ?? null;
+  const initialProjectIds = card
+    ? card.project_ids.length
+      ? card.project_ids
+      : card.project_id != null
+        ? [card.project_id]
+        : []
+    : [];
+  const [title, setTitle] = useState(card?.title ?? "");
+  const [description, setDescription] = useState(card?.body ?? "");
+  const [priority, setPriority] = useState(card?.priority || "medium");
+  const [status, setStatus] = useState(card?.status ?? "todo");
+  const [projectIds, setProjectIds] = useState<number[]>(initialProjectIds);
+  const [checklist, setChecklist] = useState<ChecklistItem[]>(parseChecklist(card?.checklist_json));
+  const [agentPrompt, setAgentPrompt] = useState(card?.agent_prompt ?? "");
+  const [checklistDraft, setChecklistDraft] = useState("");
+  const [attachments, setAttachments] = useState<RequirementAttachment[]>([]);
+  const [profileId, setProfileId] = useState<number | null>(activeProfileId);
+  const [runningSessionId, setRunningSessionId] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [modalError, setModalError] = useState("");
+
+  useEffect(() => {
+    const next = cards.find((item) => item.id === cardId);
+    if (!next) return;
+    setTitle(next.title);
+    setDescription(next.body);
+    setPriority(next.priority || "medium");
+    setStatus(next.status);
+    setProjectIds(
+      next.project_ids.length
+        ? next.project_ids
+        : next.project_id != null
+          ? [next.project_id]
+          : [],
+    );
+    setChecklist(parseChecklist(next.checklist_json));
+    setAgentPrompt(next.agent_prompt ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cardId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.listRequirementAttachments(cardId).then((result) => {
+      if (!cancelled && result.ok) setAttachments(result.value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cardId]);
+
+  const statusOptions = [
+    { value: "todo", label: "A fazer" },
+    { value: "doing", label: "Fazendo" },
+    { value: "validating", label: "Validando" },
+    { value: "done", label: "Feito" },
+  ];
+
+  function toggleProject(id: number) {
+    setProjectIds((ids) => (ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id]));
+  }
+  function addChecklistItem() {
+    const text = checklistDraft.trim();
+    if (!text) return;
+    setChecklist((items) => [
+      ...items,
+      { id: `item-${items.length}-${text.slice(0, 12)}`, text, done: false },
+    ]);
+    setChecklistDraft("");
+  }
+  function toggleChecklistItem(id: string) {
+    setChecklist((items) =>
+      items.map((item) => (item.id === id ? { ...item, done: !item.done } : item)),
+    );
+  }
+  function removeChecklistItem(id: string) {
+    setChecklist((items) => items.filter((item) => item.id !== id));
+  }
+
+  async function addAttachment() {
+    setModalError("");
+    const picked = await api.pickFile();
+    if (!picked.ok || !picked.value) return;
+    const result = await api.addRequirementAttachment(cardId, picked.value);
+    if (result.ok) setAttachments((items) => [result.value, ...items]);
+    else setModalError(result.error);
+  }
+  async function removeAttachment(id: number) {
+    const result = await api.removeRequirementAttachment(id);
+    if (result.ok) setAttachments((items) => items.filter((item) => item.id !== id));
+    else setModalError(result.error);
+  }
+
+  async function save() {
+    setSaving(true);
+    setModalError("");
+    const updated = await api.updateRequirementCard({
+      id: cardId,
+      title: title.trim() || "Sem título",
+      body: description,
+      priority,
+      checklist_json: serializeChecklist(checklist),
+      agent_prompt: agentPrompt,
+    });
+    if (!updated.ok) {
+      setModalError(updated.error);
+      setSaving(false);
+      return false;
+    }
+    const projectsResult = await api.setRequirementCardProjects(cardId, projectIds);
+    if (!projectsResult.ok) {
+      setModalError(projectsResult.error);
+      setSaving(false);
+      return false;
+    }
+    if (card && status !== card.status) {
+      const statusResult = await api.updateRequirementCardStatus(cardId, status);
+      if (!statusResult.ok) {
+        setModalError(statusResult.error);
+        setSaving(false);
+        return false;
+      }
+    }
+    setSaving(false);
+    onSaved();
+    return true;
+  }
+
+  function buildPrompt(): string {
+    const parts: string[] = [`# ${title.trim() || "Tarefa"}`];
+    if (description.trim()) parts.push(description.trim());
+    if (checklist.length) {
+      parts.push(
+        "## Checklist\n" +
+          checklist.map((item) => `- [${item.done ? "x" : " "}] ${item.text}`).join("\n"),
+      );
+    }
+    if (agentPrompt.trim()) parts.push("## Instruções\n" + agentPrompt.trim());
+    if (attachments.length) {
+      parts.push(
+        "## Anexos (leia estes arquivos)\n" +
+          attachments.map((item) => `- ${item.name}: ${item.file_path}`).join("\n"),
+      );
+    }
+    return parts.join("\n\n");
+  }
+
+  async function runAgent() {
+    setModalError("");
+    const saved = await save();
+    if (!saved) return;
+    const profile = agentProfiles.find((item) => item.id === profileId) ?? null;
+    const session = await onRunAgent(buildPrompt(), profile);
+    if (session) setRunningSessionId(session.id);
+  }
+
+  const runMessages = runningSessionId
+    ? agentMessages.filter((message) => message.session_id === runningSessionId)
+    : [];
+  const canRun = activeProjectId != null;
+
+  return (
+    <div className="modal-backdrop elevated" role="presentation" onClick={onClose}>
+      <section
+        className="modal-panel task-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-modal-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-heading">
+          <div>
+            <span className="section-label">{card?.public_id ?? "TAREFA"}</span>
+            <h2 id="task-modal-title">Editar tarefa</h2>
+          </div>
+          <button
+            className="secondary-button icon-button"
+            type="button"
+            onClick={onClose}
+            aria-label="Fechar"
+          >
+            <X aria-hidden="true" size={16} />
+          </button>
+        </div>
+
+        {modalError ? <div className="error-banner compact">{modalError}</div> : null}
+
+        <div className="task-modal-body">
+          <label className="field">
+            <span>Título</span>
+            <input value={title} onChange={(event) => setTitle(event.target.value)} />
+          </label>
+
+          <label className="field">
+            <span>Descrição</span>
+            <textarea
+              value={description}
+              rows={4}
+              onChange={(event) => setDescription(event.target.value)}
+            />
+          </label>
+
+          <div className="task-modal-row">
+            <label className="field">
+              <span>Prioridade</span>
+              <select value={priority} onChange={(event) => setPriority(event.target.value)}>
+                <option value="high">Alta</option>
+                <option value="medium">Média</option>
+                <option value="low">Baixa</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Status</span>
+              <select value={status} onChange={(event) => setStatus(event.target.value)}>
+                {statusOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="field">
+            <span>Projetos</span>
+            <div className="chip-row">
+              {projects.length ? (
+                projects.map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    className={projectIds.includes(project.id) ? "chip active" : "chip"}
+                    onClick={() => toggleProject(project.id)}
+                  >
+                    {project.name}
+                  </button>
+                ))
+              ) : (
+                <span className="empty-note">Nenhum projeto neste workspace.</span>
+              )}
+            </div>
+          </div>
+
+          <div className="field">
+            <span>
+              Checklist ({checklist.filter((item) => item.done).length}/{checklist.length})
+            </span>
+            <ul className="checklist">
+              {checklist.map((item) => (
+                <li key={item.id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={item.done}
+                      onChange={() => toggleChecklistItem(item.id)}
+                    />
+                    <span className={item.done ? "done" : ""}>{item.text}</span>
+                  </label>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => removeChecklistItem(item.id)}
+                    aria-label="Remover item"
+                  >
+                    <Trash2 aria-hidden="true" size={13} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <div className="checklist-add">
+              <input
+                value={checklistDraft}
+                placeholder="Nova subtarefa"
+                onChange={(event) => setChecklistDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addChecklistItem();
+                  }
+                }}
+              />
+              <button className="secondary-button" type="button" onClick={addChecklistItem}>
+                <Plus aria-hidden="true" size={14} />
+              </button>
+            </div>
+          </div>
+
+          <div className="field">
+            <span>Anexos</span>
+            <ul className="attachment-list">
+              {attachments.map((attachment) => (
+                <li key={attachment.id}>
+                  <FileText aria-hidden="true" size={14} />
+                  <span>{attachment.name}</span>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => void removeAttachment(attachment.id)}
+                    aria-label="Remover anexo"
+                  >
+                    <Trash2 aria-hidden="true" size={13} />
+                  </button>
+                </li>
+              ))}
+              {attachments.length === 0 ? <li className="empty-note">Sem anexos.</li> : null}
+            </ul>
+            <button className="secondary-button" type="button" onClick={() => void addAttachment()}>
+              <Plus aria-hidden="true" size={14} />
+              Anexar arquivo
+            </button>
+          </div>
+
+          <label className="field">
+            <span>Prompt do agente</span>
+            <textarea
+              value={agentPrompt}
+              rows={3}
+              placeholder="Instruções extras para o agente ao executar esta tarefa"
+              onChange={(event) => setAgentPrompt(event.target.value)}
+            />
+          </label>
+
+          <div className="field">
+            <span>Executar com agente</span>
+            <div className="task-run-row">
+              {agentProfiles.length > 1 ? (
+                <select
+                  value={profileId ?? ""}
+                  onChange={(event) =>
+                    setProfileId(event.target.value ? Number(event.target.value) : null)
+                  }
+                >
+                  {agentProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name} ({profile.provider})
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void runAgent()}
+                disabled={agentBusy || !canRun}
+                title={canRun ? undefined : "Selecione um projeto ativo para executar"}
+              >
+                <Play aria-hidden="true" size={15} />
+                Executar com agente
+              </button>
+            </div>
+            {!canRun ? (
+              <p className="empty-note">
+                Selecione um projeto ativo no app para executar a tarefa.
+              </p>
+            ) : null}
+            {runningSessionId ? (
+              <div className="agent-inline-stream">
+                {runMessages.length === 0 ? (
+                  <p className="empty-note">Aguardando o agente…</p>
+                ) : (
+                  runMessages.map((message) => (
+                    <div key={message.id} className={`agent-msg ${message.role}`}>
+                      <span className="agent-msg-role">{message.role}</span>
+                      <pre>{message.content}</pre>
+                    </div>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Fechar
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => void save()}
+            disabled={saving}
+          >
+            <Check aria-hidden="true" size={16} />
+            Salvar
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function AddProjectModal({
+  workspaceId,
+  onClose,
+  onAdded,
+  t,
+}: {
+  workspaceId: number;
+  onClose: () => void;
+  onAdded: (project: Project) => void;
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+}) {
+  const [mode, setMode] = useState<"clone" | "local">("clone");
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [name, setName] = useState("");
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  function basename(value: string): string {
+    return (
+      value
+        .replace(/[\\/]+$/, "")
+        .split(/[\\/]/)
+        .pop() ?? ""
+    );
+  }
+
+  async function pickFolder() {
+    setError("");
+    const result = await api.pickDirectory();
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    if (result.value) {
+      setPath(result.value);
+      if (!name.trim()) setName(basename(result.value));
+    }
+  }
+
+  async function submit() {
+    setError("");
+    setBusy(true);
+    try {
+      if (mode === "clone") {
+        const url = remoteUrl.trim();
+        if (!url) {
+          setError("Informe a URL do repositório.");
+          return;
+        }
+        const result = await api.cloneGitProject(workspaceId, url, name.trim() || undefined);
+        if (!result.ok) {
+          setError(result.error);
+          return;
+        }
+        onAdded(result.value);
+      } else {
+        const folder = path.trim();
+        if (!folder) {
+          setError("Selecione a pasta do projeto.");
+          return;
+        }
+        const projectName = name.trim() || basename(folder) || "projeto";
+        const result = await api.addLocalProject(workspaceId, projectName, folder);
+        if (!result.ok) {
+          setError(result.error);
+          return;
+        }
+        onAdded(result.value);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop elevated" role="presentation" onClick={onClose}>
+      <section
+        className="modal-panel task-modal add-project-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="add-project-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-heading">
+          <div>
+            <span className="section-label">CLIA LOCAL</span>
+            <h2 id="add-project-title">{t("project.modal.title")}</h2>
+          </div>
+          <button
+            className="secondary-button icon-button"
+            type="button"
+            onClick={onClose}
+            aria-label={t("common.close")}
+          >
+            <X aria-hidden="true" size={16} />
+          </button>
+        </div>
+
+        {error ? <div className="error-banner compact">{error}</div> : null}
+
+        <div className="chip-row" role="tablist">
+          <button
+            type="button"
+            className={mode === "clone" ? "chip active" : "chip"}
+            onClick={() => setMode("clone")}
+          >
+            {t("project.modal.clone")}
+          </button>
+          <button
+            type="button"
+            className={mode === "local" ? "chip active" : "chip"}
+            onClick={() => setMode("local")}
+          >
+            {t("project.modal.local")}
+          </button>
+        </div>
+
+        <div className="task-modal-body">
+          {mode === "clone" ? (
+            <label className="field">
+              <span>{t("project.modal.remote")}</span>
+              <input
+                value={remoteUrl}
+                placeholder="https://github.com/usuario/repo.git"
+                autoFocus
+                onChange={(event) => setRemoteUrl(event.target.value)}
+              />
+            </label>
+          ) : (
+            <div className="field">
+              <span>{t("project.modal.path")}</span>
+              <div className="task-run-row">
+                <input
+                  value={path}
+                  placeholder="/home/voce/code/projeto"
+                  style={{ flex: 1 }}
+                  onChange={(event) => setPath(event.target.value)}
+                />
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => void pickFolder()}
+                >
+                  <FolderOpen aria-hidden="true" size={15} />
+                  Selecionar
+                </button>
+              </div>
+            </div>
+          )}
+
+          <label className="field">
+            <span>{t("project.modal.name")}</span>
+            <input
+              value={name}
+              placeholder={mode === "clone" ? "(opcional — derivado da URL)" : ""}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>
+            {t("common.close")}
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => void submit()}
+            disabled={busy}
+          >
+            {mode === "clone" ? (
+              <Download aria-hidden="true" size={16} />
+            ) : (
+              <FolderPlus aria-hidden="true" size={16} />
+            )}
+            {busy
+              ? mode === "clone"
+                ? "Clonando…"
+                : "Adicionando…"
+              : mode === "clone"
+                ? t("project.modal.cloneSubmit")
+                : t("project.modal.addLocal")}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProjectAnalysisModal({
+  projectName,
+  analyzeCommand,
+  suggestCommand,
+  analyzed,
+  hasAgent,
+  messages,
+  onClose,
+  onConfigureAgent,
+  onStart,
+  onAnswer,
+  onAnalyzed,
+  onCreateTasks,
+}: {
+  projectName: string;
+  analyzeCommand: string;
+  suggestCommand?: string;
+  analyzed: boolean | null;
+  hasAgent: boolean;
+  messages: AgentMessage[];
+  onClose: () => void;
+  onConfigureAgent: () => void;
+  onStart: (message: string) => Promise<boolean>;
+  onAnswer: (message: string) => Promise<boolean>;
+  onAnalyzed: () => void;
+  onCreateTasks: (items: SuggestionItem[]) => Promise<number>;
+}) {
+  const [mode, setMode] = useState<"idle" | "analyze" | "opportunities">("idle");
+  const [question, setQuestion] = useState<{ question: string; options?: string[] } | null>(null);
+  const [working, setWorking] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [suggestions, setSuggestions] = useState<SuggestionItem[] | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [analyzeDone, setAnalyzeDone] = useState(false);
+  const [createdCount, setCreatedCount] = useState<number | null>(null);
+  const parsedIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (mode === "idle") return;
+    const latest = [...messages]
+      .reverse()
+      .find((message) => message.role === "assistant" && message.content.trim());
+    if (!latest || parsedIdRef.current === latest.id) return;
+    if (mode === "analyze") {
+      const parsed = parseAnalyzeInterviewResponse(latest.content);
+      if (!parsed) return;
+      parsedIdRef.current = latest.id;
+      if (parsed.state === "question") {
+        setQuestion({ question: parsed.question, options: parsed.options });
+        setWorking("");
+      } else if (parsed.state === "working") {
+        setWorking(parsed.message ?? "Trabalhando…");
+        setQuestion(null);
+      } else {
+        setMode("idle");
+        setQuestion(null);
+        setWorking("");
+        setAnalyzeDone(true);
+        onAnalyzed();
+      }
+    } else {
+      const parsed = parseSuggestionInterviewResponse(latest.content);
+      if (!parsed) return;
+      parsedIdRef.current = latest.id;
+      if (parsed.state === "question") {
+        setQuestion({ question: parsed.question, options: parsed.options });
+        setWorking("");
+      } else if (parsed.state === "working") {
+        setWorking(parsed.message ?? "Trabalhando…");
+        setQuestion(null);
+      } else {
+        setMode("idle");
+        setQuestion(null);
+        setWorking("");
+        setSuggestions(parsed.suggestions);
+        setSelected(new Set(parsed.suggestions.map((_, index) => index)));
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, mode]);
+
+  async function run(kind: "analyze" | "opportunities") {
+    const command = kind === "analyze" ? analyzeCommand : suggestCommand;
+    if (!command) return;
+    parsedIdRef.current = null;
+    setSuggestions(null);
+    setCreatedCount(null);
+    setAnalyzeDone(false);
+    setQuestion(null);
+    setWorking("Iniciando…");
+    setMode(kind);
+    setBusy(true);
+    const message =
+      kind === "analyze"
+        ? analyzeInterviewPrompt({ projectName, analyzeCommand: command })
+        : suggestionInterviewPrompt({ projectName, suggestCommand: command });
+    const ok = await onStart(message);
+    setBusy(false);
+    if (!ok) {
+      setMode("idle");
+      setWorking("");
+    }
+  }
+
+  async function answerWith(value: string) {
+    const answer = value.trim();
+    if (!answer || mode === "idle") return;
+    parsedIdRef.current = null;
+    setQuestion(null);
+    setNote("");
+    setWorking("Enviando…");
+    setBusy(true);
+    const message =
+      mode === "analyze" ? analyzeAnswerPrompt(answer) : suggestionAnswerPrompt(answer);
+    await onAnswer(message);
+    setBusy(false);
+  }
+
+  async function addSelected() {
+    if (!suggestions) return;
+    const chosen = suggestions.filter((_, index) => selected.has(index));
+    if (!chosen.length) return;
+    setBusy(true);
+    const created = await onCreateTasks(chosen);
+    setBusy(false);
+    setCreatedCount(created);
+    setSuggestions(null);
+  }
+
+  const running = mode !== "idle";
+
+  return (
+    <div className="modal-backdrop elevated" role="presentation" onClick={onClose}>
+      <section
+        className="modal-panel task-modal analysis-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="analysis-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="modal-heading">
+          <div>
+            <span className="section-label">{projectName}</span>
+            <h2 id="analysis-title">Análise do projeto</h2>
+          </div>
+          <button
+            className="secondary-button icon-button"
+            type="button"
+            onClick={onClose}
+            aria-label="Fechar"
+          >
+            <X aria-hidden="true" size={16} />
+          </button>
+        </div>
+
+        {!hasAgent ? (
+          <div className="task-modal-body">
+            <p className="empty-note">
+              Configure um agente antes de rodar a análise. Ela executa{" "}
+              <code>{analyzeCommand}</code> pelo agente local (use um perfil com permissão de
+              escrita para gravar <code>.dw/rules/</code>).
+            </p>
+            <div className="modal-actions">
+              <button className="secondary-button" type="button" onClick={onClose}>
+                Fechar
+              </button>
+              <button className="primary-button" type="button" onClick={onConfigureAgent}>
+                <Bot aria-hidden="true" size={16} />
+                Configurar agente
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="task-modal-body">
+            <div className="field">
+              <span>
+                Status: {analyzed === false ? "pendente" : analyzed ? "analisado" : "verificando…"}
+              </span>
+              <div className="task-run-row">
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => void run("analyze")}
+                  disabled={busy || running}
+                >
+                  <Sparkles aria-hidden="true" size={15} />
+                  {analyzed ? "Reanalisar" : "Analisar projeto"}
+                </button>
+                {suggestCommand ? (
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => void run("opportunities")}
+                    disabled={busy || running}
+                  >
+                    <Sparkles aria-hidden="true" size={15} />
+                    Mapear oportunidades
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            {analyzeDone ? (
+              <p className="empty-note">Análise concluída — as rules do projeto foram geradas.</p>
+            ) : null}
+            {createdCount != null ? (
+              <p className="empty-note">{createdCount} tarefa(s) criada(s) no kanban.</p>
+            ) : null}
+
+            {running ? (
+              <div className="agent-inline-stream">
+                {working ? <p className="empty-note">{working}</p> : null}
+                {question ? (
+                  <div className="analysis-question">
+                    <p>{question.question}</p>
+                    {question.options?.length ? (
+                      <div className="chip-row">
+                        {question.options.map((option) => (
+                          <button
+                            key={option}
+                            type="button"
+                            className="chip"
+                            disabled={busy}
+                            onClick={() => void answerWith(option)}
+                          >
+                            {option}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="task-run-row">
+                      <input
+                        value={note}
+                        placeholder="Sua resposta…"
+                        style={{ flex: 1 }}
+                        disabled={busy}
+                        onChange={(event) => setNote(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void answerWith(note);
+                          }
+                        }}
+                      />
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        disabled={busy || !note.trim()}
+                        onClick={() => void answerWith(note)}
+                      >
+                        <Send aria-hidden="true" size={15} />
+                        Responder
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {suggestions ? (
+              <div className="field">
+                <span>
+                  Oportunidades ({selected.size}/{suggestions.length} selecionadas)
+                </span>
+                <ul className="checklist">
+                  {suggestions.map((item, index) => (
+                    <li key={`${item.title}-${index}`}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(index)}
+                          onChange={() =>
+                            setSelected((current) => {
+                              const next = new Set(current);
+                              if (next.has(index)) next.delete(index);
+                              else next.add(index);
+                              return next;
+                            })
+                          }
+                        />
+                        <span>
+                          {item.kind ? `[${item.kind}] ` : ""}
+                          {item.title}
+                          {item.body ? ` — ${item.body}` : ""}
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={busy || selected.size === 0}
+                  onClick={() => void addSelected()}
+                >
+                  <Plus aria-hidden="true" size={15} />
+                  Adicionar selecionadas como tarefas
+                </button>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -10619,6 +10120,14 @@ function GitWorkbench({
     [onRefreshLocal, refreshRefs],
   );
 
+  // clia-local: pull, then auto-sync submodules — a pull that moves submodule
+  // pointers leaves the working tree stale until `submodule update` runs.
+  const pullWithSubmodules = (rebase: boolean) => async () => {
+    const result = await api.gitPull(path, rebase);
+    if (result.ok) await api.gitUpdateAllSubmodules(path, true);
+    return result;
+  };
+
   async function doCommit() {
     const message = composeCommitMessage(commitSubject, commitDescription);
     if (!message.trim() && !amend) return;
@@ -10781,7 +10290,7 @@ function GitWorkbench({
         onSelect: () =>
           void run("Push", () => api.gitPush(path, { setUpstream: !repoState?.upstream })),
       },
-      { label: "Pull", onSelect: () => void run("Pull", () => api.gitPull(path, false)) },
+      { label: "Pull", onSelect: () => void run("Pull", pullWithSubmodules(false)) },
     ];
   }
 
@@ -10947,7 +10456,7 @@ function GitWorkbench({
             className="secondary-button"
             type="button"
             disabled={busy}
-            onClick={() => void run("Pull", () => api.gitPull(path, false))}
+            onClick={() => void run("Pull", pullWithSubmodules(false))}
           >
             <Download className="ico-pull" aria-hidden="true" size={15} /> Pull
           </button>
@@ -10955,7 +10464,7 @@ function GitWorkbench({
             className="secondary-button"
             type="button"
             disabled={busy}
-            onClick={() => void run("Pull --rebase", () => api.gitPull(path, true))}
+            onClick={() => void run("Pull --rebase", pullWithSubmodules(true))}
           >
             Pull rebase
           </button>
@@ -11175,6 +10684,20 @@ function GitWorkbench({
             <>
               <div className="git-section-head">
                 <span>Submódulos</span>
+                <button
+                  className="git-ref-action"
+                  type="button"
+                  title="submodule sync + update --init --recursive"
+                  disabled={busy}
+                  onClick={() =>
+                    void run("Submódulos atualizados", async () => {
+                      await api.gitSyncSubmodules(path);
+                      return api.gitUpdateAllSubmodules(path, true);
+                    })
+                  }
+                >
+                  atualizar todos
+                </button>
               </div>
               <div className="git-ref-list">
                 {submodules.map((sub) => (
@@ -11188,7 +10711,7 @@ function GitWorkbench({
                     <button
                       className="git-ref-action"
                       type="button"
-                      title="submodule update --init"
+                      title="submodule update --init --recursive"
                       disabled={busy}
                       onClick={() =>
                         void run("Submódulo atualizado", () =>
@@ -11197,6 +10720,19 @@ function GitWorkbench({
                       }
                     >
                       update
+                    </button>
+                    <button
+                      className="git-ref-action"
+                      type="button"
+                      title="submodule update --remote (seguir branch rastreada)"
+                      disabled={busy}
+                      onClick={() =>
+                        void run("Submódulo (branch) atualizado", () =>
+                          api.gitUpdateSubmoduleRemote(path, sub.path),
+                        )
+                      }
+                    >
+                      remote
                     </button>
                   </div>
                 ))}

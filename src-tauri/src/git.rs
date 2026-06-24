@@ -1493,13 +1493,39 @@ pub fn list_submodules(repo: &Path) -> anyhow::Result<Vec<Submodule>> {
 
 pub fn update_submodule(repo: &Path, path: &str, init: bool) -> anyhow::Result<String> {
     validate_git_path(path)?;
-    let mut args: Vec<&str> = vec!["submodule", "update"];
+    let mut args: Vec<&str> = vec!["submodule", "update", "--recursive"];
     if init {
         args.push("--init");
     }
     args.push("--");
     args.push(path);
     git(repo, &args)
+}
+
+/// Initialize/update every submodule recursively (used after clone, pull/checkout
+/// that moved pointers, or a manual "update all"). With `init` it also registers
+/// newly-added submodules listed in `.gitmodules`.
+pub fn update_all_submodules(repo: &Path, init: bool) -> anyhow::Result<String> {
+    let mut args: Vec<&str> = vec!["submodule", "update", "--recursive"];
+    if init {
+        args.push("--init");
+    }
+    git(repo, &args)
+}
+
+/// Re-sync submodule URLs from `.gitmodules` into `.git/config` (handles relative
+/// URLs and upstream URL changes). Recursive to cover nested submodules.
+pub fn sync_submodules(repo: &Path) -> anyhow::Result<String> {
+    git(repo, &["submodule", "sync", "--recursive"])
+}
+
+/// Update a submodule to the tip of its tracked branch (`submodule.<name>.branch`).
+pub fn update_submodule_remote(repo: &Path, path: &str) -> anyhow::Result<String> {
+    validate_git_path(path)?;
+    git(
+        repo,
+        &["submodule", "update", "--remote", "--init", "--recursive", "--", path],
+    )
 }
 
 pub fn stash_save(

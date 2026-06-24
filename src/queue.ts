@@ -1,27 +1,46 @@
-import type { WiredCloudCard, WiredCloudWorkspace } from "./types";
-import type { WorkbenchPhase, WorkbenchSchema } from "./workbenchSchema";
+import type { ChecklistItem, Project, RequirementCard } from "./types";
 
 export type QueueBucket = "pending" | "doing" | "validating" | "done";
 
+/** The four fixed kanban columns, in order, with their pt-BR labels. */
+export const QUEUE_BUCKETS: Array<{ id: QueueBucket; label: string }> = [
+  { id: "pending", label: "A fazer" },
+  { id: "doing", label: "Fazendo" },
+  { id: "validating", label: "Validando" },
+  { id: "done", label: "Feito" },
+];
+
+/** Canonical status persisted to the backend when a card lands in each column. */
+const bucketStatusValue: Record<QueueBucket, string> = {
+  pending: "todo",
+  doing: "doing",
+  validating: "validating",
+  done: "done",
+};
+
+export function bucketCanonicalStatus(bucket: QueueBucket): string {
+  return bucketStatusValue[bucket];
+}
+
+export type QueueCardPriority = "high" | "medium" | "low";
+
 export type QueueCard = {
   id: string;
+  cardId: number;
   publicId: string;
   title: string;
   body: string;
   status: string;
   bucket: QueueBucket;
-  bucketStatus: Record<QueueBucket, string>;
-  priority: "high" | "medium" | "low" | "none";
+  priority: QueueCardPriority;
   updatedAt: string | null;
-  workspaceId: string | null;
-  workspaceName: string;
-  projectName: string | null;
-  assigneeName: string | null;
-  needsInstall: boolean;
-  wiredTaskStatus: string | null;
-  wiredTaskKind: string | null;
-  documentIds: string[];
-  raw: WiredCloudCard;
+  workspaceId: number;
+  projectIds: number[];
+  projectNames: string[];
+  checklistTotal: number;
+  checklistDone: number;
+  agentPrompt: string;
+  raw: RequirementCard;
 };
 
 export type QueueModel = {
@@ -29,126 +48,125 @@ export type QueueModel = {
   buckets: Record<QueueBucket, QueueCard[]>;
 };
 
-const bucketOrder: QueueBucket[] = ["pending", "doing", "validating", "done"];
-const priorityRank = new Map([
-  ["urgent", 4],
-  ["high", 3],
-  ["medium", 2],
-  ["med", 2],
-  ["normal", 2],
-  ["low", 1],
-  ["none", 0],
-]);
+const priorityRank: Record<QueueCardPriority, number> = { high: 3, medium: 2, low: 1 };
 
-const defaultBucketStageIds: Record<QueueBucket, string[]> = {
-  pending: ["backlog", "brainstorm", "plan"],
-  doing: ["run"],
-  validating: ["review", "qa", "security"],
-  done: ["commit", "localpr", "local-pr", "done"],
-};
-
-function text(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function phaseId(phase: Pick<WorkbenchPhase, "id">) {
-  return phase.id.trim();
-}
-
-function normalize(value: string) {
+function normalize(value: string): string {
   return value.toLowerCase().replace(/[\s_-]+/g, "");
 }
 
-function stageBucket(status: string | null, phases: Pick<WorkbenchPhase, "id">[]): QueueBucket {
-  const normalized = normalize(status ?? "");
-  if (!normalized) return "pending";
-  for (const bucket of bucketOrder) {
-    if (defaultBucketStageIds[bucket].some((stage) => normalize(stage) === normalized)) {
-      return bucket;
-    }
+// Tolerant mapping so legacy statuses (draft/running/reviewing/…) still land in
+// a sensible column alongside the canonical todo/doing/validating/done.
+const bucketByStatus = new Map<string, QueueBucket>([
+  ["todo", "pending"],
+  ["draft", "pending"],
+  ["backlog", "pending"],
+  ["brainstorm", "pending"],
+  ["brainstorming", "pending"],
+  ["plan", "pending"],
+  ["planned", "pending"],
+  ["pending", "pending"],
+  ["doing", "doing"],
+  ["run", "doing"],
+  ["running", "doing"],
+  ["inprogress", "doing"],
+  ["validating", "validating"],
+  ["review", "validating"],
+  ["reviewing", "validating"],
+  ["qa", "validating"],
+  ["security", "validating"],
+  ["done", "done"],
+  ["commit", "done"],
+  ["localpr", "done"],
+  ["readyforpr", "done"],
+  ["complete", "done"],
+  ["completed", "done"],
+]);
+
+export function statusBucket(status: string | null | undefined): QueueBucket {
+  if (!status) return "pending";
+  return bucketByStatus.get(normalize(status)) ?? "pending";
+}
+
+/** Parse a card's `checklist_json` into a normalized list of subtasks. */
+export function parseChecklist(json: string | null | undefined): ChecklistItem[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item): item is Record<string, unknown> => Boolean(item) && typeof item === "object",
+      )
+      .map((item, index) => ({
+        id: typeof item.id === "string" && item.id ? item.id : `item-${index}`,
+        text: typeof item.text === "string" ? item.text : "",
+        done: item.done === true,
+      }));
+  } catch {
+    return [];
   }
-  const index = phases.findIndex((phase) => normalize(phaseId(phase)) === normalized);
-  if (index < 0 || phases.length < 2) return "pending";
-  const ratio = index / Math.max(phases.length - 1, 1);
-  if (ratio >= 0.82) return "done";
-  if (ratio >= 0.5) return "validating";
-  if (ratio >= 0.33) return "doing";
-  return "pending";
 }
 
-function firstStageForBucket(bucket: QueueBucket, phases: Pick<WorkbenchPhase, "id">[]) {
-  const defaultIds = defaultBucketStageIds[bucket].map(normalize);
-  const matched = phases.find((phase) => defaultIds.includes(normalize(phaseId(phase))));
-  if (matched) return phaseId(matched);
-  if (!phases.length) return defaultBucketStageIds[bucket][0] ?? bucket;
-  const indexByBucket: Record<QueueBucket, number> = {
-    pending: 0,
-    doing: Math.floor(phases.length / 3),
-    validating: Math.floor((phases.length * 2) / 3),
-    done: phases.length - 1,
-  };
-  return phaseId(phases[Math.min(indexByBucket[bucket], phases.length - 1)]);
+export function serializeChecklist(items: ChecklistItem[]): string {
+  return JSON.stringify(items);
 }
 
-function priorityValue(card: WiredCloudCard) {
-  const priority = normalize(text(card.priority) ?? "medium");
-  return priorityRank.get(priority) ?? priorityRank.get("medium") ?? 2;
-}
-
-function queuePriority(card: WiredCloudCard): QueueCard["priority"] {
-  const priority = normalize(text(card.priority) ?? "medium");
-  if (priority === "urgent" || priority === "high") return "high";
-  if (priority === "low") return "low";
-  if (priority === "none") return "none";
+function queuePriority(value: string | null | undefined): QueueCardPriority {
+  const normalized = normalize(value ?? "medium");
+  if (normalized === "high" || normalized === "urgent") return "high";
+  if (normalized === "low") return "low";
   return "medium";
 }
 
+function cardProjectIds(card: RequirementCard): number[] {
+  if (card.project_ids.length) return card.project_ids;
+  return card.project_id != null ? [card.project_id] : [];
+}
+
+/**
+ * Build the kanban model for a single workspace's tasks. Archived cards are
+ * excluded; an optional `projectId` filters to tasks linked to that project.
+ */
 export function buildQueue(
-  cards: WiredCloudCard[],
-  currentUserId: string | null | undefined,
-  installedWorkspaceIds: Iterable<string>,
-  activeWorkflow?: Pick<WorkbenchSchema, "phases"> | null,
+  cards: RequirementCard[],
+  projects: Project[] = [],
+  options: { projectId?: number | null } = {},
 ): QueueModel {
-  const userId = currentUserId?.trim();
-  const installed = new Set(Array.from(installedWorkspaceIds, (id) => id.trim()).filter(Boolean));
-  const phases = activeWorkflow?.phases?.map((phase) => ({ id: phase.id })) ?? [];
-  const bucketStatus = Object.fromEntries(
-    bucketOrder.map((bucket) => [bucket, firstStageForBucket(bucket, phases)]),
-  ) as Record<QueueBucket, string>;
+  const projectNameById = new Map(projects.map((project) => [project.id, project.name]));
+  const projectFilter = options.projectId ?? null;
   const items = cards
-    .filter((card) => Boolean(userId) && text(card.assignee_user_id) === userId)
+    .filter((card) => card.status !== "archived" && !card.archived_at)
+    .filter((card) => {
+      if (projectFilter == null) return true;
+      return cardProjectIds(card).includes(projectFilter);
+    })
     .map((card) => {
-      const status = text(card.status) ?? bucketStatus.pending;
-      const workspaceId = text(card.workspace_id);
+      const checklist = parseChecklist(card.checklist_json);
+      const projectIds = cardProjectIds(card);
       return {
-        id: text(card.id) ?? text(card.public_id) ?? "",
-        publicId: text(card.public_id) ?? text(card.id) ?? "card",
-        title: text(card.title) ?? text(card.name) ?? text(card.public_id) ?? "Sem titulo",
-        body: text(card.body) ?? text(card.description) ?? "",
-        status,
-        bucket: stageBucket(status, phases),
-        bucketStatus,
-        priority: queuePriority(card),
-        updatedAt: text(card.updated_at),
-        workspaceId,
-        workspaceName: text(card.workspace_name) ?? "Workspace",
-        projectName: text(card.project_name),
-        assigneeName: text(card.assignee_name),
-        needsInstall: Boolean(workspaceId && !installed.has(workspaceId)),
-        wiredTaskStatus: text(card.wired_task_status),
-        wiredTaskKind: text(card.wired_task_kind),
-        documentIds: Array.isArray(card.document_ids)
-          ? card.document_ids.filter(
-              (id): id is string => typeof id === "string" && Boolean(id.trim()),
-            )
-          : [],
+        id: String(card.id),
+        cardId: card.id,
+        publicId: card.public_id || String(card.id),
+        title: card.title?.trim() || "Sem título",
+        body: card.body ?? "",
+        status: card.status,
+        bucket: statusBucket(card.status),
+        priority: queuePriority(card.priority),
+        updatedAt: card.updated_at ?? null,
+        workspaceId: card.workspace_id,
+        projectIds,
+        projectNames: projectIds
+          .map((id) => projectNameById.get(id))
+          .filter((name): name is string => Boolean(name)),
+        checklistTotal: checklist.length,
+        checklistDone: checklist.filter((item) => item.done).length,
+        agentPrompt: card.agent_prompt ?? "",
         raw: card,
       } satisfies QueueCard;
     })
-    .filter((card) => card.id)
     .sort((a, b) => {
-      const priorityDiff = priorityValue(b.raw) - priorityValue(a.raw);
-      if (priorityDiff !== 0) return priorityDiff;
+      const diff = priorityRank[b.priority] - priorityRank[a.priority];
+      if (diff !== 0) return diff;
       const bDate = b.updatedAt ? Date.parse(b.updatedAt) : 0;
       const aDate = a.updatedAt ? Date.parse(a.updatedAt) : 0;
       return bDate - aDate;
@@ -162,8 +180,4 @@ export function buildQueue(
       done: items.filter((item) => item.bucket === "done"),
     },
   };
-}
-
-export function installedWorkspaceIds(workspaces: WiredCloudWorkspace[]) {
-  return workspaces.filter((workspace) => workspace.installed).map((workspace) => workspace.id);
 }

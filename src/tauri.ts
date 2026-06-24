@@ -2,17 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   AttachmentPreview,
-  CloudStatus,
-  CloudSyncResult,
-  WiredCloudBootstrap,
-  WiredCloudInstallInput,
-  WiredCloudInstallReport,
-  WiredConnectInput,
-  WiredDeviceLoginPoll,
-  WiredDeviceLoginStart,
-  WiredCardStatusInput,
-  WiredStatus,
-  WiredTaskStatusInput,
   AgentMessage,
   AgentProviderHealth,
   AgentProfile,
@@ -100,6 +89,15 @@ export async function invokeSafe<T>(command: string, args?: Record<string, unkno
 }
 
 export const api = {
+  async pickFile() {
+    try {
+      const selected = await open({ directory: false, multiple: false });
+      if (Array.isArray(selected)) return { ok: true as const, value: selected[0] ?? null };
+      return { ok: true as const, value: selected };
+    } catch (error) {
+      return { ok: false as const, error: normalizeError(error) };
+    }
+  },
   async pickDirectory() {
     try {
       const selected = await open({ directory: true, multiple: false });
@@ -137,68 +135,8 @@ export const api = {
   setAppState(key: string, value: string) {
     return invokeSafe<void>("set_app_state", { key, value });
   },
-  cloudStatus() {
-    return invokeSafe<CloudStatus>("cloud_status");
-  },
-  saveCloudConfig(portalUrl: string, syncToken: string) {
-    return invokeSafe<CloudStatus>("save_cloud_config", {
-      input: { portal_url: portalUrl, sync_token: syncToken },
-    });
-  },
-  wiredStatus() {
-    return invokeSafe<WiredStatus>("wired_status");
-  },
-  startWiredDeviceLogin(portalUrl: string) {
-    return invokeSafe<WiredDeviceLoginStart>("start_wired_device_login", { portalUrl });
-  },
-  pollWiredDeviceLogin() {
-    return invokeSafe<WiredDeviceLoginPoll>("poll_wired_device_login");
-  },
-  connectWiredWorkspace(input: WiredConnectInput) {
-    return invokeSafe<WiredStatus>("connect_wired_workspace", { input });
-  },
-  disconnectWiredWorkspace() {
-    return invokeSafe<WiredStatus>("disconnect_wired_workspace");
-  },
-  clearWiredPairing() {
-    return invokeSafe<WiredStatus>("clear_wired_pairing");
-  },
-  reportWiredTaskStatus(input: WiredTaskStatusInput) {
-    return invokeSafe<void>("report_wired_task_status", { input });
-  },
-  setWiredCardStatus(input: WiredCardStatusInput) {
-    return invokeSafe<void>("set_wired_card_status", { input });
-  },
-  exportWorkspaceCloudSnapshot(workspaceId: number) {
-    return invokeSafe<Record<string, unknown>>("export_workspace_cloud_snapshot", {
-      workspaceId,
-    });
-  },
-  syncWorkspaceToCloud(workspaceId: number) {
-    return invokeSafe<CloudSyncResult>("sync_workspace_to_cloud", { workspaceId });
-  },
-  pullWorkspaceFromCloud(workspaceId: number) {
-    return invokeSafe<Record<string, unknown>>("pull_workspace_from_cloud", { workspaceId });
-  },
-  openCloudPortal(input: {
-    workspace_id?: number | null;
-    project_id?: number | null;
-    card_id?: number | null;
-    path?: string | null;
-  }) {
-    return invokeSafe<string>("open_cloud_portal", { input });
-  },
   openExternalUrl(url: string) {
     return invokeSafe<void>("open_external_url", { url });
-  },
-  wiredCloudBootstrap() {
-    return invokeSafe<WiredCloudBootstrap>("wired_cloud_bootstrap");
-  },
-  installWiredCloudWorkspaces(input: WiredCloudInstallInput) {
-    return invokeSafe<WiredCloudInstallReport>("install_wired_cloud_workspaces", { input });
-  },
-  fetchWiredDocument(documentId: string) {
-    return invokeSafe<KnowledgeSource>("fetch_wired_document", { documentId });
   },
   checkMachineProvider() {
     return invokeSafe<MachineProviderStatus>("check_machine_provider");
@@ -355,6 +293,7 @@ export const api = {
     projectIds: number[],
     title: string,
     body: string,
+    priority?: string | null,
   ) {
     return invokeSafe<RequirementCard>("create_requirement_card", {
       input: {
@@ -363,7 +302,23 @@ export const api = {
         project_ids: projectIds,
         title,
         body,
+        priority: priority ?? null,
       },
+    });
+  },
+  updateRequirementCard(input: {
+    id: number;
+    title?: string | null;
+    body?: string | null;
+    priority?: string | null;
+    checklist_json?: string | null;
+    agent_prompt?: string | null;
+  }) {
+    return invokeSafe<RequirementCard>("update_requirement_card", { input });
+  },
+  setRequirementCardProjects(id: number, projectIds: number[]) {
+    return invokeSafe<RequirementCard>("set_requirement_card_projects", {
+      input: { id, project_ids: projectIds },
     });
   },
   updateRequirementCardStatus(id: number, status: string, prdSlug?: string | null) {
@@ -843,6 +798,15 @@ export const api = {
   },
   gitUpdateSubmodule(path: string, subPath: string, init: boolean) {
     return invokeSafe<string>("git_update_submodule", { path, subPath, init });
+  },
+  gitUpdateAllSubmodules(path: string, init = true) {
+    return invokeSafe<string>("git_update_all_submodules", { path, init });
+  },
+  gitSyncSubmodules(path: string) {
+    return invokeSafe<string>("git_sync_submodules", { path });
+  },
+  gitUpdateSubmoduleRemote(path: string, subPath: string) {
+    return invokeSafe<string>("git_update_submodule_remote", { path, subPath });
   },
   gitDiscardFile(path: string, filePath: string) {
     return invokeSafe<string>("git_discard_file", { path, filePath });

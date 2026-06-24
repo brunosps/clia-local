@@ -1,77 +1,95 @@
 import { describe, expect, it } from "vitest";
-import { buildQueue, installedWorkspaceIds } from "./queue";
-import type { WiredCloudCard, WiredCloudWorkspace } from "./types";
-import type { WorkbenchSchema } from "./workbenchSchema";
+import { buildQueue, statusBucket } from "./queue";
+import type { Project, RequirementCard } from "./types";
 
-const workflow = {
-  phases: [
-    { id: "backlog", label: "Backlog", status: "ready", description: "", fields: [], action: { type: "none" } },
-    { id: "run", label: "Run", status: "ready", description: "", fields: [], action: { type: "none" } },
-    { id: "qa", label: "QA", status: "ready", description: "", fields: [], action: { type: "none" } },
-    { id: "done", label: "Done", status: "ready", description: "", fields: [], action: { type: "none" } },
-  ],
-} satisfies Pick<WorkbenchSchema, "phases">;
-
-function card(patch: Partial<WiredCloudCard>): WiredCloudCard {
+function card(patch: Partial<RequirementCard>): RequirementCard {
   return {
-    id: "card-1",
+    id: 1,
+    workspace_id: 1,
+    project_id: 1,
+    project_ids: [1],
     public_id: "APP-1",
     title: "Implementar fila",
-    status: "backlog",
+    slug: "implementar-fila",
+    body: "",
     priority: "medium",
+    checklist_json: "[]",
+    agent_prompt: "",
+    status: "todo",
+    created_at: "2026-06-01T10:00:00Z",
     updated_at: "2026-06-01T10:00:00Z",
-    workspace_id: "workspace-1",
-    workspace_name: "Core",
-    assignee_user_id: "user-1",
     ...patch,
   };
 }
 
+const projects: Project[] = [
+  { id: 1, workspace_id: 1, name: "App", path: "/app", created_at: "2026-06-01T00:00:00Z" },
+  { id: 2, workspace_id: 1, name: "Api", path: "/api", created_at: "2026-06-01T00:00:00Z" },
+];
+
 describe("buildQueue", () => {
-  it("keeps exactly assigned cards ordered by priority and updated_at", () => {
+  it("orders by priority then updated_at and drops archived cards", () => {
     const queue = buildQueue(
       [
-        card({ id: "low", public_id: "APP-3", priority: "low", updated_at: "2026-06-03T10:00:00Z" }),
-        card({ id: "other", public_id: "APP-4", assignee_user_id: "user-2", priority: "high" }),
-        card({ id: "high-old", public_id: "APP-1", priority: "high", updated_at: "2026-06-01T10:00:00Z" }),
-        card({ id: "high-new", public_id: "APP-2", priority: "high", updated_at: "2026-06-02T10:00:00Z" }),
+        card({ id: 1, priority: "low", updated_at: "2026-06-03T10:00:00Z" }),
+        card({ id: 2, priority: "high", updated_at: "2026-06-01T10:00:00Z" }),
+        card({ id: 3, priority: "high", updated_at: "2026-06-02T10:00:00Z" }),
+        card({ id: 4, priority: "high", status: "archived" }),
       ],
-      "user-1",
-      ["workspace-1"],
-      workflow,
+      projects,
     );
 
-    expect(queue.items.map((item) => item.id)).toEqual(["high-new", "high-old", "low"]);
+    expect(queue.items.map((item) => item.id)).toEqual(["3", "2", "1"]);
   });
 
-  it("marks install needs and bucketizes by workflow status", () => {
+  it("buckets by status and counts checklist progress", () => {
     const queue = buildQueue(
       [
-        card({ id: "doing", status: "run", workspace_id: "workspace-2" }),
-        card({ id: "validating", status: "qa", workspace_id: "workspace-1" }),
-        card({ id: "done", status: "done", workspace_id: "workspace-1" }),
+        card({ id: 1, status: "doing" }),
+        card({ id: 2, status: "qa" }),
+        card({
+          id: 3,
+          status: "done",
+          checklist_json: JSON.stringify([
+            { id: "a", text: "x", done: true },
+            { id: "b", text: "y", done: false },
+          ]),
+        }),
       ],
-      "user-1",
-      ["workspace-1"],
-      workflow,
+      projects,
     );
 
-    expect(queue.buckets.doing.map((item) => item.id)).toEqual(["doing"]);
-    expect(queue.buckets.validating.map((item) => item.id)).toEqual(["validating"]);
-    expect(queue.buckets.done.map((item) => item.id)).toEqual(["done"]);
-    expect(queue.items.find((item) => item.id === "doing")?.needsInstall).toBe(true);
-    expect(queue.items.find((item) => item.id === "validating")?.needsInstall).toBe(false);
+    expect(queue.buckets.doing.map((item) => item.id)).toEqual(["1"]);
+    expect(queue.buckets.validating.map((item) => item.id)).toEqual(["2"]);
+    expect(queue.buckets.done.map((item) => item.id)).toEqual(["3"]);
+    const done = queue.buckets.done[0];
+    expect(done.checklistTotal).toBe(2);
+    expect(done.checklistDone).toBe(1);
+  });
+
+  it("filters by project and resolves project names", () => {
+    const queue = buildQueue(
+      [
+        card({ id: 1, project_ids: [1] }),
+        card({ id: 2, project_ids: [2] }),
+        card({ id: 3, project_ids: [1, 2] }),
+      ],
+      projects,
+      { projectId: 2 },
+    );
+
+    expect(queue.items.map((item) => item.id).sort()).toEqual(["2", "3"]);
+    expect(queue.items.find((item) => item.id === "3")?.projectNames).toEqual(["App", "Api"]);
   });
 });
 
-describe("installedWorkspaceIds", () => {
-  it("returns cloud ids for installed workspaces", () => {
-    const workspaces: WiredCloudWorkspace[] = [
-      { id: "one", name: "One", installed: true },
-      { id: "two", name: "Two", installed: false },
-      { id: "three", name: "Three", installed: true },
-    ];
-
-    expect(installedWorkspaceIds(workspaces)).toEqual(["one", "three"]);
+describe("statusBucket", () => {
+  it("maps legacy and canonical statuses to the four columns", () => {
+    expect(statusBucket("draft")).toBe("pending");
+    expect(statusBucket("todo")).toBe("pending");
+    expect(statusBucket("running")).toBe("doing");
+    expect(statusBucket("reviewing")).toBe("validating");
+    expect(statusBucket("done")).toBe("done");
+    expect(statusBucket("anything-else")).toBe("pending");
   });
 });

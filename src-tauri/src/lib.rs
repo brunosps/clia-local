@@ -231,6 +231,7 @@ struct RequirementCardInput {
     project_ids: Option<Vec<i64>>,
     title: String,
     body: String,
+    priority: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +261,22 @@ struct RequirementCardFlowInput {
 struct RequirementCardBodyInput {
     id: i64,
     body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequirementCardUpdateInput {
+    id: i64,
+    title: Option<String>,
+    body: Option<String>,
+    priority: Option<String>,
+    checklist_json: Option<String>,
+    agent_prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequirementCardProjectsInput {
+    id: i64,
+    project_ids: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,12 +460,41 @@ fn list_projects(app: tauri::AppHandle, workspace_id: i64) -> AppResult<Vec<stor
 #[tauri::command]
 fn add_local_project(app: tauri::AppHandle, input: ProjectInput) -> AppResult<store::Project> {
     let db = store::Database::open(&app_data_dir(&app)?)?;
-    Ok(db.add_project(
+    let project = db.add_project(
         input.workspace_id,
         &input.name,
         &input.path,
         input.remote_url.as_deref(),
-    )?)
+    )?;
+    init_submodules_if_present(&project.path);
+    Ok(project)
+}
+
+/// Best-effort: if a project folder is a git repo with submodules, sync URLs
+/// (handles relative URLs) and initialize them recursively. Errors are ignored —
+/// the project is still usable and the Git tab exposes a manual "update all".
+fn init_submodules_if_present(project_path: &str) {
+    let root = std::path::Path::new(project_path);
+    if root.join(".gitmodules").is_file() {
+        let _ = git::sync_submodules(root);
+        let _ = git::update_all_submodules(root, true);
+    }
+}
+
+/// Restrict clone remotes to https/ssh transports; reject file://, git://, ext::
+/// and similar transports abused by submodule-injection attacks.
+fn validate_remote_url(url: &str) -> anyhow::Result<()> {
+    let value = url.trim();
+    let lower = value.to_ascii_lowercase();
+    let scp_like = !lower.contains("://") && value.contains('@') && value.contains(':');
+    let ok = lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("ssh://")
+        || scp_like;
+    if !ok {
+        anyhow::bail!("unsupported remote URL (use https:// or ssh): {value}");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -457,6 +503,7 @@ fn clone_git_project(app: tauri::AppHandle, input: CloneProjectInput) -> AppResu
     if remote_url.is_empty() {
         return Err(anyhow::anyhow!("remote URL is required").into());
     }
+    validate_remote_url(remote_url)?;
 
     let db = store::Database::open(&app_data_dir(&app)?)?;
     let workspace = db.get_workspace(input.workspace_id)?;
@@ -499,7 +546,24 @@ fn clone_project_into_workspace(
         return db.add_project(workspace.id, name, &destination_string, Some(remote_url));
     }
 
-    shell::run_capture(None, "git", &["clone", remote_url, &destination_string])?;
+    // `--recurse-submodules` clones + initializes all submodules (recursively);
+    // `--jobs` parallelizes them. Clone is all-or-nothing: any failure (auth or
+    // network, including a submodule) aborts and removes the partial checkout.
+    if let Err(error) = shell::run_capture(
+        None,
+        "git",
+        &[
+            "clone",
+            "--recurse-submodules",
+            "--jobs",
+            "4",
+            remote_url,
+            &destination_string,
+        ],
+    ) {
+        let _ = std::fs::remove_dir_all(&destination);
+        return Err(error);
+    }
     db.add_project(workspace.id, name, &destination_string, Some(remote_url))
 }
 
@@ -545,6 +609,8 @@ fn import_solution_project(
     match clone_project_into_workspace(db, workspace, &manifest_project.name, &remote_url) {
         Ok(project) => {
             let warnings = configure_imported_project(&project.path, manifest_project);
+            // The branch checkout above may move submodule pointers; re-sync them.
+            init_submodules_if_present(&project.path);
             let status = if warnings.is_empty() {
                 "cloned"
             } else {
@@ -655,14 +721,21 @@ fn create_requirement_card(
     let slug = slugify_requirement(title);
     let db = store::Database::open(&app_data_dir(&app)?)?;
     let project_ids = input.project_ids.unwrap_or_default();
-    Ok(db.create_requirement_card(
+    let card = db.create_requirement_card(
         input.workspace_id,
         input.project_id,
         &project_ids,
         title,
         &slug,
         &input.body,
-    )?)
+    )?;
+    if let Some(priority) = input.priority.as_deref() {
+        let priority = normalize_card_priority(priority);
+        if priority != "medium" {
+            return Ok(db.update_requirement_card(card.id, None, None, Some(&priority), None, None)?);
+        }
+    }
+    Ok(card)
 }
 
 #[tauri::command]
@@ -728,6 +801,39 @@ fn update_requirement_card_body(
 ) -> AppResult<store::RequirementCard> {
     let db = store::Database::open(&app_data_dir(&app)?)?;
     Ok(db.update_requirement_card_body(input.id, &input.body)?)
+}
+
+#[tauri::command]
+fn update_requirement_card(
+    app: tauri::AppHandle,
+    input: RequirementCardUpdateInput,
+) -> AppResult<store::RequirementCard> {
+    let priority = input.priority.as_deref().map(normalize_card_priority);
+    let checklist_json = input.checklist_json.as_deref().map(|value| {
+        if serde_json::from_str::<serde_json::Value>(value).is_ok() {
+            value.trim().to_string()
+        } else {
+            "[]".to_string()
+        }
+    });
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(db.update_requirement_card(
+        input.id,
+        input.title.as_deref(),
+        input.body.as_deref(),
+        priority.as_deref(),
+        checklist_json.as_deref(),
+        input.agent_prompt.as_deref(),
+    )?)
+}
+
+#[tauri::command]
+fn set_requirement_card_projects(
+    app: tauri::AppHandle,
+    input: RequirementCardProjectsInput,
+) -> AppResult<store::RequirementCard> {
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(db.set_requirement_card_projects(input.id, &input.project_ids)?)
 }
 
 #[tauri::command]
@@ -1916,6 +2022,24 @@ fn git_list_submodules(path: String) -> AppResult<Vec<git::Submodule>> {
 fn git_update_submodule(path: String, sub_path: String, init: bool) -> AppResult<String> {
     let root = canonical_project_root(&PathBuf::from(path))?;
     Ok(git::update_submodule(&root, &sub_path, init)?)
+}
+
+#[tauri::command]
+fn git_update_all_submodules(path: String, init: bool) -> AppResult<String> {
+    let root = canonical_project_root(&PathBuf::from(path))?;
+    Ok(git::update_all_submodules(&root, init)?)
+}
+
+#[tauri::command]
+fn git_sync_submodules(path: String) -> AppResult<String> {
+    let root = canonical_project_root(&PathBuf::from(path))?;
+    Ok(git::sync_submodules(&root)?)
+}
+
+#[tauri::command]
+fn git_update_submodule_remote(path: String, sub_path: String) -> AppResult<String> {
+    let root = canonical_project_root(&PathBuf::from(path))?;
+    Ok(git::update_submodule_remote(&root, &sub_path)?)
 }
 
 #[tauri::command]
@@ -3395,6 +3519,14 @@ fn normalize_restorable_requirement_status(status: &str) -> anyhow::Result<Strin
     normalize_requirement_status(status)
 }
 
+fn normalize_card_priority(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "high" | "urgent" => "high".to_string(),
+        "low" => "low".to_string(),
+        _ => "medium".to_string(),
+    }
+}
+
 fn normalize_agent_provider(provider: &str) -> anyhow::Result<&'static str> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "codex" => Ok("codex"),
@@ -4340,6 +4472,8 @@ pub fn run() {
             archive_requirement_card,
             restore_requirement_card,
             update_requirement_card_body,
+            update_requirement_card,
+            set_requirement_card_projects,
             list_requirement_stage_forms,
             upsert_requirement_stage_form,
             list_requirement_attachments,
@@ -4504,6 +4638,9 @@ pub fn run() {
             git_start_interactive_rebase,
             git_list_submodules,
             git_update_submodule,
+            git_update_all_submodules,
+            git_sync_submodules,
+            git_update_submodule_remote,
             git_merge_branch,
             git_rebase_branch,
             git_cherry_pick,

@@ -10961,3 +10961,335 @@ h2 {
     width: min(480px, 92vw);
   }
 }
+
+/* clia-local: task board (kanban) + task modal --------------------------- */
+.queue-panel .queue-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 14px;
+}
+.chip {
+  border: 1px solid var(--clia-border);
+  background: var(--clia-panel);
+  color: var(--clia-muted);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background 0.15s ease;
+}
+.chip:hover {
+  color: var(--clia-text);
+  border-color: var(--clia-border-strong);
+}
+.chip.active {
+  color: #06210f;
+  background: var(--clia-primary);
+  border-color: var(--clia-primary);
+}
+.chip.small {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.queue-panel .kanban-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.queue-panel .kanban-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--clia-panel);
+  border: 1px solid var(--clia-border);
+  border-radius: 12px;
+  padding: 10px;
+  min-height: 160px;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+.queue-panel .kanban-column.over {
+  border-color: var(--clia-primary);
+  background: var(--clia-active-bg-strong);
+}
+.kanban-column-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--clia-muted);
+}
+.kanban-count {
+  background: var(--clia-panel-strong);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+.kanban-column-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 40px;
+}
+.queue-panel .kanban-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--clia-panel-strong);
+  border: 1px solid var(--clia-border);
+  border-radius: 10px;
+  padding: 10px;
+  cursor: grab;
+  transition:
+    border-color 0.15s ease,
+    transform 0.05s ease;
+}
+.queue-panel .kanban-card:hover {
+  border-color: var(--clia-border-strong);
+}
+.queue-panel .kanban-card:active {
+  cursor: grabbing;
+}
+.queue-panel .kanban-card.pending {
+  opacity: 0.5;
+}
+.queue-panel .kanban-card h3 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--clia-text);
+}
+.kanban-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--clia-muted);
+}
+.kanban-card-id {
+  font-variant-numeric: tabular-nums;
+}
+.kanban-card-projects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.kanban-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+.kanban-card-checklist {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--clia-muted);
+}
+
+/* Task modal */
+.modal-panel.task-modal {
+  width: min(620px, 94vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+}
+.task-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  padding: 4px 2px;
+}
+.task-modal-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.task-modal .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.task-modal .field > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--clia-muted);
+}
+.task-modal .field input,
+.task-modal .field textarea,
+.task-modal .field select {
+  background: var(--clia-input);
+  border: 1px solid var(--clia-border);
+  border-radius: 8px;
+  color: var(--clia-text);
+  padding: 8px 10px;
+  font: inherit;
+  width: 100%;
+}
+.task-modal .field textarea {
+  resize: vertical;
+}
+.task-modal .checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.task-modal .checklist li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.task-modal .checklist li label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.task-modal .checklist li span.done {
+  text-decoration: line-through;
+  color: var(--clia-muted);
+}
+.task-modal .checklist-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.task-modal .checklist-add input {
+  flex: 1;
+  background: var(--clia-input);
+  border: 1px solid var(--clia-border);
+  border-radius: 8px;
+  color: var(--clia-text);
+  padding: 6px 10px;
+  font: inherit;
+}
+.task-modal .attachment-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.task-modal .attachment-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--clia-text);
+}
+.task-modal .attachment-list li span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-run-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.task-run-row select {
+  background: var(--clia-input);
+  border: 1px solid var(--clia-border);
+  border-radius: 8px;
+  color: var(--clia-text);
+  padding: 8px 10px;
+  font: inherit;
+}
+.agent-inline-stream {
+  margin-top: 10px;
+  border: 1px solid var(--clia-border);
+  border-radius: 10px;
+  background: var(--clia-input);
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.agent-msg-role {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--clia-muted);
+}
+.agent-msg pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: var(--clia-text);
+}
+.agent-msg.system .agent-msg-role,
+.agent-msg.event .agent-msg-role {
+  color: var(--clia-accent);
+}
+
+/* clia-local: project analysis pill + interview question ----------------- */
+.analysis-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--clia-border);
+  background: var(--clia-panel);
+  color: var(--clia-muted);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.analysis-pill:hover {
+  border-color: var(--clia-border-strong);
+  color: var(--clia-text);
+}
+.analysis-pill.pending {
+  border-color: #8a7440;
+  color: #f5d28b;
+}
+.analysis-pill.done {
+  border-color: #4f765f;
+  color: #a9e0c6;
+}
+.analysis-question {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.analysis-question p {
+  margin: 0;
+  color: var(--clia-text);
+  font-size: 13px;
+}

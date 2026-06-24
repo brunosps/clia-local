@@ -28,7 +28,6 @@ tauri-plugin-dialog = "2.7.1"
 thiserror = "2"
 # rustls (pure-Rust TLS) so the URL fetcher cross-builds cleanly without OpenSSL.
 ureq = { version = "2", default-features = false, features = ["tls"] }
-tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
