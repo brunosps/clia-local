@@ -51,6 +51,13 @@ Removidos do fork: **knowledge** e **skills** — fora do `navItems` **e** do un
 (em `App.tsx`) e do `TabPreference`/`VALID_TABS` (em `uiPreferences.ts`; preferências
 antigas `knowledge`/`skills` migram para `queue`).
 
+**Redesign (open-design):** a navegação é um **rail vertical de ícones** (`--nav-width:54px`,
+faixa verde no ativo) e a topbar tem `--topbar-height:48px` com os dois breadcrumbs
+(workspace/projeto). Tokens em `src/styles.css :root` (`--clia-*`, `--space-*`, `--radius-*`,
+`--shadow-*`, `--ease`, `--clia-teal/gold/danger/dim`, `--clia-focus-ring`). Os 6 painéis +
+modais foram repaginados sobre esses tokens (kanban com colunas coloridas, git checklist,
+deploy/agents cards, settings 2 colunas). `--clia-primary` continua **verde** (#41ef6e).
+
 ## A Fila de tarefas (kanban local)
 
 A aba **Queue** é um quadro **kanban de tarefas locais**, escopado ao **workspace ativo**.
@@ -86,6 +93,26 @@ Não há nuvem em nenhuma parte do fluxo.
   `update_requirement_card_status`, `set_requirement_card_projects`,
   `archive_requirement_card`/`restore_requirement_card`, e os de anexo
   (`add`/`list`/`remove`/`preview`/`download_requirement_attachment`).
+
+## Projetos, clone & submódulos
+
+- **Adicionar projeto** (`AddProjectModal`): **Clonar do GitHub** (URL + opcional nome) ou
+  **Pasta local** (seletor). Botão separado "Gerar com IA" abre o `ProjectBlueprintModal`.
+- **Clone** (`clone_git_project_streamed` em `lib.rs`): `git clone --progress
+  --recurse-submodules --jobs 4`. **Streaming** via eventos `clone://progress`; **cancelável**
+  (`cancel_clone` mata o process-group + limpa o parcial); **tudo-ou-nada**. Repo privado →
+  falha rápida com `AUTH_REQUIRED:` (`GIT_TERMINAL_PROMPT=0`); o modal pede usuário/token e
+  refaz com um `GIT_ASKPASS` temporário (token não vai pro `.git/config`). URLs restritas a
+  https/ssh (`validate_remote_url`). O `clone_git_project` bloqueante antigo segue existindo.
+- **Submódulos como projetos:** `reconcile_workspace_projects` (em `store.rs`, roda no
+  `list_projects`) varre `.gitmodules` (`parse_gitmodules`) e registra cada submódulo
+  inicializado como **projeto-filho** (`parent_project_id`/`is_submodule`/`submodule_path`),
+  desregistrando os removidos. UI: QuickSwitch indenta + rotula "submodule"; dropdown marca `↳`.
+- **`git.rs`:** `list_submodules` (status + branch/detached), `update_submodule`/
+  `update_all_submodules`/`sync_submodules` (recursivos), `update_submodule_remote` (`--remote`),
+  `checkout_submodule_branch` (sai do detached HEAD). Pull/checkout disparam auto
+  `submodule update --init --recursive`. Seção **Submódulos** no Git workbench: "atualizar
+  todos", e por submódulo "update"/"remote"/"branch" + indicador de branch/detached.
 
 ## Convenções deste fork
 

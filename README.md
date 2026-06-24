@@ -77,3 +77,15 @@ cargo test  --manifest-path src-tauri/Cargo.toml --lib
 - `src-tauri/src/store.rs` tem 3 warnings de `clippy` de dead-code **de skills**
   (`WorkspaceSkillInstallInput`, `install_workspace_skill`, `skill_names`). Inofensivos;
   podar quando conveniente. (O dead-code de nuvem já foi todo removido.)
+
+## Git submodules & redesign
+
+- **Clone com submodules:** "Adicionar projeto → Clonar do GitHub" usa `git clone
+  --recurse-submodules --jobs` com **progresso ao vivo**, **cancelar** e, em repo privado,
+  **pedido de credencial** no app (token via GIT_ASKPASS, não persistido). Cada submódulo
+  inicializado vira um **projeto-filho** no workspace (indentado no QuickSwitch); o Git
+  workbench tem a seção **Submódulos** (atualizar todos / update / remote / branch) com
+  indicador de branch ou *detached HEAD*.
+- **Redesign (open-design):** navegação em **rail de ícones** à esquerda + topbar compacta,
+  e os 6 painéis + modais repaginados sobre tokens `--clia-*` (dark-only). `--clia-primary`
+  permanece verde.
