@@ -5357,6 +5357,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_gitmodules_extracts_path_and_url() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("dw-gitmodules-{unique}"));
+        std::fs::create_dir_all(&root).expect("dir");
+        let gitmodules = root.join(".gitmodules");
+        std::fs::write(
+            &gitmodules,
+            "[submodule \"vendor/lib\"]\n\tpath = vendor/lib\n\turl = https://example.com/lib.git\n\tbranch = main\n[submodule \"tools\"]\n\tpath = tools\n\turl = ../tools.git\n",
+        )
+        .expect("write .gitmodules");
+        let entries = parse_gitmodules(&gitmodules);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "vendor/lib");
+        assert_eq!(entries[0].url.as_deref(), Some("https://example.com/lib.git"));
+        assert_eq!(entries[1].path, "tools");
+        assert_eq!(entries[1].url.as_deref(), Some("../tools.git"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn app_state_round_trips_and_overwrites() {
         let (db, _root) = temp_db();
 

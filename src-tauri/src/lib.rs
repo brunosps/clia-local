@@ -4901,6 +4901,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn validate_remote_url_allows_https_ssh_rejects_dangerous() {
+        assert!(validate_remote_url("https://github.com/u/r.git").is_ok());
+        assert!(validate_remote_url("http://host/r.git").is_ok());
+        assert!(validate_remote_url("ssh://git@host/r.git").is_ok());
+        assert!(validate_remote_url("git@github.com:u/r.git").is_ok());
+        assert!(validate_remote_url("file:///etc/passwd").is_err());
+        assert!(validate_remote_url("git://host/r.git").is_err());
+        assert!(validate_remote_url("ext::sh -c whoami").is_err());
+    }
+
+    #[test]
     fn requirement_status_accepts_schema_slugs_and_rejects_invalid() {
         assert_eq!(normalize_requirement_status("draft").unwrap(), "draft");
         assert_eq!(
