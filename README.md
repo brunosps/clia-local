@@ -88,15 +88,15 @@ corepack pnpm dev          # sobe o Vite + Tauri e abre a janela (requer $DISPLA
 ### Build
 
 ```bash
-corepack pnpm rtk:prepare      # baixa o sidecar RTK para o bundle
-corepack pnpm winbox:prepare   # copia o CLI do WinBox para o bundle
 corepack pnpm build:web        # build do frontend (dist/)
 corepack pnpm build            # bundle desktop completo (tauri build)
 ```
 
-> Os binários embutidos (RTK e WinBox) não ficam versionados; rode os scripts `*:prepare`
-> antes do `tauri build`. O WinBox precisa de um build do `winbox-gui` disponível (defina
-> `WINBOX_GUI_BIN` ou mantenha um checkout ao lado deste repositório).
+> O `pnpm build` já roda `rtk:prepare` + `winbox:prepare` automaticamente: eles baixam os
+> binários embutidos (sidecar **RTK** e o **CLI do WinBox**) e verificam o `sha256` — esses
+> binários não ficam versionados. O WinBox vem da release do `winbox-gui`; o download usa o
+> `gh` autenticado (cobre repositório privado). Sem acesso/rede, há *fallback* para um build
+> local (`WINBOX_GUI_BIN` ou um checkout do `winbox-gui` ao lado deste repositório).
 
 ### Qualidade
 

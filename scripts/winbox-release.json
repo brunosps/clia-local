@@ -1,0 +1,20 @@
+{
+  "version": "0.1.0",
+  "repo": "brunosps/winbox-gui",
+  "tag": "v0.1.0",
+  "baseUrl": "https://github.com/brunosps/winbox-gui/releases/download/v0.1.0",
+  "assets": {
+    "linux-x64": {
+      "file": "winbox-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "fab1c96c1aea882ebc8be38e47be71deaff35511973b653930b5f05a98d8a0c9"
+    },
+    "win32-x64": {
+      "file": "winbox-x86_64-pc-windows-msvc.tar.gz",
+      "sha256": "6b91e70e835b2bb3f2fd49047d259b9ab47d3acaae174ce75c36d6d878876fdd"
+    },
+    "darwin-arm64": {
+      "file": "winbox-aarch64-apple-darwin.tar.gz",
+      "sha256": "679be37ed5e712f5bd1852cadd0a5a486fc621e99271cbedf123dfad6cb8a25a"
+    }
+  }
+}

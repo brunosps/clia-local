@@ -6,7 +6,7 @@
   "packageManager": "pnpm@10.23.0",
   "scripts": {
     "dev": "node scripts/dev-tauri.mjs",
-    "build": "tsc && vite build && tauri build",
+    "build": "corepack pnpm rtk:prepare && corepack pnpm winbox:prepare && tsc && vite build && tauri build",
     "build:web": "tsc && vite build",
     "preview": "vite preview",
     "rtk:prepare": "node scripts/prepare-rtk.mjs",
