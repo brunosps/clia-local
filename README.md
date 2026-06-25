@@ -1,91 +1,125 @@
 # clia.local
 
-Versão **100% local** do app desktop CLIA — sem nuvem, sem portal, sem pareamento de
-device. Tudo roda na sua máquina (SQLite + git + agentes locais).
+**Ambiente de desenvolvimento com agentes de IA — 100% local.**
 
-Foi criado como um **fork enxuto** do `app/` do monorepo `clia-wks`, com **toda a camada
-de nuvem removida** (cloud/wired, sync, device login, analyze/opportunities) e as features
-que dependiam do portal re-localizadas.
+`clia.local` é um app desktop que reúne, numa única janela, tudo que você precisa para
+tocar projetos com a ajuda de agentes de IA: uma **fila de tarefas** (kanban), um **editor
+de código**, um **workbench de Git**, **deploy em VMs locais** e a orquestração dos seus
+**agentes** (Codex, Claude Code, Copilot). Tudo roda na sua máquina — **sem nuvem, sem
+conta, sem login, sem pareamento de device**. O estado vive em SQLite local, o Git usa o
+binário nativo e os agentes rodam como processos locais.
+
+---
+
+## Por que clia.local
+
+- **Local e privado.** Sem portal, conta ou sincronização na nuvem: seu código, tarefas e
+  histórico ficam em SQLite na sua máquina. (Ações de rede explícitas — clonar repositórios,
+  baixar runtimes e chamar os CLIs dos agentes — usam a internet normalmente.)
+- **Abre direto no trabalho.** Sem tela de login nem conta — ao abrir, você já está na UI.
+- **Multi-projeto por workspace.** Agrupe vários repositórios (e seus submódulos) sob um
+  mesmo workspace e alterne entre eles rapidamente.
+- **Agentes como cidadãos de primeira classe.** Dispare um agente direto de uma tarefa e
+  acompanhe o resultado — com histórico por tarefa.
+
+## Funcionalidades
+
+| Área           | O que faz                                                                                                   |
+| -------------- | ----------------------------------------------------------------------------------------------------------- |
+| **Fila**       | Kanban de tarefas locais por workspace (A fazer / Fazendo / Validando / Feito), com drag-and-drop.          |
+| **Código**     | Editor Monaco com árvore de arquivos, busca, LSP, preview de Markdown e *blame* do Git.                     |
+| **Git**        | Workbench completo (stage/commit, branches, diff por linha/hunk, stash, tags, rebase, submódulos).          |
+| **Deploy**     | Detecção de stack, versionamento e publicação dos projetos em **VMs locais** (WinBox · Docker/QEMU).        |
+| **Agentes**    | Perfis e sessões; roda Codex / Claude Code / Copilot como processos locais, com *streaming* e métricas.     |
+| **Configurações** | Tema, cor de destaque, idioma, tamanho de fonte e runtime por perfil de agente.                          |
+
+### Fila de tarefas (kanban)
+
+Um quadro por **workspace**, com filtro por projeto, pensado como um *to-do* que pode ser
+executado por um agente:
+
+- **4 colunas** com *drag-and-drop*; mover um card é sempre uma ação humana, e dá para
+  **arquivar** tarefas.
+- Cada tarefa abre um **modal** com título, descrição, **checklist** de subtarefas,
+  **prioridade**, **projetos** (um ou mais), **anexos** e um **prompt** para o agente.
+- **Executar com agente:** o modal monta o prompt a partir da tarefa, deixa você escolher o
+  agente e mostra o resultado em *streaming*.
+- **Histórico do agente por tarefa:** cada execução fica registrada na própria tarefa —
+  com o **prompt** e o **resultado** renderizados em Markdown — sem se perder no chat.
+
+### Projetos & Git
+
+- **Adicionar projeto:** clonar de um repositório Git remoto (GitHub, GitLab, Bitbucket… via
+  https/ssh) — com **submódulos**, progresso ao vivo, cancelar e pedido de credencial para
+  repositórios privados — ou apontar para uma **pasta local**.
+- **Submódulos:** clone recursivo; cada submódulo inicializado vira um **projeto-filho** do
+  workspace e ganha uma seção dedicada no Git (atualizar todos, *update*, *remote*, trocar de
+  branch, indicador de *detached HEAD*).
 
 ## Stack
 
-Tauri 2 · React · TypeScript · Rust. Estado local em SQLite
-(`~/.local/share/clia-local/clia-local.sqlite3`, ou `$DW_GUI_HOME`).
+**Tauri 2 · React 19 · TypeScript · Rust.** O frontend vive em `src/` e o backend
+(comandos, SQLite e integração com Git/agentes/VMs) em `src-tauri/`.
 
-## Features (sidebar)
+## Requisitos
 
-| Tab          | O que faz no clia.local                                                                                |
-| ------------ | ----------------------------------------------------------------------------------------------------- |
-| **Queue**    | **Kanban de tarefas locais** do workspace ativo (SQLite). Veja abaixo.                                 |
-| **Code**     | Editor Monaco + árvore de arquivos + LSP. Igual ao app original.                                      |
-| **Git**      | Workbench de git (stage/commit/branches/diff/stash) via git CLI nativo.                                |
-| **Deploy**   | Detecção de stack, versões e deploy em máquinas locais (Winbox). Sem nuvem.                            |
-| **Agents**   | Profiles + sessions; roda Codex / Claude Code / Copilot como processos locais.                        |
-| **Settings** | Tema, cor de destaque, idioma, tamanho de fonte, RTK por profile.                                     |
+- **Node** (via `corepack` para o `pnpm`) e a **toolchain do Rust** (`cargo`).
+- Dependências de build do **Tauri** para o seu SO (no Linux, p.ex. `webkit2gtk`).
+- **Git** instalado — o workbench usa o Git nativo.
+- *Opcional (aba Deploy):* o **CLI do WinBox** (no `PATH` ou apontado por `WINBOX_BIN`) para
+  gerenciar as VMs, e **Docker** (+ KVM/QEMU) no host onde elas rodam.
+- *Opcional:* os CLIs dos **agentes** que você for usar (Codex, Claude Code, Copilot).
 
-Removidos em relação ao app original: tabs **Knowledge** e **Skills**, e todo o
-subsistema de nuvem (login WIRED, install de workspaces da nuvem, sync push/pull,
-analyze/opportunities).
-
-## A Fila de tarefas (kanban)
-
-Um quadro **kanban** por **workspace/projeto**, pensado como um to-do com a opção de rodar
-no agente:
-
-- **4 colunas** (A fazer / Fazendo / Validando / Feito) com **drag-and-drop**; mover é
-  sempre humano, e dá pra **arquivar** uma tarefa.
-- Escopado ao **workspace ativo**, com **filtro por projeto**.
-- **Nova tarefa** abre um **modal** onde você define título, descrição, **checklist** de
-  subtarefas, prioridade (Alta/Média/Baixa), **projeto(s)** (≥1), **anexos** e um **prompt**.
-- **Executar com agente:** o modal monta o prompt (título + descrição + checklist + prompt +
-  anexos), deixa escolher o agente (quando há mais de um) e mostra o **streaming inline**. O
-  status só muda quando **você** move o card.
-- **Anexos** são copiados para dentro do workspace (em `.dw/gui/attachments/`), fora dos
-  repositórios de projeto, então não sujam o git.
-
-Persistência: reaproveita a tabela `requirement_cards` (+ colunas `priority`,
-`checklist_json`, `agent_prompt`) e `requirement_attachments`. IDs públicos gerados
-localmente.
-
-## O que mudou no fork (resumo técnico)
-
-- **Backend:** nenhum código de nuvem. As structs/tabela/helpers `cloud_*` em `store.rs`
-  foram removidos, junto com a dependência `tungstenite`. Comandos novos de tarefa:
-  `update_requirement_card` e `set_requirement_card_projects` (anexos já existiam).
-  `cargo check`/`cargo test --lib` verdes.
-- **Frontend:** `App.tsx` vai direto pra UI (sem login/pareamento). A Fila foi reescrita
-  como kanban (`QueuePanel` + `TaskModal`), alimentada por `loadWorkspaceTasks()` →
-  `list_requirement_cards`. Tipos `Cloud*`/`Wired*`, wrappers de nuvem em `tauri.ts`, gates,
-  painéis de Knowledge/Skills e chaves `flows.*` de portal no i18n foram removidos. Módulos
-  órfãos `capabilities-status.*` e `task-status.*` deletados.
-
-## Desenvolvimento
+## Começando
 
 ```bash
-corepack pnpm install            # já vendorizado via store local; use --offline se preciso
-corepack pnpm dev                # vite + tauri dev (abre a janela)
-corepack pnpm typecheck          # tsc --noEmit
-corepack pnpm test               # vitest run
-corepack pnpm build:web          # tsc + vite build → dist/
-corepack pnpm build              # bundle desktop completo (tauri build)
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo test  --manifest-path src-tauri/Cargo.toml --lib
+corepack pnpm install      # instala as dependências
+corepack pnpm dev          # sobe o Vite + Tauri e abre a janela (requer $DISPLAY)
 ```
 
-## Dívidas conhecidas (não bloqueiam o build)
+### Primeiro uso
 
-- `src-tauri/src/store.rs` tem 3 warnings de `clippy` de dead-code **de skills**
-  (`WorkspaceSkillInstallInput`, `install_workspace_skill`, `skill_names`). Inofensivos;
-  podar quando conveniente. (O dead-code de nuvem já foi todo removido.)
+1. **Crie ou abra um workspace** pelo seletor no topo.
+2. **Adicione um projeto:** *New project* → clonar um repositório remoto ou apontar para uma
+   pasta local.
+3. **Configure um agente** em *Configurações* (perfil + CLI do agente).
+4. Crie uma tarefa na **Fila** e dispare **Executar com agente**.
 
-## Git submodules & redesign
+### Build
 
-- **Clone com submodules:** "Adicionar projeto → Clonar do GitHub" usa `git clone
-  --recurse-submodules --jobs` com **progresso ao vivo**, **cancelar** e, em repo privado,
-  **pedido de credencial** no app (token via GIT_ASKPASS, não persistido). Cada submódulo
-  inicializado vira um **projeto-filho** no workspace (indentado no QuickSwitch); o Git
-  workbench tem a seção **Submódulos** (atualizar todos / update / remote / branch) com
-  indicador de branch ou *detached HEAD*.
-- **Redesign (open-design):** navegação em **rail de ícones** à esquerda + topbar compacta,
-  e os 6 painéis + modais repaginados sobre tokens `--clia-*` (dark-only). `--clia-primary`
-  permanece verde.
+```bash
+corepack pnpm build:web    # build do frontend (dist/)
+corepack pnpm build        # bundle desktop completo (tauri build)
+```
+
+### Qualidade
+
+```bash
+corepack pnpm verify        # gate completo: typecheck + lint + test + build:web + cargo fmt/clippy/test
+```
+
+Ou cada passo isoladamente:
+
+```bash
+corepack pnpm typecheck     # tsc --noEmit
+corepack pnpm lint          # eslint --max-warnings=0
+corepack pnpm format:check  # prettier --check
+corepack pnpm test          # vitest
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+```
+
+## Onde ficam os dados
+
+Todo o estado é local, em SQLite (`clia-local.sqlite3`), no diretório de dados do app —
+resolvido nesta ordem: `$DW_GUI_HOME` → diretório de dados do Tauri
+(`~/.local/share/dev.clia.local/`) → `~/.local/share/clia-local/` → `./.clia-local`.
+Os anexos das tarefas são copiados para dentro do workspace, por card
+(`<workspace>/.dw/gui/attachments/<card_id>/`), fora dos repositórios — então não sujam o
+Git dos seus projetos.
+
+## Estrutura do repositório
+
+```
+src/            # frontend React + TypeScript (UI, editor, kanban, git, deploy, agentes)
+src-tauri/      # backend Rust (comandos Tauri, SQLite, Git, agentes, VMs)
+```
