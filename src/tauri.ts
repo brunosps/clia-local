@@ -537,6 +537,12 @@ export const api = {
   listAgentMessages(sessionId: number) {
     return invokeSafe<AgentMessage[]>("list_agent_messages", { sessionId });
   },
+  listAgentSessionsForCard(workspaceId: number, requirementCardId: number) {
+    return invokeSafe<AgentSession[]>("list_agent_sessions_for_card", {
+      workspaceId,
+      requirementCardId,
+    });
+  },
   sendAgentMessage(input: {
     profile_id: number;
     session_id?: number | null;

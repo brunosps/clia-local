@@ -11160,7 +11160,8 @@ h2 {
   flex-direction: column;
   gap: 14px;
   overflow: auto;
-  padding: 4px 2px;
+  padding: 4px 12px;
+  scrollbar-gutter: stable;
 }
 .task-modal-row {
   display: grid;
@@ -11296,6 +11297,147 @@ h2 {
 .agent-msg.system .agent-msg-role,
 .agent-msg.event .agent-msg-role {
   color: var(--clia-accent);
+}
+
+/* ---- Task agent-run history (Histórico do agente) ---- */
+.agent-history-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-run-item {
+  border: 1px solid var(--clia-border);
+  border-radius: 8px;
+  background: var(--clia-panel);
+  overflow: hidden;
+}
+.agent-run-item > details > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--clia-dim);
+  user-select: none;
+}
+.agent-run-item > details > summary::-webkit-details-marker {
+  display: none;
+}
+.agent-run-item > details > summary:hover {
+  background: var(--clia-input);
+}
+.agent-run-item > details[open] > summary {
+  border-bottom: 1px solid var(--clia-border);
+}
+.run-time {
+  color: var(--clia-text);
+  font-weight: 600;
+}
+.run-agent {
+  padding: 1px 6px;
+  border-radius: var(--radius-pill, 999px);
+  background: var(--clia-input);
+  font-size: 11px;
+  color: var(--clia-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.run-status {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill, 999px);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.run-status.status-done {
+  background: var(--clia-active-green, rgba(65, 239, 110, 0.14));
+  color: var(--clia-green, #41ef6e);
+}
+.run-status.status-running {
+  background: rgba(45, 212, 191, 0.14);
+  color: var(--clia-teal, #2dd4bf);
+}
+.run-status.status-failed {
+  background: rgba(255, 107, 138, 0.14);
+  color: var(--clia-danger, #ff6b8a);
+}
+.run-status.status-stopped {
+  background: rgba(242, 200, 121, 0.14);
+  color: var(--clia-gold, #f2c879);
+}
+.run-status.status-idle {
+  background: var(--clia-input);
+  color: var(--clia-dim);
+}
+.run-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+.run-section {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.run-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--clia-dim);
+}
+.run-section pre {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--clia-text);
+  background: var(--clia-input);
+  border: 1px solid var(--clia-border);
+  border-radius: 6px;
+  padding: 8px;
+}
+/* Resultado rendered as markdown (reuses the Agents renderer) */
+.run-result {
+  max-height: 320px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--clia-text);
+  background: var(--clia-input);
+  border: 1px solid var(--clia-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.run-result .agent-message-markdown > :first-child {
+  margin-top: 0;
+}
+.run-result .agent-message-markdown > :last-child {
+  margin-bottom: 0;
+}
+/* keep headings/paragraphs compact inside the small history box */
+.run-result .agent-message-markdown h1,
+.run-result .agent-message-markdown h2,
+.run-result .agent-message-markdown h3,
+.run-result .agent-message-markdown h4 {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 8px 0 4px;
+}
+.run-result .agent-message-markdown p,
+.run-result .agent-message-markdown ul,
+.run-result .agent-message-markdown ol {
+  margin: 4px 0;
 }
 
 /* clia-local: project analysis pill + interview question ----------------- */
@@ -13394,6 +13536,9 @@ h2 {
 
 .source-entry-list,
 .explorer-tree {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   flex: 1;
   overflow-y: auto;
   padding: var(--space-2) 0;

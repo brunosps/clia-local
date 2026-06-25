@@ -2525,6 +2525,31 @@ impl Database {
         collect_rows(rows)
     }
 
+    /// All agent sessions linked to a requirement card (any scope, e.g. "card_run"),
+    /// newest first. Used by the task modal's "Histórico do agente".
+    pub fn list_agent_sessions_for_card(
+        &self,
+        workspace_id: i64,
+        requirement_card_id: i64,
+    ) -> anyhow::Result<Vec<AgentSession>> {
+        let conn = self.workspace_connect_by_id(workspace_id)?;
+        let mut stmt = conn.prepare(
+            "select id, profile_id, workspace_id, project_id, requirement_card_id, scope,
+                    project_path, provider, model,
+                    reasoning_effort, sandbox, context_mode, provider_session_id, codex_session_id, status,
+                    title, created_at, updated_at
+             from agent_sessions
+             where workspace_id = ?1
+               and requirement_card_id = ?2
+             order by updated_at desc, id desc",
+        )?;
+        let rows = stmt.query_map(
+            params![workspace_id, requirement_card_id],
+            agent_session_from_row,
+        )?;
+        collect_rows(rows)
+    }
+
     pub fn create_agent_session(
         &self,
         profile: &AgentProfile,
@@ -5306,6 +5331,7 @@ fn evidence_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvidenceE
 fn normalize_agent_session_scope(scope: &str) -> &str {
     match scope.trim() {
         "card_interview" => "card_interview",
+        "card_run" => "card_run",
         "project_blueprint" => "project_blueprint",
         _ => "chat",
     }

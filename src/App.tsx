@@ -170,7 +170,7 @@ import {
   type ThemeMode,
 } from "./uiPreferences";
 import { gravatarUrl } from "./gravatar";
-import { AgentMessageContent } from "./agentMarkdown";
+import { AgentMarkdown, AgentMessageContent } from "./agentMarkdown";
 import {
   applySkillAutocomplete,
   composeSkillPrompt,
@@ -1959,6 +1959,8 @@ export function App() {
     sessionId?: number | null,
     profileOverride?: AgentProfile | null,
     options?: { stayOnTab?: boolean },
+    scope?: string,
+    requirementCardId?: number | null,
   ) {
     if (!activeWorkspace || !activeProject) {
       setError("Selecione um workspace e um projeto antes de chamar um agente.");
@@ -2047,6 +2049,8 @@ export function App() {
       workspace_id: activeWorkspace.id,
       project_id: activeProject.id,
       project_path: activeProject.path,
+      requirement_card_id: requirementCardId ?? null,
+      scope: scope ?? null,
       message,
       skill: skillInvocation,
     });
@@ -2576,18 +2580,15 @@ export function App() {
       });
       return;
     }
-    const title = await appPrompt({
-      title: "Nova tarefa",
-      label: "Título da tarefa",
-      confirmLabel: "Criar",
-    });
-    if (!title?.trim()) return;
+    // Open the full task modal right away (no separate title-only prompt):
+    // create a draft card with a default title and let the user fill every
+    // field (title included) in the modal.
     const projectIds = activeProject ? [activeProject.id] : [];
     const result = await api.createRequirementCard(
       workspace.id,
       activeProject?.id ?? null,
       projectIds,
-      title.trim(),
+      "Nova tarefa",
       "",
     );
     if (!result.ok) {
@@ -2602,8 +2603,13 @@ export function App() {
 
   // clia-local: run a task on a local agent. Assembles prompt upstream (TaskModal);
   // streams into the existing agent message state so the modal can show it inline.
-  async function runTaskWithAgent(prompt: string, profile: AgentProfile | null) {
-    return sendAgentPrompt(prompt, null, profile, { stayOnTab: true });
+  // scope "card_run" links the new session to the card (history) + keeps it out of the Agents tab.
+  async function runTaskWithAgent(
+    cardId: number,
+    prompt: string,
+    profile: AgentProfile | null,
+  ) {
+    return sendAgentPrompt(prompt, null, profile, { stayOnTab: true }, "card_run", cardId);
   }
 
   async function pickDirectory(setPath: (value: string) => void) {
@@ -4088,6 +4094,7 @@ export function App() {
           {openTaskId != null ? (
             <TaskModal
               cardId={openTaskId}
+              workspaceId={activeWorkspace?.id ?? 0}
               cards={cards}
               projects={projects}
               agentProfiles={agentProfiles}
@@ -4097,7 +4104,7 @@ export function App() {
               agentBusy={agentBusy}
               onClose={() => setOpenTaskId(null)}
               onSaved={() => void loadWorkspaceTasks()}
-              onRunAgent={runTaskWithAgent}
+              onRunAgent={(prompt, profile) => runTaskWithAgent(openTaskId, prompt, profile)}
             />
           ) : null}
 
@@ -5740,8 +5747,26 @@ function TaskCardView({
   );
 }
 
+function runStatusLabel(status: string): string {
+  switch (status) {
+    case "done":
+      return "concluído";
+    case "failed":
+      return "falhou";
+    case "running":
+      return "rodando";
+    case "stopped":
+      return "parado";
+    case "idle":
+      return "ocioso";
+    default:
+      return status;
+  }
+}
+
 function TaskModal({
   cardId,
+  workspaceId,
   cards,
   projects,
   agentProfiles,
@@ -5754,6 +5779,7 @@ function TaskModal({
   onRunAgent,
 }: {
   cardId: number;
+  workspaceId: number;
   cards: RequirementCard[];
   projects: Project[];
   agentProfiles: AgentProfile[];
@@ -5786,6 +5812,20 @@ function TaskModal({
   const [runningSessionId, setRunningSessionId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [modalError, setModalError] = useState("");
+  const titleRef = useRef<HTMLInputElement>(null);
+  // Per-task agent-run history (sessions launched from this card via scope "card_run").
+  const [runHistory, setRunHistory] = useState<AgentSession[]>([]);
+  const [runTranscripts, setRunTranscripts] = useState<Record<number, AgentMessage[]>>({});
+
+  // Focus + select the title when the modal opens so a freshly created task
+  // ("Nova tarefa") can be renamed by just typing.
+  useEffect(() => {
+    const el = titleRef.current;
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  }, [cardId]);
 
   useEffect(() => {
     const next = cards.find((item) => item.id === cardId);
@@ -5815,6 +5855,27 @@ function TaskModal({
       cancelled = true;
     };
   }, [cardId]);
+
+  // Load the agent-run history for this card. Re-fetches when a run starts/ends
+  // (agentBusy) so a freshly launched run — and its final status — show up.
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    void api.listAgentSessionsForCard(workspaceId, cardId).then((result) => {
+      if (!cancelled && result.ok) setRunHistory(result.value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cardId, workspaceId, agentBusy]);
+
+  // Lazy-load a run's transcript the first time its <details> is expanded.
+  function loadTranscript(sessionId: number) {
+    if (runTranscripts[sessionId]) return;
+    void api.listAgentMessages(sessionId).then((result) => {
+      if (result.ok) setRunTranscripts((prev) => ({ ...prev, [sessionId]: result.value }));
+    });
+  }
 
   const statusOptions = [
     { value: "todo", label: "A fazer" },
@@ -5955,7 +6016,11 @@ function TaskModal({
         <div className="task-modal-body">
           <label className="field">
             <span>Título</span>
-            <input value={title} onChange={(event) => setTitle(event.target.value)} />
+            <input
+              ref={titleRef}
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+            />
           </label>
 
           <label className="field">
@@ -6134,6 +6199,70 @@ function TaskModal({
                 )}
               </div>
             ) : null}
+          </div>
+
+          <div className="field">
+            <span>Histórico do agente</span>
+            <ul className="agent-history-list">
+              {runHistory.length === 0 ? (
+                <li className="empty-note">
+                  Sem execuções ainda. Use “Executar com agente” acima.
+                </li>
+              ) : (
+                runHistory.map((run) => {
+                  const msgs = runTranscripts[run.id] ?? [];
+                  const promptMsg = msgs.find((message) => message.role === "user");
+                  const resultMsg = [...msgs]
+                    .reverse()
+                    .find((message) => message.role === "assistant");
+                  return (
+                    <li key={run.id} className="agent-run-item">
+                      <details
+                        onToggle={(event) => {
+                          if ((event.target as HTMLDetailsElement).open) loadTranscript(run.id);
+                        }}
+                      >
+                        <summary>
+                          <span className="run-time">
+                            {new Date(run.created_at).toLocaleString()}
+                          </span>
+                          <span className="run-agent">{run.provider}</span>
+                          <span className={`run-status status-${run.status}`}>
+                            {runStatusLabel(run.status)}
+                          </span>
+                        </summary>
+                        <div className="run-detail">
+                          <div className="run-section">
+                            <span className="run-section-label">Prompt</span>
+                            {promptMsg ? (
+                              <div className="run-result">
+                                <AgentMarkdown text={promptMsg.content} />
+                              </div>
+                            ) : (
+                              <p className="empty-note">—</p>
+                            )}
+                          </div>
+                          <div className="run-section">
+                            <span className="run-section-label">Resultado</span>
+                            {resultMsg ? (
+                              <div className="run-result">
+                                <AgentMessageContent message={resultMsg} />
+                              </div>
+                            ) : (
+                              <p className="empty-note">
+                                {msgs.length
+                                  ? "(sem resposta do assistente)"
+                                  : "Abra para carregar…"}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </details>
+                    </li>
+                  );
+                })
+              )}
+            </ul>
           </div>
         </div>
 

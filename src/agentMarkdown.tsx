@@ -6,6 +6,15 @@ function shouldRenderAgentMarkdown(message: Pick<AgentMessage, "role" | "content
   return message.role === "assistant" && message.content.trim().length > 0;
 }
 
+/** Render arbitrary text as GFM markdown (used by the task run-history prompt). */
+export function AgentMarkdown({ text }: { text: string }) {
+  return (
+    <div className="agent-message-markdown">
+      <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+    </div>
+  );
+}
+
 export function AgentMessageContent({ message }: { message: AgentMessage }) {
   if (message.content) {
     if (shouldRenderAgentMarkdown(message)) {

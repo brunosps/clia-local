@@ -1513,6 +1513,16 @@ fn list_agent_sessions(
 }
 
 #[tauri::command]
+fn list_agent_sessions_for_card(
+    app: tauri::AppHandle,
+    workspace_id: i64,
+    requirement_card_id: i64,
+) -> AppResult<Vec<store::AgentSession>> {
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(db.list_agent_sessions_for_card(workspace_id, requirement_card_id)?)
+}
+
+#[tauri::command]
 fn list_agent_messages(
     app: tauri::AppHandle,
     session_id: i64,
@@ -1565,6 +1575,11 @@ fn send_agent_message(
                 .requirement_card_id
                 .ok_or_else(|| anyhow::anyhow!("requirement card is required for interview"))?,
         )
+    } else if scope == "card_run" {
+        // Task runs link to their card (optional: degrade gracefully if absent).
+        // scope != "chat" path below always creates a FRESH session, so each run
+        // becomes its own history entry.
+        input.requirement_card_id
     } else {
         None
     };
@@ -3780,6 +3795,7 @@ fn normalize_agent_session_scope(scope: Option<&str>) -> anyhow::Result<&'static
     {
         None | Some("chat") => Ok("chat"),
         Some("card_interview") => Ok("card_interview"),
+        Some("card_run") => Ok("card_run"),
         Some("project_blueprint") => Ok("project_blueprint"),
         Some(other) => Err(anyhow::anyhow!("unsupported agent session scope: {other}")),
     }
@@ -4734,6 +4750,7 @@ pub fn run() {
             create_agent_profile,
             update_agent_profile,
             list_agent_sessions,
+            list_agent_sessions_for_card,
             list_agent_messages,
             reset_agent_chat,
             send_agent_message,
