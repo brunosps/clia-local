@@ -45,6 +45,7 @@ pub struct WorkspaceSkillSearchResult {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // skills install path kept for future use; not wired in clia.local yet
 pub struct WorkspaceSkillInstallInput {
     pub workspace_path: String,
     pub package_slug: String,
@@ -366,6 +367,7 @@ pub fn find_workspace_skills(query: &str) -> anyhow::Result<Vec<WorkspaceSkillSe
     Ok(parse_skill_search_output(&combined))
 }
 
+#[allow(dead_code)] // skills install path kept for future use; not wired in clia.local yet
 pub fn install_workspace_skill(
     input: WorkspaceSkillInstallInput,
 ) -> anyhow::Result<Vec<WorkspaceSkillSummary>> {
@@ -1378,6 +1380,7 @@ fn write_copilot_prompt(root: &Path, name: &str, source: &Path) -> anyhow::Resul
     Ok(())
 }
 
+#[allow(dead_code)] // helper for the (currently unwired) skills install path
 fn skill_names(root: &Path) -> anyhow::Result<BTreeSet<String>> {
     Ok(list_workspace_skills(root)?
         .into_iter()
