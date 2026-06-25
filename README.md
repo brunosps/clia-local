@@ -66,8 +66,8 @@ executado por um agente:
 - **Node** (via `corepack` para o `pnpm`) e a **toolchain do Rust** (`cargo`).
 - Dependências de build do **Tauri** para o seu SO (no Linux, p.ex. `webkit2gtk`).
 - **Git** instalado — o workbench usa o Git nativo.
-- *Opcional (aba Deploy):* o **CLI do WinBox** (no `PATH` ou apontado por `WINBOX_BIN`) para
-  gerenciar as VMs, e **Docker** (+ KVM/QEMU) no host onde elas rodam.
+- *Opcional (aba Deploy):* **Docker** (+ KVM/QEMU) no host para criar e rodar as VMs. O CLI
+  do WinBox já vem **embutido** e é resolvido automaticamente (sem precisar de `WINBOX_BIN`).
 - *Opcional:* os CLIs dos **agentes** que você for usar (Codex, Claude Code, Copilot).
 
 ## Começando
@@ -88,9 +88,15 @@ corepack pnpm dev          # sobe o Vite + Tauri e abre a janela (requer $DISPLA
 ### Build
 
 ```bash
-corepack pnpm build:web    # build do frontend (dist/)
-corepack pnpm build        # bundle desktop completo (tauri build)
+corepack pnpm rtk:prepare      # baixa o sidecar RTK para o bundle
+corepack pnpm winbox:prepare   # copia o CLI do WinBox para o bundle
+corepack pnpm build:web        # build do frontend (dist/)
+corepack pnpm build            # bundle desktop completo (tauri build)
 ```
+
+> Os binários embutidos (RTK e WinBox) não ficam versionados; rode os scripts `*:prepare`
+> antes do `tauri build`. O WinBox precisa de um build do `winbox-gui` disponível (defina
+> `WINBOX_GUI_BIN` ou mantenha um checkout ao lado deste repositório).
 
 ### Qualidade
 
