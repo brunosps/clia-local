@@ -33,7 +33,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["binaries/rtk/*"],
+    "resources": ["binaries/rtk/*", "binaries/winbox/*"],
     "category": "DeveloperTool",
     "shortDescription": "clia.local — fully local agent development environment",
     "longDescription": "A fully local desktop agent development environment. No cloud."

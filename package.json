@@ -10,6 +10,7 @@
     "build:web": "tsc && vite build",
     "preview": "vite preview",
     "rtk:prepare": "node scripts/prepare-rtk.mjs",
+    "winbox:prepare": "node scripts/prepare-winbox.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings=0",
     "format": "prettier --write .",

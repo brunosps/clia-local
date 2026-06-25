@@ -4707,6 +4707,14 @@ pub fn run() {
             if let Err(error) = app.state::<terminal::TerminalManager>().cleanup_temp_logs() {
                 eprintln!("failed to clean terminal temp logs: {error}");
             }
+            // Make Deploy → Máquinas work out of the box: point WINBOX_BIN at the
+            // bundled winbox CLI when the user hasn't set it explicitly. (Running the
+            // VMs themselves still needs Docker + KVM/QEMU on the host.)
+            if std::env::var_os("WINBOX_BIN").is_none() {
+                if let Some(path) = winbox_provider::bundled_binary(app.handle()) {
+                    std::env::set_var("WINBOX_BIN", &path);
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

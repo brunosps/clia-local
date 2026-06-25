@@ -2,7 +2,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +147,53 @@ pub fn discover() -> Option<WinboxProvider> {
     }
     None
 }
+
+/// Resolve the WinBox CLI bundled as a Tauri resource (mirrors how RTK is bundled).
+/// The app sets `WINBOX_BIN` to this at startup so `discover()` finds it with no setup.
+pub fn bundled_binary(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri::Manager;
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(
+            resource_dir
+                .join("binaries")
+                .join("winbox")
+                .join(executable_name("winbox")),
+        );
+        candidates.push(resource_dir.join("winbox").join(executable_name("winbox")));
+        candidates.push(resource_dir.join(executable_name("winbox")));
+    }
+    // Dev fallback: resources aren't copied into the resource dir during `tauri dev`,
+    // so also look at the source tree.
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join("winbox")
+            .join(executable_name("winbox")),
+    );
+    for candidate in candidates {
+        if candidate.is_file() {
+            ensure_executable(&candidate);
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn ensure_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o111 == 0 {
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_executable(_path: &Path) {}
 
 pub fn check_status() -> MachineProviderStatus {
     let Some(provider) = discover() else {
