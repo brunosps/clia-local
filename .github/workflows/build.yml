@@ -16,6 +16,11 @@ on:
 permissions:
   contents: write
 
+# The frontend bundle is large; give Node enough heap so `vite build` doesn't OOM
+# on lower-memory runners (notably the macOS runners).
+env:
+  NODE_OPTIONS: --max-old-space-size=4096
+
 jobs:
   build-linux:
     name: linux (appimage + deb)
