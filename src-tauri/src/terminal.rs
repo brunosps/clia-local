@@ -362,6 +362,51 @@ pub fn create_session(
     Ok(session)
 }
 
+/// Open an interactive PTY running `docker exec -it <container> <shell>` (defaults to
+/// bash, falling back to sh). Reuses the terminal runtime so I/O, resize, stop and the
+/// `terminal://output` stream work exactly like a normal terminal session.
+pub fn create_exec_session(
+    app: tauri::AppHandle,
+    manager: TerminalManager,
+    container_id: String,
+    shell: Option<String>,
+) -> anyhow::Result<TerminalSession> {
+    let shell = shell
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "bash".to_string());
+    let short: String = container_id.chars().take(12).collect();
+    let session = manager.next_session(&PathBuf::from("/"), &format!("docker:{short}"))?;
+
+    let pty_system = native_pty_system();
+    let pair = pty_system.openpty(default_pty_size())?;
+    let mut command = CommandBuilder::new("docker");
+    command.arg("exec");
+    command.arg("-it");
+    command.arg(&container_id);
+    command.arg("sh");
+    command.arg("-c");
+    command.arg(format!("exec \"$(command -v {shell} || command -v sh)\""));
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .with_context(|| format!("failed to docker exec into {container_id}"))?;
+    let killer = child.clone_killer();
+    let reader = pair.master.try_clone_reader()?;
+    let writer = pair.master.take_writer()?;
+    let master = pair.master;
+
+    let session = manager.insert_runtime(session, master, writer, killer)?;
+    spawn_output_reader(
+        app.clone(),
+        session.id.clone(),
+        session.log_path.clone(),
+        reader,
+    );
+    spawn_waiter(app, manager.clone(), session.id.clone(), child);
+    Ok(session)
+}
+
 pub fn default_shell() -> &'static str {
     if cfg!(target_os = "windows") {
         "pwsh"

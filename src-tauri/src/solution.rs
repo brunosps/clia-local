@@ -9,6 +9,7 @@ use std::process::Command;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
+use crate::skill_bundles;
 use crate::store;
 
 const MANIFEST_VERSION: &str = "1.1";
@@ -410,6 +411,33 @@ pub fn install_workspace_skill(
         }
     }
 
+    list_workspace_skills(&root)
+}
+
+/// Install a built-in skill bundle by writing its embedded `SKILL.md` files into the
+/// chosen target skill directories of `workspace_path` (a project or workspace dir).
+/// Idempotent: reinstalling overwrites the same files.
+pub fn install_skill_bundle(
+    input: skill_bundles::InstallSkillBundleInput,
+) -> anyhow::Result<Vec<WorkspaceSkillSummary>> {
+    let root = canonical_dir(Path::new(&input.workspace_path))?;
+    let bundle = skill_bundles::find_bundle(&input.bundle_id)
+        .ok_or_else(|| anyhow!("unknown skill bundle: {}", input.bundle_id))?;
+    let targets = normalized_targets(&input.targets);
+    for skill in bundle.skills {
+        let name = safe_name(skill.name)?;
+        for target in &targets {
+            let dir = match target.as_str() {
+                "workspace" => workspace_skill_dir(&root, &name),
+                "codex" => root.join(".agents").join("skills").join(&name),
+                "claude" => root.join(".claude").join("skills").join(&name),
+                // Copilot uses a different prompt layout; skip it for bundles.
+                _ => continue,
+            };
+            fs::create_dir_all(&dir)?;
+            fs::write(dir.join("SKILL.md"), skill.content)?;
+        }
+    }
     list_workspace_skills(&root)
 }
 

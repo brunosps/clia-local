@@ -8,6 +8,7 @@ import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import cssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+import { registerAdvpl } from "./advpl";
 
 declare global {
   interface Window {
@@ -53,6 +54,10 @@ export function setupMonaco() {
   // at a time without the project graph — it would flag false "cannot find
   // module" errors. Full cross-file diagnostics come from external servers (LSP).
   configureTypeScript();
+
+  // AdvPL/TLPP (TOTVS) highlighting via the official TextMate grammar. Fire-and-forget:
+  // the language id registers synchronously; the grammar attaches when its WASM loads.
+  void registerAdvpl();
 
   // Point the React wrapper at the local engine (avoids the default CDN fetch).
   loader.config({ monaco });

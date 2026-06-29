@@ -15,6 +15,10 @@ import type {
   AgentSession,
   Branch,
   ChangedFile,
+  DockerContainer,
+  DockerImage,
+  DockerNetwork,
+  DockerVolume,
   Commit,
   CommitDetail,
   DwCommand,
@@ -50,6 +54,7 @@ import type {
   Workspace,
   WorkspaceCapabilities,
   AgentProvider,
+  SkillBundle,
   WorkspaceSkill,
   WorkspaceSkillSearchResult,
   WorkspaceSolutionImportReport,
@@ -557,6 +562,17 @@ export const api = {
   }) {
     return invokeSafe<AgentSession>("send_agent_message", { input });
   },
+  saveAgentAttachment(projectPath: string, fileName: string, dataBase64: string) {
+    return invokeSafe<string>("save_agent_attachment", {
+      input: { project_path: projectPath, file_name: fileName, data_base64: dataBase64 },
+    });
+  },
+  readWindowsClipboardImage(projectPath: string) {
+    return invokeSafe<string | null>("read_windows_clipboard_image", { projectPath });
+  },
+  readWindowsClipboardFiles() {
+    return invokeSafe<string[]>("read_windows_clipboard_files", {});
+  },
   stopAgentSession(sessionId: number) {
     return invokeSafe<AgentSession>("stop_agent_session", { sessionId });
   },
@@ -694,6 +710,42 @@ export const api = {
   },
   gitListBranches(path: string) {
     return invokeSafe<Branch[]>("git_list_branches", { path });
+  },
+  dockerListContainers() {
+    return invokeSafe<DockerContainer[]>("docker_list_containers", {});
+  },
+  dockerListImages() {
+    return invokeSafe<DockerImage[]>("docker_list_images", {});
+  },
+  dockerListNetworks() {
+    return invokeSafe<DockerNetwork[]>("docker_list_networks", {});
+  },
+  dockerListVolumes() {
+    return invokeSafe<DockerVolume[]>("docker_list_volumes", {});
+  },
+  dockerContainerAction(id: string, action: "start" | "stop" | "restart" | "remove") {
+    return invokeSafe<void>("docker_container_action", { id, action });
+  },
+  dockerRemoveImage(id: string) {
+    return invokeSafe<void>("docker_remove_image", { id });
+  },
+  dockerRemoveNetwork(id: string) {
+    return invokeSafe<void>("docker_remove_network", { id });
+  },
+  dockerRemoveVolume(name: string) {
+    return invokeSafe<void>("docker_remove_volume", { name });
+  },
+  dockerLogsStart(containerId: string) {
+    return invokeSafe<void>("docker_logs_start", { containerId });
+  },
+  dockerLogsStop(containerId: string) {
+    return invokeSafe<void>("docker_logs_stop", { containerId });
+  },
+  createDockerExecSession(containerId: string, shell?: string) {
+    return invokeSafe<TerminalSession>("create_docker_exec_session", {
+      containerId,
+      shell: shell ?? null,
+    });
   },
   gitListRemoteBranches(path: string) {
     return invokeSafe<RemoteBranch[]>("git_list_remote_branches", { path });
@@ -899,8 +951,13 @@ export const api = {
   lspInstall(language: string) {
     return invokeSafe<string>("lsp_install", { language });
   },
-  writeSourceFile(path: string, relativePath: string, content: string) {
-    return invokeSafe<SourceFile>("write_source_file", { path, relativePath, content });
+  writeSourceFile(path: string, relativePath: string, content: string, encoding?: string) {
+    return invokeSafe<SourceFile>("write_source_file", {
+      path,
+      relativePath,
+      content,
+      encoding: encoding ?? null,
+    });
   },
   readTextFile(path: string) {
     return invokeSafe<string>("read_text_file", { path });
@@ -941,6 +998,18 @@ export const api = {
   syncWorkspaceSkill(workspacePath: string, name: string, targets: WorkspaceSkillTarget[]) {
     return invokeSafe<WorkspaceSkill[]>("sync_workspace_skill", {
       input: { workspace_path: workspacePath, name, targets },
+    });
+  },
+  listSkillBundles() {
+    return invokeSafe<SkillBundle[]>("list_skill_bundles", {});
+  },
+  installSkillBundle(
+    workspacePath: string,
+    bundleId: string,
+    targets: WorkspaceSkillTarget[] = [],
+  ) {
+    return invokeSafe<WorkspaceSkill[]>("install_skill_bundle", {
+      input: { workspace_path: workspacePath, bundle_id: bundleId, targets },
     });
   },
   readWorkspaceFlowArtifact(workspacePath: string, relativePath: string) {

@@ -2,10 +2,14 @@ import { json } from "@codemirror/lang-json";
 import { markdown } from "@codemirror/lang-markdown";
 import CodeMirror from "@uiw/react-codemirror";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { readImage as readClipboardImage } from "@tauri-apps/plugin-clipboard-manager";
 import {
   Archive,
   Bot,
   Boxes,
+  Container,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -33,6 +37,8 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCw,
+  SquareTerminal,
   Search,
   Send,
   Settings,
@@ -201,6 +207,10 @@ import type {
   Commit,
   CommitDetail,
   CommitFile,
+  DockerContainer,
+  DockerImage,
+  DockerNetwork,
+  DockerVolume,
   DwCommand,
   DwArtifact,
   DwSkill,
@@ -224,6 +234,7 @@ import type {
   RtkStatus,
   SourceEntry,
   SourceFile,
+  SkillBundle,
   StashEntry,
   TagEntry,
   WorkflowStateSummary,
@@ -283,7 +294,7 @@ const MarkdownPreview = lazy(() =>
 
 const defaultProjectPath = import.meta.env.VITE_DEFAULT_PROJECT_PATH || "/home/bruno/code/clia-wks";
 
-type Tab = "queue" | "code" | "git" | "deploy" | "agents" | "settings";
+type Tab = "queue" | "code" | "git" | "deploy" | "docker" | "agents" | "settings";
 type LocalGitRefreshState = "idle" | "cached" | "checking" | "loading" | "stale" | "error";
 type DiffRefreshOptions = {
   background?: boolean;
@@ -314,7 +325,7 @@ const agentModelOptionsByProvider: Record<
   Array<{ value: string; label: string }>
 > = {
   codex: [
-    { value: "default", label: "Default do Codex" },
+    { value: "default", label: "Codex default" },
     { value: "gpt-5.5", label: "gpt-5.5" },
     { value: "gpt-5.4", label: "gpt-5.4" },
     { value: "gpt-5.4-mini", label: "gpt-5.4-mini" },
@@ -337,7 +348,7 @@ const agentModelOptionsByProvider: Record<
     { value: "custom", label: "Custom" },
   ],
   claude: [
-    { value: "default", label: "Default do Claude" },
+    { value: "default", label: "Claude default" },
     { value: "opus", label: "opus (alias)" },
     { value: "sonnet", label: "sonnet (alias)" },
     { value: "haiku", label: "haiku (alias)" },
@@ -388,7 +399,7 @@ const agentEffortOptionsByProvider: Record<
   Array<{ value: string; label: string }>
 > = {
   codex: [
-    { value: "default", label: "Default do Codex" },
+    { value: "default", label: "Codex default" },
     { value: "none", label: "none" },
     { value: "low", label: "low" },
     { value: "medium", label: "medium" },
@@ -396,7 +407,7 @@ const agentEffortOptionsByProvider: Record<
     { value: "xhigh", label: "xhigh" },
   ],
   claude: [
-    { value: "default", label: "Default do Claude" },
+    { value: "default", label: "Claude default" },
     { value: "low", label: "low" },
     { value: "medium", label: "medium" },
     { value: "high", label: "high" },
@@ -404,7 +415,7 @@ const agentEffortOptionsByProvider: Record<
     { value: "max", label: "max" },
   ],
   copilot: [
-    { value: "default", label: "Default do Copilot" },
+    { value: "default", label: "Copilot default" },
     { value: "none", label: "none" },
     { value: "low", label: "low" },
     { value: "medium", label: "medium" },
@@ -419,6 +430,7 @@ const navItems: Array<{ id: Tab; labelKey: TranslationKey; icon: typeof CircleDo
   { id: "code", labelKey: "nav.code", icon: Code2 },
   { id: "git", labelKey: "nav.git", icon: GitBranch },
   { id: "deploy", labelKey: "nav.deploy", icon: Upload },
+  { id: "docker", labelKey: "nav.docker", icon: Container },
   { id: "agents", labelKey: "nav.agents", icon: Bot },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
@@ -511,7 +523,7 @@ export function App() {
       if (options.stopSession && sessionId != null) void api.stopAgentSession(sessionId);
       if (failure) {
         void notice({
-          title: "AI Commit não gerou mensagem",
+          title: t("aicommit.noMessageTitle"),
           body: failure,
         });
       }
@@ -679,6 +691,9 @@ export function App() {
   const [error, setError] = useState("");
   const resettingAgentSessionIds = useRef<Set<number>>(new Set());
   const activeAgentSessionIdRef = useRef<number | null>(null);
+  // Latest-ref so the once-registered agent listener refreshes the active project's
+  // git/source state with fresh closures (no stale currentPath).
+  const refreshAfterAgentRef = useRef<() => void>(() => {});
   const activeTabPreferenceReadyWorkspaceRef = useRef<number | null>(null);
   const activeFlowPreferenceReadyWorkspaceRef = useRef<number | null>(null);
   const activeAgentProfilePreferenceReadyScopeRef = useRef<string | null>(null);
@@ -712,6 +727,54 @@ export function App() {
   );
   const activeAgentWorking = hasRunningAgentSession(agentSessions);
   const currentPath = projectPath.trim();
+  // When an agent finishes it has edited files on disk; refresh the active project's
+  // git worktree + source tree so the Git/Code tabs reflect it without a manual refresh.
+  // (`refreshDiffReview`/`reloadSourceTree` are hoisted function declarations.)
+  refreshAfterAgentRef.current = () => {
+    if (!currentPath) return;
+    void refreshDiffReview(currentPath, { background: true, autoSelect: false });
+    void reloadSourceTree();
+  };
+  // Index of real project files, used to linkify file references inside agent chat
+  // messages (only tokens that match an actual file become clickable).
+  const sourceRefIndex = useMemo(() => {
+    const fullPaths = new Set<string>();
+    const byBasename = new Map<string, string | null>();
+    const walk = (entries: SourceEntry[]) => {
+      for (const entry of entries) {
+        if (entry.kind === "file") {
+          fullPaths.add(entry.relative_path);
+          byBasename.set(entry.name, byBasename.has(entry.name) ? null : entry.relative_path);
+        }
+        if (entry.children?.length) walk(entry.children);
+      }
+    };
+    walk(sourceTree);
+    return { fullPaths, byBasename };
+  }, [sourceTree]);
+  const resolveSourceRef = useCallback(
+    (token: string): string | null => {
+      const normalized = token
+        .trim()
+        .replace(/^[`'"]+|[`'"]+$/g, "")
+        .replace(/^\.\//, "");
+      if (!normalized) return null;
+      if (sourceRefIndex.fullPaths.has(normalized)) return normalized;
+      const base = normalized.split(/[\\/]/).pop() ?? normalized;
+      if (!/\.[A-Za-z0-9]+$/.test(base)) return null;
+      return sourceRefIndex.byBasename.get(base) ?? null;
+    },
+    [sourceRefIndex],
+  );
+  const openSourceFileFromChat = useCallback(
+    (relativePath: string) => {
+      if (!currentPath) return;
+      setActiveTab("code");
+      setSourceSideTab("explorer");
+      void openSourcePath(currentPath, relativePath);
+    },
+    [currentPath],
+  );
   const workspaceAccentColor =
     activeWorkspace && workspaceAccent?.workspaceId === activeWorkspace.id
       ? workspaceAccent.color
@@ -1062,7 +1125,7 @@ export function App() {
   // Surface a friendly hint once if a language server can't be launched.
   useEffect(() => {
     lspController.setErrorHandler((serverLang, message) => {
-      setError(`Language server (${serverLang}) indisponível: ${message}`);
+      setError(t("lsp.unavailable", { lang: serverLang, message }));
     });
   }, []);
 
@@ -1307,6 +1370,8 @@ export function App() {
           setSourceHistory([]);
           activeSourcePathRef.current = null;
         }
+      } else {
+        setError(sources.error);
       }
       setBusy(false);
     },
@@ -1454,8 +1519,12 @@ export function App() {
     setWorkspaceSkillsBusy(false);
     if (result.ok) {
       void notice({
-        title: "Workspace exportado",
-        body: `${result.value.projects?.length ?? 0} projeto(s), ${result.value.skills.length} skill(s), ${result.value.flows.files.length} arquivo(s) de fluxo.`,
+        title: t("workspace.export.doneTitle"),
+        body: t("workspace.solution.summary", {
+          projects: result.value.projects?.length ?? 0,
+          skills: result.value.skills.length,
+          flows: result.value.flows.files.length,
+        }),
       });
     } else {
       setWorkspaceSkillsError(result.error);
@@ -1482,8 +1551,12 @@ export function App() {
     setWorkspaceSkillsBusy(false);
     if (result.ok) {
       void notice({
-        title: "Workspace importado",
-        body: `${result.value.projects?.length ?? 0} projeto(s), ${result.value.skills.length} skill(s), ${result.value.flows.files.length} arquivo(s) de fluxo.`,
+        title: t("workspace.import.doneTitle"),
+        body: t("workspace.solution.summary", {
+          projects: result.value.projects?.length ?? 0,
+          skills: result.value.skills.length,
+          flows: result.value.flows.files.length,
+        }),
       });
     } else {
       setWorkspaceSkillsError(result.error);
@@ -1522,7 +1595,7 @@ export function App() {
     const source = workspaceImportSource.trim();
     const root = workspaceImportRoot.trim();
     if (!source || !root) {
-      setError("Informe o arquivo .wksdw e a pasta destino.");
+      setError(t("workspace.import.errorRequired"));
       return;
     }
 
@@ -1671,7 +1744,7 @@ export function App() {
       if (event.payload.kind === "error" && isAiCommitSession) {
         settleAiCommit(
           null,
-          event.payload.content || "O agente terminou com erro antes de gerar a mensagem.",
+          event.payload.content || t("aicommit.endedWithError"),
         );
       }
       if (
@@ -1755,10 +1828,13 @@ export function App() {
           const failure =
             latestSystemMessage(result.value) ??
             (status === "failed"
-              ? "O agente terminou com erro antes de gerar a mensagem."
-              : "O agente terminou sem retornar uma mensagem de commit.");
+              ? t("aicommit.endedWithError")
+              : t("aicommit.endedNoMessage"));
           settleAiCommit(null, failure);
         });
+      }
+      if (["done", "failed"].includes(event.payload.session.status)) {
+        refreshAfterAgentRef.current();
       }
       setAgentSessions((sessions) => upsertAgentSession(sessions, event.payload.session));
     }).then((unlisten) => {
@@ -1858,9 +1934,13 @@ export function App() {
         setFlowInterview((state) => ({
           ...state,
           status: "error",
-          error: "Fluxo gerado inválido — peça ao agente para corrigir.",
+          error: t("flow.error.generatedInvalid"),
         }));
         return;
+      }
+      if (flowInterviewSessionIdRef.current != null) {
+        void api.stopAgentSession(flowInterviewSessionIdRef.current);
+        flowInterviewSessionIdRef.current = null;
       }
       setFlowInterview((state) => ({ ...state, status: "ready", question: null }));
       setFlowInterviewOpen(false);
@@ -1886,14 +1966,28 @@ export function App() {
 
     if (parsed.state === "question_batch") {
       window.setTimeout(() => {
-        setProjectBlueprintInterview((state) => ({
-          ...state,
-          status: "asking",
-          questions: parsed.questions,
-          currentAnswers: {},
-          note: parsed.running_summary || state.note,
-          error: undefined,
-        }));
+        setProjectBlueprintInterview((state) => {
+          // Reinforcement against the "repeating question" symptom: if the agent
+          // re-emits a batch identical to the one already on screen, keep the
+          // current state so the user's in-progress answers are not wiped.
+          const sameAsCurrent =
+            state.status === "asking" &&
+            state.questions.length === parsed.questions.length &&
+            state.questions.every(
+              (question, index) =>
+                question.id === parsed.questions[index]?.id &&
+                question.question === parsed.questions[index]?.question,
+            );
+          if (sameAsCurrent) return state;
+          return {
+            ...state,
+            status: "asking",
+            questions: parsed.questions,
+            currentAnswers: {},
+            note: parsed.running_summary || state.note,
+            error: undefined,
+          };
+        });
       }, 0);
       const blueprintId = projectBlueprintInterview.blueprint?.id;
       if (blueprintId) {
@@ -1963,7 +2057,7 @@ export function App() {
     requirementCardId?: number | null,
   ) {
     if (!activeWorkspace || !activeProject) {
-      setError("Selecione um workspace e um projeto antes de chamar um agente.");
+      setError(t("agents.errorSelectWorkspaceProject"));
       return null;
     }
     let message = prompt;
@@ -2070,7 +2164,7 @@ export function App() {
 
   async function createCodexProfile(draft: AgentProfileDraft) {
     if (!activeWorkspace) {
-      setError("Selecione um workspace antes de criar um agente.");
+      setError(t("agents.errorSelectWorkspace"));
       return;
     }
     setAgentBusy(true);
@@ -2160,7 +2254,7 @@ export function App() {
 
   async function resetAgentChat() {
     if (!activeWorkspace || !activeProject || !activeAgentProfile) {
-      setError("Selecione um workspace, projeto e agente antes de limpar o chat.");
+      setError(t("agents.errorSelectAllToClear"));
       return;
     }
     const staleSessionIds = agentSessions
@@ -2209,8 +2303,8 @@ export function App() {
   function openAddProjectModal() {
     if (!activeWorkspace) {
       void notice({
-        title: "Nenhum workspace",
-        body: "Crie ou selecione um workspace antes de adicionar um projeto.",
+        title: t("queue.noWorkspaceTitle"),
+        body: t("project.errorNoWorkspaceToAdd"),
       });
       return;
     }
@@ -2274,7 +2368,7 @@ export function App() {
         status: questions.length ? "asking" : "planned",
         questions,
         currentAnswers: {},
-        note: profile ? state.note : "Sem agente ativo: usando entrevista local.",
+        note: profile ? state.note : t("blueprint.noAgentLocalInterview"),
       }));
       return;
     }
@@ -2288,7 +2382,7 @@ export function App() {
       workspace_id: workspace.id,
       project_id: activeProject?.id ?? null,
       scope: "project_blueprint",
-      title: `Novo projeto: ${blueprint.title}`,
+      title: t("blueprint.sessionTitle", { title: blueprint.title }),
       project_path: activeProject?.path ?? workspace.root_path,
       message: buildProjectBlueprintPrompt({
         title: blueprint.title,
@@ -2322,13 +2416,58 @@ export function App() {
     });
   }
 
+  // Closing the interview window must kill any agent still processing it, then
+  // reset local state so reopening starts clean.
+  function closeProjectBlueprintModal() {
+    const sessionId = projectBlueprintSessionIdRef.current;
+    if (sessionId != null) void api.stopAgentSession(sessionId);
+    projectBlueprintSessionIdRef.current = null;
+    parsedProjectBlueprintMessageIdRef.current = null;
+    setProjectBlueprintMessages([]);
+    setProjectBlueprintInterview({
+      blueprint: null,
+      status: "idle",
+      questions: [],
+      answers: [],
+      currentAnswers: {},
+    });
+    setProjectBlueprintModalOpen(false);
+  }
+
+  function closeFlowInterview() {
+    const sessionId = flowInterviewSessionIdRef.current;
+    if (sessionId != null) void api.stopAgentSession(sessionId);
+    flowInterviewSessionIdRef.current = null;
+    parsedFlowMessageIdRef.current = null;
+    setFlowInterviewMessages([]);
+    setFlowInterview({
+      sessionId: null,
+      profileId: null,
+      status: "idle",
+      question: null,
+      turns: [],
+    });
+    setFlowInterviewOpen(false);
+  }
+
+  // Keep the OS window title in sync with the active workspace/project. NOTE: under
+  // WSLg the Windows-side title bar keeps the creation-time caption and ignores
+  // runtime set_title (a platform limitation); this works on native desktop builds.
+  useEffect(() => {
+    const segments = [activeWorkspace?.name, activeProject?.name].filter(
+      (segment): segment is string => Boolean(segment),
+    );
+    const title = segments.length ? `${segments.join(" · ")} — clia.dev` : "clia.dev";
+    void getCurrentWindow().setTitle(title);
+  }, [activeWorkspace, activeProject]);
+
   async function startProjectBlueprintInterview(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const workspace = activeWorkspace;
     if (!workspace) return;
     const title = projectBlueprintTitle.trim();
     if (!title) {
-      setError("Informe o nome do novo projeto.");
+      setError(t("blueprint.errorNameRequired"));
       return;
     }
     setProjectBlueprintBusy(true);
@@ -2348,11 +2487,15 @@ export function App() {
       result.value,
       ...items.filter((item) => item.id !== result.value.id),
     ]);
-    const questions = projectBlueprintQuestionBatch(0);
+    // Start in "waiting" so the spinner shows while the agent prepares the first
+    // batch. We no longer seed a local question batch up front: that batch used to
+    // be replaced the moment the agent answered, which reset the form and looked
+    // like the first question was repeating. The local bank is still used as a
+    // fallback inside requestProjectBlueprintAgent when no agent is available.
     setProjectBlueprintInterview({
       blueprint: result.value,
-      status: "asking",
-      questions,
+      status: "waiting",
+      questions: [],
       answers: [],
       currentAnswers: {},
     });
@@ -2373,7 +2516,7 @@ export function App() {
         .filter((answer) => answer.answer),
     ];
     if (nextAnswers.length === projectBlueprintInterview.answers.length) {
-      setError("Responda pelo menos uma pergunta do lote.");
+      setError(t("blueprint.errorAnswerOne"));
       return;
     }
     setProjectBlueprintInterview((state) => ({
@@ -2447,8 +2590,11 @@ export function App() {
     setProjectBlueprintModalOpen(false);
     setActiveTab("queue");
     void notice({
-      title: "Projeto materializado",
-      body: `${result.value.project.name}: ${result.value.cards.length} card(s) criados.`,
+      title: t("blueprint.materializedTitle"),
+      body: t("blueprint.materializedBody", {
+        name: result.value.project.name,
+        count: result.value.cards.length,
+      }),
     });
   }
 
@@ -2470,8 +2616,8 @@ export function App() {
   async function generateCommitMessage(profileId?: number | null): Promise<string | null> {
     if (!activeWorkspace || !activeProject) {
       void notice({
-        title: "AI Commit indisponível",
-        body: "Selecione um workspace e um projeto.",
+        title: t("aicommit.unavailableTitle"),
+        body: t("aicommit.selectWorkspaceProject"),
       });
       return null;
     }
@@ -2479,22 +2625,22 @@ export function App() {
       agentProfiles.find((item) => item.id === profileId) ?? activeAgentProfile ?? null;
     if (!profile) {
       void notice({
-        title: "AI Commit indisponível",
-        body: "Configure um agente para gerar a mensagem de commit.",
+        title: t("aicommit.unavailableTitle"),
+        body: t("aicommit.configureAgent"),
       });
       return null;
     }
     const diff = await api.gitStagedDiff(currentPath);
     if (!diff.ok) {
-      void notice({ title: "AI Commit não leu o staged diff", body: diff.error });
+      void notice({ title: t("aicommit.readDiffFailed"), body: diff.error });
       return null;
     }
     const diffText = diff.value.trim();
     if (!diffText) {
       setError("");
       void notice({
-        title: "Nada staged para gerar commit",
-        body: "Stage pelo menos uma mudança antes de usar AI Commit. A IA gera a mensagem somente a partir do que já está staged.",
+        title: t("aicommit.nothingStagedTitle"),
+        body: t("aicommit.nothingStagedBody"),
       });
       return null;
     }
@@ -2504,7 +2650,7 @@ export function App() {
       workspace_id: activeWorkspace.id,
       project_id: activeProject.id,
       scope: "chat",
-      title: `Mensagem de commit: ${projectDisplayName(activeProject)}`,
+      title: t("aicommit.sessionTitle", { name: projectDisplayName(activeProject) }),
       project_path: activeProject.path,
       message: buildCommitMessagePrompt(diffText, {
         projectName: projectDisplayName(activeProject),
@@ -2519,18 +2665,14 @@ export function App() {
       }),
     });
     if (!result.ok) {
-      void notice({ title: `AI Commit (${profile.name}) falhou`, body: result.error });
+      void notice({ title: t("aicommit.failedTitle", { name: profile.name }), body: result.error });
       return null;
     }
     aiCommitSessionIdRef.current = result.value.id;
     return new Promise<string | null>((resolve) => {
       aiCommitResolveRef.current = resolve;
       window.setTimeout(() => {
-        settleAiCommit(
-          null,
-          "O agente não retornou uma mensagem de commit dentro de 120 segundos.",
-          { stopSession: true },
-        );
+        settleAiCommit(null, t("aicommit.timeout"), { stopSession: true });
       }, 120000);
     });
   }
@@ -2575,8 +2717,8 @@ export function App() {
     const workspace = activeWorkspace ?? workspaces[0] ?? null;
     if (!workspace) {
       await notice({
-        title: "Nenhum workspace",
-        body: "Crie ou selecione um workspace antes de adicionar tarefas.",
+        title: t("queue.noWorkspaceTitle"),
+        body: t("queue.noWorkspaceBody"),
       });
       return;
     }
@@ -2588,11 +2730,11 @@ export function App() {
       workspace.id,
       activeProject?.id ?? null,
       projectIds,
-      "Nova tarefa",
+      t("queue.newTask"),
       "",
     );
     if (!result.ok) {
-      await notice({ title: "Erro ao criar tarefa", body: result.error });
+      await notice({ title: t("queue.createError"), body: result.error });
       return;
     }
     await loadWorkspaceTasks();
@@ -2708,16 +2850,16 @@ export function App() {
   }) {
     const root = currentPath || activeProject?.path || "";
     if (!root) {
-      setError("Selecione um projeto antes de salvar o fluxo.");
+      setError(t("flow.error.selectProjectToSave"));
       return;
     }
     const id = args.id.trim();
     if (!id || !/^[a-z0-9-]+$/.test(id)) {
-      setError("Id do fluxo inválido (use minúsculas, números e hífen).");
+      setError(t("flow.error.invalidId"));
       return;
     }
     if (parseWorkbenchSchema(args.schemaText).usedDefault) {
-      setError("JSON do fluxo inválido — sem fases válidas.");
+      setError(t("flow.error.invalidJson"));
       return;
     }
 
@@ -2777,7 +2919,7 @@ export function App() {
       workspace_id: activeWorkspace.id,
       project_id: activeProject.id,
       scope: "chat",
-      title: `Análise: ${projectDisplayName(activeProject)}`,
+      title: t("analysis.sessionTitle", { name: projectDisplayName(activeProject) }),
       project_path: activeProject.path,
       message,
     });
@@ -2799,7 +2941,7 @@ export function App() {
       workspace_id: activeWorkspace.id,
       project_id: activeProject.id,
       scope: "chat",
-      title: `Análise: ${projectDisplayName(activeProject)}`,
+      title: t("analysis.sessionTitle", { name: projectDisplayName(activeProject) }),
       project_path: activeProject.path,
       message,
     });
@@ -2830,12 +2972,12 @@ export function App() {
 
   async function startFlowInterview(profileId: number, url: string) {
     if (!activeWorkspace || !activeProject) {
-      setError("Selecione um workspace e um projeto antes de criar o fluxo.");
+      setError(t("flow.error.selectWorkspaceProject"));
       return;
     }
     const trimmedUrl = url.trim();
     if (!trimmedUrl) {
-      setError("Informe a URL da documentação da ferramenta.");
+      setError(t("flow.error.urlRequired"));
       return;
     }
     setFlowInterviewMessages([]);
@@ -2869,7 +3011,7 @@ export function App() {
     const profileId = flowInterview.profileId;
     const sessionId = flowInterview.sessionId;
     if (!current || !profileId || !sessionId) {
-      setError("Inicie a criação do fluxo escolhendo um agente.");
+      setError(t("flow.error.chooseAgent"));
       return;
     }
     const nextTurns: FlowInterviewTurn[] = [
@@ -3142,7 +3284,7 @@ export function App() {
     relativePath: string,
   ): Promise<{ content: string; label: string } | null> {
     if (id === "WORKING") {
-      return { content: selectedSourceFile?.content ?? "", label: "Cópia de trabalho" };
+      return { content: selectedSourceFile?.content ?? "", label: t("diff.workingCopy") };
     }
     const result = await api.gitShowFile(currentPath, id, relativePath);
     if (!result.ok) {
@@ -3206,7 +3348,12 @@ export function App() {
     // is never blanked and reset on save.
     setSourceSaving(true);
     setError("");
-    const result = await api.writeSourceFile(path, sourceFile.relative_path, sourceContent);
+    const result = await api.writeSourceFile(
+      path,
+      sourceFile.relative_path,
+      sourceContent,
+      sourceFile.encoding,
+    );
     if (result.ok) {
       setSelectedSourceFile(result.value);
       setOpenFiles((files) =>
@@ -3376,9 +3523,9 @@ export function App() {
 
   async function discardChangedFile(file: ChangedFile) {
     const ok = await appConfirm({
-      title: "Descartar mudanças?",
-      body: `Descartar todas as mudanças de ${file.path}? Esta ação não pode ser desfeita.`,
-      confirmLabel: "Descartar",
+      title: t("diff.discardChangesTitle"),
+      body: t("diff.discardChangesBody", { path: file.path }),
+      confirmLabel: t("diff.discard"),
       danger: true,
     });
     if (!ok) return;
@@ -3395,9 +3542,9 @@ export function App() {
 
   async function discardChangedHunk(file: ChangedFile, hunk: PatchHunk) {
     const ok = await appConfirm({
-      title: "Descartar hunk?",
-      body: `Descartar este trecho de ${file.path}? Esta ação não pode ser desfeita.`,
-      confirmLabel: "Descartar",
+      title: t("diff.discardHunkTitle"),
+      body: t("diff.discardHunkBody", { path: file.path }),
+      confirmLabel: t("diff.discard"),
       danger: true,
     });
     if (!ok) return;
@@ -3407,7 +3554,7 @@ export function App() {
       const result = await api.gitDiscardHunk(currentPath, hunk.patch);
       if (result.ok) {
         if (!result.value.ok)
-          setError(result.value.output || "Git não conseguiu descartar este hunk.");
+          setError(result.value.output || t("diff.discardHunkFailed"));
       } else {
         setError(result.error);
       }
@@ -3427,21 +3574,21 @@ export function App() {
   async function revealChangedFile(file: ChangedFile) {
     const result = await api.revealProjectFile(currentPath, file.path);
     if (!result.ok) {
-      void notice({ title: "Não foi possível revelar o arquivo", body: result.error });
+      void notice({ title: t("diff.revealFailed"), body: result.error });
     }
   }
 
   async function openExternalDiff(file: ChangedFile) {
     const result = await api.gitExternalDiff(currentPath, file.path, file.area);
     if (!result.ok) {
-      void notice({ title: "External Diff não abriu", body: result.error });
+      void notice({ title: t("diff.externalDiffFailed"), body: result.error });
     }
   }
 
   async function stashChangedFile(file: ChangedFile) {
     const message = await appPrompt({
-      title: "Stash 1 arquivo",
-      label: "Mensagem do stash",
+      title: t("diff.stashFileTitle"),
+      label: t("diff.stashMessageLabel"),
       initial: `WIP ${file.path}`,
       confirmLabel: "Stash",
     });
@@ -3450,7 +3597,7 @@ export function App() {
     try {
       const result = await api.gitStashFile(currentPath, file.path, message);
       if (!result.ok) {
-        void notice({ title: "Stash do arquivo falhou", body: result.error });
+        void notice({ title: t("diff.stashFileFailed"), body: result.error });
       }
       await refreshDiffReview(currentPath);
     } finally {
@@ -3461,7 +3608,7 @@ export function App() {
   async function ignoreChangedFile(file: ChangedFile, target: "info_exclude" | "gitignore") {
     const result = await api.gitIgnoreFile(currentPath, file.path, target);
     if (!result.ok) {
-      void notice({ title: "Não foi possível ignorar o arquivo", body: result.error });
+      void notice({ title: t("diff.ignoreFailed"), body: result.error });
       return;
     }
     await refreshDiffReview(currentPath);
@@ -3470,19 +3617,19 @@ export function App() {
   async function saveChangedFilePatch(file: ChangedFile) {
     const patch = await api.gitFilePatchText(currentPath, file.path, file.area);
     if (!patch.ok) {
-      void notice({ title: "Não foi possível gerar o patch", body: patch.error });
+      void notice({ title: t("diff.patchGenFailed"), body: patch.error });
       return;
     }
     const filename = `${file.path.split(/[\\/]/).pop() ?? "change"}.patch`;
     const destination = await api.pickSavePath(filename);
     if (!destination.ok) {
-      void notice({ title: "Não foi possível escolher o destino", body: destination.error });
+      void notice({ title: t("diff.pickDestFailed"), body: destination.error });
       return;
     }
     if (!destination.value) return;
     const written = await api.writeTextFile(destination.value, patch.value);
     if (!written.ok) {
-      void notice({ title: "Não foi possível salvar o patch", body: written.error });
+      void notice({ title: t("diff.patchSaveFailed"), body: written.error });
     }
   }
 
@@ -3804,14 +3951,14 @@ export function App() {
                         : "analysis-pill"
                   }
                   onClick={() => setAnalysisModalOpen(true)}
-                  title="Análise do projeto"
+                  title={t("analysis.title")}
                 >
                   <Sparkles aria-hidden="true" size={13} />
                   {projectAnalyzed === false
-                    ? "Análise pendente"
+                    ? t("analysis.pillPending")
                     : projectAnalyzed
-                      ? "Analisado"
-                      : "Análise…"}
+                      ? t("analysis.pillAnalyzed")
+                      : t("analysis.pillChecking")}
                 </button>
               ) : null}
             </nav>
@@ -3993,7 +4140,7 @@ export function App() {
                   currentAnswers: { ...state.currentAnswers, [questionId]: value },
                 }))
               }
-              onClose={() => setProjectBlueprintModalOpen(false)}
+              onClose={closeProjectBlueprintModal}
               onFinalizeLocal={() => void finalizeProjectBlueprintLocally()}
               onMaterialize={(blueprint) => void materializeProjectBlueprint(blueprint)}
               onSourceToggle={(sourceId) =>
@@ -4070,7 +4217,7 @@ export function App() {
             <FlowInterviewModal
               agentProfiles={agentProfiles}
               onAnswer={(selected, note) => void answerFlowInterview(selected, note)}
-              onClose={() => setFlowInterviewOpen(false)}
+              onClose={closeFlowInterview}
               onStart={(profileId, url) => void startFlowInterview(profileId, url)}
               onUrlChange={setFlowInterviewUrl}
               state={flowInterview}
@@ -4222,18 +4369,19 @@ export function App() {
                     className="source-overlay"
                     role="dialog"
                     aria-modal="true"
-                    aria-label="Versão histórica"
+                    aria-label={t("editor.historicalVersion")}
                   >
                     <div className="source-overlay-card wide">
                       <div className="source-overlay-head">
                         <span>
-                          Vendo <code>{timeTravel.sha}</code> · {timeTravel.path.split("/").pop()}
+                          {t("editor.viewing")} <code>{timeTravel.sha}</code> ·{" "}
+                          {timeTravel.path.split("/").pop()}
                         </span>
                         <button
                           className="secondary-button icon-button"
                           type="button"
                           onClick={() => setTimeTravel(null)}
-                          aria-label="Fechar"
+                          aria-label={t("common.close")}
                         >
                           <X aria-hidden="true" size={14} />
                         </button>
@@ -4342,6 +4490,8 @@ export function App() {
                   projects={projects}
                 />
               </Suspense>
+            ) : activeTab === "docker" ? (
+              <DockerWorkbench />
             ) : activeTab === "settings" ? (
               <WorkspaceSettingsPanel
                 busy={registryBusy}
@@ -4367,6 +4517,8 @@ export function App() {
                 busy={agentBusy}
                 composer={agentComposer}
                 error={agentError}
+                resolveSourceRef={resolveSourceRef}
+                onOpenSourceFile={openSourceFileFromChat}
                 health={
                   activeAgentProfile ? (agentHealthByProfile[activeAgentProfile.id] ?? null) : null
                 }
@@ -4803,6 +4955,7 @@ function FlowBuilderModal({
   }) => void;
   skills: DwSkill[];
 }) {
+  const { t } = useI18n();
   const [id, setId] = useState(initialId);
   const [label, setLabel] = useState(initialLabel);
   const [text, setText] = useState(initialSchemaText);
@@ -4857,24 +5010,26 @@ function FlowBuilderModal({
       >
         <div className="modal-heading">
           <div>
-            <div className="section-label">Fluxos</div>
+            <div className="section-label">{t("flow.section")}</div>
             <h2 id="flow-builder-title">
-              {mode === "edit" ? `Editar fluxo · ${initialId}` : "Novo fluxo custom"}
+              {mode === "edit"
+                ? t("flow.editTitle", { id: initialId })
+                : t("flow.newCustomTitle")}
             </h2>
-            <p>Clique numa skill/command para anexar uma fase, ou edite o JSON à mão.</p>
+            <p>{t("flow.builderDesc")}</p>
           </div>
           <button
             className="secondary-button icon-button"
             type="button"
             onClick={onClose}
-            aria-label="Fechar modal"
+            aria-label={t("common.close")}
           >
             <X aria-hidden="true" size={16} />
           </button>
         </div>
 
         <div className="flow-builder-body">
-          <aside className="flow-builder-palette" aria-label="Paleta de skills e commands">
+          <aside className="flow-builder-palette" aria-label={t("flow.paletteLabel")}>
             <div className="section-label">Commands</div>
             <div className="flow-palette-list">
               {commands.length ? (
@@ -4901,7 +5056,7 @@ function FlowBuilderModal({
                   </button>
                 ))
               ) : (
-                <span className="flow-palette-empty">Nenhum command em .dw/commands/</span>
+                <span className="flow-palette-empty">{t("flow.noCommands")}</span>
               )}
             </div>
             <div className="section-label">Skills</div>
@@ -4932,7 +5087,7 @@ function FlowBuilderModal({
                   </button>
                 ))
               ) : (
-                <span className="flow-palette-empty">Nenhuma skill encontrada</span>
+                <span className="flow-palette-empty">{t("flow.noSkills")}</span>
               )}
             </div>
           </aside>
@@ -4940,24 +5095,24 @@ function FlowBuilderModal({
           <div className="flow-builder-editor">
             <div className="flow-builder-meta">
               <label>
-                <span>Id do fluxo</span>
+                <span>{t("flow.idLabel")}</span>
                 <input
                   value={id}
                   disabled={mode === "edit"}
-                  placeholder="meu-fluxo"
+                  placeholder={t("flow.idPlaceholder")}
                   onChange={(event) => setId(event.target.value)}
                 />
               </label>
               <label>
-                <span>Nome</span>
+                <span>{t("flow.nameLabel")}</span>
                 <input
                   value={label}
-                  placeholder="Meu fluxo"
+                  placeholder={t("flow.namePlaceholder")}
                   onChange={(event) => setLabel(event.target.value)}
                 />
               </label>
               <label>
-                <span>Comando de análise do projeto</span>
+                <span>{t("flow.analyzeCommandLabel")}</span>
                 <input
                   value={analyzeCommand}
                   placeholder="/dw-analyze-project"
@@ -4965,7 +5120,7 @@ function FlowBuilderModal({
                 />
               </label>
               <label>
-                <span>Marcador de análise (caminho)</span>
+                <span>{t("flow.analyzeMarkerLabel")}</span>
                 <input
                   value={analyzeMarker}
                   placeholder=".dw/rules/index.md"
@@ -4974,7 +5129,7 @@ function FlowBuilderModal({
               </label>
             </div>
             {invalid ? null : (
-              <div className="flow-stage-editor" aria-label="Etapas do fluxo">
+              <div className="flow-stage-editor" aria-label={t("flow.stagesLabel")}>
                 {parsed.schema.phases.map((phase, index) => (
                   <FlowStageEditor
                     key={`${phase.id}-${index}`}
@@ -4986,7 +5141,7 @@ function FlowBuilderModal({
               </div>
             )}
             <details className="flow-builder-advanced">
-              <summary>JSON avançado</summary>
+              <summary>{t("flow.advancedJson")}</summary>
               <textarea
                 className="flow-builder-json"
                 spellCheck={false}
@@ -4996,11 +5151,13 @@ function FlowBuilderModal({
             </details>
             <div className="flow-builder-status">
               {invalid ? (
-                <span className="flow-builder-error">JSON inválido — sem fases válidas.</span>
+                <span className="flow-builder-error">{t("flow.invalidJsonShort")}</span>
               ) : (
                 <span className="flow-builder-ok">
-                  {parsed.schema.phases.length} fase(s)
-                  {parsed.warnings.length ? ` · ${parsed.warnings.length} aviso(s)` : ""}
+                  {t("flow.phaseCount", { count: parsed.schema.phases.length })}
+                  {parsed.warnings.length
+                    ? t("flow.warningCount", { count: parsed.warnings.length })
+                    : ""}
                 </span>
               )}
             </div>
@@ -5013,7 +5170,7 @@ function FlowBuilderModal({
             ) : null}
             <div className="flow-builder-actions">
               <button className="secondary-button" type="button" onClick={onClose}>
-                Cancelar
+                {t("common.cancel")}
               </button>
               <button
                 className="primary-button"
@@ -5029,7 +5186,7 @@ function FlowBuilderModal({
                   })
                 }
               >
-                Salvar fluxo
+                {t("flow.save")}
               </button>
             </div>
           </div>
@@ -5300,7 +5457,7 @@ function ProjectBlueprintSourcePicker({
               />
               <span>
                 <strong>{source.name}</strong>
-                <small>{knowledgeSourceScopeLabel(source)}</small>
+                <small>{knowledgeSourceScopeLabel(source, t)}</small>
               </span>
             </label>
           ))
@@ -5359,6 +5516,7 @@ function FlowStageEditor({
   onChange: (patch: Partial<WorkbenchPhase>) => void;
   onRemove: () => void;
 }) {
+  const { t } = useI18n();
   const output = phase.output;
   const inputsText = (phase.inputs ?? []).map((input) => input.path).join("\n");
   return (
@@ -5367,16 +5525,16 @@ function FlowStageEditor({
         <input
           value={phase.label}
           onChange={(event) => onChange({ label: event.target.value })}
-          aria-label="Nome da etapa"
+          aria-label={t("flow.stage.nameLabel")}
         />
         <code>{phase.id}</code>
         <button className="ghost-button" type="button" onClick={onRemove}>
-          Remover
+          {t("common.remove")}
         </button>
       </div>
       <div className="flow-stage-grid">
         <label>
-          <span>Tipo</span>
+          <span>{t("flow.stage.typeLabel")}</span>
           <select
             value={phase.kind ?? ""}
             onChange={(event) =>
@@ -5392,15 +5550,15 @@ function FlowStageEditor({
           </select>
         </label>
         <label>
-          <span>Banda</span>
+          <span>{t("flow.stage.groupLabel")}</span>
           <input
             value={phase.group ?? ""}
-            placeholder="planejamento / execucao / …"
+            placeholder={t("flow.stage.groupPlaceholder")}
             onChange={(event) => onChange({ group: event.target.value || undefined })}
           />
         </label>
         <label>
-          <span>Saída</span>
+          <span>{t("flow.stage.outputLabel")}</span>
           <select
             value={output?.policy ?? "none"}
             onChange={(event) => {
@@ -5416,16 +5574,16 @@ function FlowStageEditor({
                 });
             }}
           >
-            <option value="none">nenhuma</option>
-            <option value="optional">opcional</option>
-            <option value="required">obrigatória</option>
+            <option value="none">{t("flow.stage.outputNone")}</option>
+            <option value="optional">{t("flow.stage.outputOptional")}</option>
+            <option value="required">{t("flow.stage.outputRequired")}</option>
           </select>
         </label>
       </div>
       {output ? (
         <>
           <label>
-            <span>Caminho da saída</span>
+            <span>{t("flow.stage.outputPath")}</span>
             <input
               value={output.path}
               onChange={(event) => onChange({ output: { ...output, path: event.target.value } })}
@@ -5439,12 +5597,12 @@ function FlowStageEditor({
                 onChange({ output: { ...output, capture: event.target.checked } })
               }
             />
-            <span>Capturar a saída final do agente automaticamente</span>
+            <span>{t("flow.stage.captureOutput")}</span>
           </label>
         </>
       ) : null}
       <label>
-        <span>Insumos (um caminho por linha)</span>
+        <span>{t("flow.stage.inputsLabel")}</span>
         <textarea
           className="flow-stage-inputs"
           value={inputsText}
@@ -5463,10 +5621,13 @@ function FlowStageEditor({
 }
 
 
-function priorityLabel(priority: string): string {
-  if (priority === "high") return "Alta";
-  if (priority === "low") return "Baixa";
-  return "Média";
+function priorityLabel(
+  priority: string,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+): string {
+  if (priority === "high") return t("queue.priority.high");
+  if (priority === "low") return t("queue.priority.low");
+  return t("queue.priority.medium");
 }
 
 function priorityCode(priority: string): string {
@@ -5517,6 +5678,7 @@ function QueuePanel({
   onMoveCard: (card: QueueCard, bucket: QueueBucket) => Promise<void>;
   onArchive: (card: QueueCard) => Promise<void>;
 }) {
+  const { t } = useI18n();
   const [pendingId, setPendingId] = useState<number | null>(null);
   const [statusError, setStatusError] = useState("");
   const queue = useMemo(
@@ -5546,38 +5708,42 @@ function QueuePanel({
       <header className="queue-header">
         <div>
           <h2 className="queue-title" id="queue-title">
-            Minha Fila
+            {t("queue.title")}
           </h2>
-          <p>Quadro local do workspace ativo.</p>
+          <p>{t("queue.subtitle")}</p>
         </div>
         <div className="queue-stats">
           <span className="queue-stat">
-            <span className="queue-stat-num">{queue.items.length}</span> cards
+            <span className="queue-stat-num">{queue.items.length}</span> {t("queue.cards")}
           </span>
           <span className="queue-stat">
-            <span className="queue-stat-num">{projects.length}</span> projetos
+            <span className="queue-stat-num">{projects.length}</span> {t("queue.projectsCount")}
           </span>
         </div>
         <div className="queue-card-actions">
           <button className="primary-button" type="button" onClick={onCreateCard}>
             <Plus aria-hidden="true" size={16} />
-            Nova tarefa
+            {t("queue.newTask")}
           </button>
           <button className="secondary-button" type="button" onClick={onRefresh} disabled={!loaded}>
             <RefreshCw aria-hidden="true" size={16} />
-            Atualizar
+            {t("common.refresh")}
           </button>
         </div>
       </header>
 
       {projects.length ? (
-        <div className="queue-filter detail-tabs" role="group" aria-label="Filtrar por projeto">
+        <div
+          className="queue-filter detail-tabs"
+          role="group"
+          aria-label={t("queue.filterByProject")}
+        >
           <button
             className={projectFilter == null ? "detail-tab active" : "detail-tab"}
             type="button"
             onClick={() => onChangeProjectFilter(null)}
           >
-            Todos
+            {t("queue.all")}
           </button>
           {projects.map((project) => (
             <button
@@ -5597,14 +5763,14 @@ function QueuePanel({
       ) : null}
 
       {!loaded ? (
-        <PanelLoading label="Tarefas" />
+        <PanelLoading label={t("queue.tasks")} />
       ) : (
         <div className="queue-kanban kanban-board">
           {QUEUE_BUCKETS.map((bucket) => (
             <QueueColumn
               key={bucket.id}
               bucket={bucket.id}
-              label={bucket.label}
+              labelKey={bucket.labelKey}
               cards={queue.buckets[bucket.id]}
               pendingId={pendingId}
               onDropCardId={handleDrop}
@@ -5620,7 +5786,7 @@ function QueuePanel({
 
 function QueueColumn({
   bucket,
-  label,
+  labelKey,
   cards,
   pendingId,
   onDropCardId,
@@ -5628,13 +5794,14 @@ function QueueColumn({
   onArchive,
 }: {
   bucket: QueueBucket;
-  label: string;
+  labelKey: TranslationKey;
   cards: QueueCard[];
   pendingId: number | null;
   onDropCardId: (cardId: number, bucket: QueueBucket) => void;
   onOpenTask: (cardId: number) => void;
   onArchive: (card: QueueCard) => void;
 }) {
+  const { t } = useI18n();
   const [over, setOver] = useState(false);
   return (
     <div
@@ -5656,7 +5823,7 @@ function QueueColumn({
       <header className="queue-column-header kanban-column-head">
         <span className="queue-column-title kanban-column-title">
           <span className="queue-column-dot kanban-column-dot" aria-hidden="true" />
-          {label}
+          {t(labelKey)}
         </span>
         <span className="queue-column-count kanban-count">{cards.length}</span>
       </header>
@@ -5687,6 +5854,7 @@ function TaskCardView({
   onOpen: (cardId: number) => void;
   onArchive: (card: QueueCard) => void;
 }) {
+  const { t } = useI18n();
   const attachmentCount = queueAttachmentCount(card);
   return (
     <article
@@ -5699,7 +5867,7 @@ function TaskCardView({
         <span className="queue-card-id kanban-card-id">{card.publicId}</span>
         <span
           className={`queue-card-priority ${priorityClass(card.priority)} priority-pill ${card.priority}`}
-          title={priorityLabel(card.priority)}
+          title={priorityLabel(card.priority, t)}
         >
           {priorityCode(card.priority)}
         </span>
@@ -5708,7 +5876,7 @@ function TaskCardView({
       <div className="queue-card-meta">
         <span className="queue-card-meta-item">
           <FolderGit2 aria-hidden="true" size={12} />
-          {card.projectNames[0] ?? "Sem projeto"}
+          {card.projectNames[0] ?? t("queue.noProject")}
         </span>
         {card.checklistTotal ? (
           <span className="queue-card-meta-item kanban-card-checklist">
@@ -5725,7 +5893,7 @@ function TaskCardView({
         {card.agentPrompt.trim() ? (
           <span className="queue-card-meta-item">
             <Bot aria-hidden="true" size={12} />
-            agente
+            {t("queue.agentBadge")}
           </span>
         ) : null}
       </div>
@@ -5734,7 +5902,7 @@ function TaskCardView({
         <button
           className="ghost-button"
           type="button"
-          title="Arquivar"
+          title={t("queue.archive")}
           onClick={(event) => {
             event.stopPropagation();
             onArchive(card);
@@ -5747,18 +5915,21 @@ function TaskCardView({
   );
 }
 
-function runStatusLabel(status: string): string {
+function runStatusLabel(
+  status: string,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+): string {
   switch (status) {
     case "done":
-      return "concluído";
+      return t("runStatus.done");
     case "failed":
-      return "falhou";
+      return t("runStatus.failed");
     case "running":
-      return "rodando";
+      return t("runStatus.running");
     case "stopped":
-      return "parado";
+      return t("runStatus.stopped");
     case "idle":
-      return "ocioso";
+      return t("runStatus.idle");
     default:
       return status;
   }
@@ -5791,6 +5962,7 @@ function TaskModal({
   onSaved: () => void;
   onRunAgent: (prompt: string, profile: AgentProfile | null) => Promise<{ id: number } | null>;
 }) {
+  const { t } = useI18n();
   const card = cards.find((item) => item.id === cardId) ?? null;
   const initialProjectIds = card
     ? card.project_ids.length
@@ -5878,10 +6050,10 @@ function TaskModal({
   }
 
   const statusOptions = [
-    { value: "todo", label: "A fazer" },
-    { value: "doing", label: "Fazendo" },
-    { value: "validating", label: "Validando" },
-    { value: "done", label: "Feito" },
+    { value: "todo", label: t("queue.bucket.pending") },
+    { value: "doing", label: t("queue.bucket.doing") },
+    { value: "validating", label: t("queue.bucket.validating") },
+    { value: "done", label: t("queue.bucket.done") },
   ];
 
   function toggleProject(id: number) {
@@ -5924,7 +6096,7 @@ function TaskModal({
     setModalError("");
     const updated = await api.updateRequirementCard({
       id: cardId,
-      title: title.trim() || "Sem título",
+      title: title.trim() || t("task.untitled"),
       body: description,
       priority,
       checklist_json: serializeChecklist(checklist),
@@ -5955,7 +6127,7 @@ function TaskModal({
   }
 
   function buildPrompt(): string {
-    const parts: string[] = [`# ${title.trim() || "Tarefa"}`];
+    const parts: string[] = [`# ${title.trim() || t("task.defaultPromptTitle")}`];
     if (description.trim()) parts.push(description.trim());
     if (checklist.length) {
       parts.push(
@@ -5998,14 +6170,14 @@ function TaskModal({
       >
         <div className="modal-heading">
           <div>
-            <span className="section-label">{card?.public_id ?? "TAREFA"}</span>
-            <h2 id="task-modal-title">Editar tarefa</h2>
+            <span className="section-label">{card?.public_id ?? t("task.section")}</span>
+            <h2 id="task-modal-title">{t("task.edit")}</h2>
           </div>
           <button
             className="secondary-button icon-button"
             type="button"
             onClick={onClose}
-            aria-label="Fechar"
+            aria-label={t("common.close")}
           >
             <X aria-hidden="true" size={16} />
           </button>
@@ -6015,7 +6187,7 @@ function TaskModal({
 
         <div className="task-modal-body">
           <label className="field">
-            <span>Título</span>
+            <span>{t("task.title")}</span>
             <input
               ref={titleRef}
               value={title}
@@ -6024,7 +6196,7 @@ function TaskModal({
           </label>
 
           <label className="field">
-            <span>Descrição</span>
+            <span>{t("task.description")}</span>
             <textarea
               value={description}
               rows={4}
@@ -6034,15 +6206,15 @@ function TaskModal({
 
           <div className="task-modal-row">
             <label className="field">
-              <span>Prioridade</span>
+              <span>{t("task.priority")}</span>
               <select value={priority} onChange={(event) => setPriority(event.target.value)}>
-                <option value="high">Alta</option>
-                <option value="medium">Média</option>
-                <option value="low">Baixa</option>
+                <option value="high">{t("queue.priority.high")}</option>
+                <option value="medium">{t("queue.priority.medium")}</option>
+                <option value="low">{t("queue.priority.low")}</option>
               </select>
             </label>
             <label className="field">
-              <span>Status</span>
+              <span>{t("task.status")}</span>
               <select value={status} onChange={(event) => setStatus(event.target.value)}>
                 {statusOptions.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -6054,7 +6226,7 @@ function TaskModal({
           </div>
 
           <div className="field">
-            <span>Projetos</span>
+            <span>{t("task.projects")}</span>
             <div className="chip-row">
               {projects.length ? (
                 projects.map((project) => (
@@ -6068,14 +6240,15 @@ function TaskModal({
                   </button>
                 ))
               ) : (
-                <span className="empty-note">Nenhum projeto neste workspace.</span>
+                <span className="empty-note">{t("task.noProjects")}</span>
               )}
             </div>
           </div>
 
           <div className="field">
             <span>
-              Checklist ({checklist.filter((item) => item.done).length}/{checklist.length})
+              {t("task.checklist")} ({checklist.filter((item) => item.done).length}/
+              {checklist.length})
             </span>
             <ul className="checklist">
               {checklist.map((item) => (
@@ -6092,7 +6265,7 @@ function TaskModal({
                     className="ghost-button"
                     type="button"
                     onClick={() => removeChecklistItem(item.id)}
-                    aria-label="Remover item"
+                    aria-label={t("task.removeItem")}
                   >
                     <Trash2 aria-hidden="true" size={13} />
                   </button>
@@ -6102,7 +6275,7 @@ function TaskModal({
             <div className="checklist-add">
               <input
                 value={checklistDraft}
-                placeholder="Nova subtarefa"
+                placeholder={t("task.newSubtask")}
                 onChange={(event) => setChecklistDraft(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
@@ -6118,7 +6291,7 @@ function TaskModal({
           </div>
 
           <div className="field">
-            <span>Anexos</span>
+            <span>{t("task.attachments")}</span>
             <ul className="attachment-list">
               {attachments.map((attachment) => (
                 <li key={attachment.id}>
@@ -6128,32 +6301,34 @@ function TaskModal({
                     className="ghost-button"
                     type="button"
                     onClick={() => void removeAttachment(attachment.id)}
-                    aria-label="Remover anexo"
+                    aria-label={t("task.removeAttachment")}
                   >
                     <Trash2 aria-hidden="true" size={13} />
                   </button>
                 </li>
               ))}
-              {attachments.length === 0 ? <li className="empty-note">Sem anexos.</li> : null}
+              {attachments.length === 0 ? (
+                <li className="empty-note">{t("task.noAttachments")}</li>
+              ) : null}
             </ul>
             <button className="secondary-button" type="button" onClick={() => void addAttachment()}>
               <Plus aria-hidden="true" size={14} />
-              Anexar arquivo
+              {t("task.attachFile")}
             </button>
           </div>
 
           <label className="field">
-            <span>Prompt do agente</span>
+            <span>{t("task.agentPrompt")}</span>
             <textarea
               value={agentPrompt}
               rows={3}
-              placeholder="Instruções extras para o agente ao executar esta tarefa"
+              placeholder={t("task.agentPromptPlaceholder")}
               onChange={(event) => setAgentPrompt(event.target.value)}
             />
           </label>
 
           <div className="field">
-            <span>Executar com agente</span>
+            <span>{t("task.runWithAgent")}</span>
             <div className="task-run-row">
               {agentProfiles.length > 1 ? (
                 <select
@@ -6174,21 +6349,17 @@ function TaskModal({
                 type="button"
                 onClick={() => void runAgent()}
                 disabled={agentBusy || !canRun}
-                title={canRun ? undefined : "Selecione um projeto ativo para executar"}
+                title={canRun ? undefined : t("task.selectProjectToRun")}
               >
                 <Play aria-hidden="true" size={15} />
-                Executar com agente
+                {t("task.runWithAgent")}
               </button>
             </div>
-            {!canRun ? (
-              <p className="empty-note">
-                Selecione um projeto ativo no app para executar a tarefa.
-              </p>
-            ) : null}
+            {!canRun ? <p className="empty-note">{t("task.selectProjectNote")}</p> : null}
             {runningSessionId ? (
               <div className="agent-inline-stream">
                 {runMessages.length === 0 ? (
-                  <p className="empty-note">Aguardando o agente…</p>
+                  <p className="empty-note">{t("task.waitingAgent")}</p>
                 ) : (
                   runMessages.map((message) => (
                     <div key={message.id} className={`agent-msg ${message.role}`}>
@@ -6202,12 +6373,10 @@ function TaskModal({
           </div>
 
           <div className="field">
-            <span>Histórico do agente</span>
+            <span>{t("task.agentHistory")}</span>
             <ul className="agent-history-list">
               {runHistory.length === 0 ? (
-                <li className="empty-note">
-                  Sem execuções ainda. Use “Executar com agente” acima.
-                </li>
+                <li className="empty-note">{t("task.noRuns")}</li>
               ) : (
                 runHistory.map((run) => {
                   const msgs = runTranscripts[run.id] ?? [];
@@ -6228,12 +6397,12 @@ function TaskModal({
                           </span>
                           <span className="run-agent">{run.provider}</span>
                           <span className={`run-status status-${run.status}`}>
-                            {runStatusLabel(run.status)}
+                            {runStatusLabel(run.status, t)}
                           </span>
                         </summary>
                         <div className="run-detail">
                           <div className="run-section">
-                            <span className="run-section-label">Prompt</span>
+                            <span className="run-section-label">{t("task.prompt")}</span>
                             {promptMsg ? (
                               <div className="run-result">
                                 <AgentMarkdown text={promptMsg.content} />
@@ -6243,7 +6412,7 @@ function TaskModal({
                             )}
                           </div>
                           <div className="run-section">
-                            <span className="run-section-label">Resultado</span>
+                            <span className="run-section-label">{t("task.result")}</span>
                             {resultMsg ? (
                               <div className="run-result">
                                 <AgentMessageContent message={resultMsg} />
@@ -6251,8 +6420,8 @@ function TaskModal({
                             ) : (
                               <p className="empty-note">
                                 {msgs.length
-                                  ? "(sem resposta do assistente)"
-                                  : "Abra para carregar…"}
+                                  ? t("task.noAssistantReply")
+                                  : t("task.openToLoad")}
                               </p>
                             )}
                           </div>
@@ -6268,7 +6437,7 @@ function TaskModal({
 
         <div className="modal-actions">
           <button className="secondary-button" type="button" onClick={onClose}>
-            Fechar
+            {t("common.close")}
           </button>
           <button
             className="primary-button"
@@ -6277,7 +6446,7 @@ function TaskModal({
             disabled={saving}
           >
             <Check aria-hidden="true" size={16} />
-            Salvar
+            {t("common.save")}
           </button>
         </div>
       </section>
@@ -6353,7 +6522,7 @@ function AddProjectModal({
       if (mode === "clone") {
         const url = remoteUrl.trim();
         if (!url) {
-          setError("Informe a URL do repositório.");
+          setError(t("project.modal.errorRemoteRequired"));
           return;
         }
         setProgress([]);
@@ -6370,7 +6539,7 @@ function AddProjectModal({
         if (!result.ok) {
           if (result.error.includes("AUTH_REQUIRED")) {
             setNeedAuth(true);
-            setError("Repositório privado: informe usuário e token e clone de novo.");
+            setError(t("project.modal.errorPrivate"));
           } else {
             setError(result.error);
           }
@@ -6380,10 +6549,10 @@ function AddProjectModal({
       } else {
         const folder = path.trim();
         if (!folder) {
-          setError("Selecione a pasta do projeto.");
+          setError(t("project.modal.errorPathRequired"));
           return;
         }
-        const projectName = name.trim() || basename(folder) || "projeto";
+        const projectName = name.trim() || basename(folder) || t("project.modal.defaultName");
         const result = await api.addLocalProject(workspaceId, projectName, folder);
         if (!result.ok) {
           setError(result.error);
@@ -6447,7 +6616,7 @@ function AddProjectModal({
                 <span>{t("project.modal.remote")}</span>
                 <input
                   value={remoteUrl}
-                  placeholder="https://github.com/usuario/repo.git"
+                  placeholder={t("project.modal.remotePlaceholder")}
                   autoFocus
                   onChange={(event) => setRemoteUrl(event.target.value)}
                 />
@@ -6455,11 +6624,11 @@ function AddProjectModal({
               {needAuth ? (
                 <div className="task-modal-row">
                   <label className="field">
-                    <span>Usuário</span>
+                    <span>{t("project.modal.username")}</span>
                     <input value={username} onChange={(event) => setUsername(event.target.value)} />
                   </label>
                   <label className="field">
-                    <span>Token / senha</span>
+                    <span>{t("project.modal.tokenPassword")}</span>
                     <input
                       type="password"
                       value={token}
@@ -6484,7 +6653,7 @@ function AddProjectModal({
               <div className="task-run-row">
                 <input
                   value={path}
-                  placeholder="/home/voce/code/projeto"
+                  placeholder={t("project.modal.pathPlaceholder")}
                   style={{ flex: 1 }}
                   onChange={(event) => setPath(event.target.value)}
                 />
@@ -6494,7 +6663,7 @@ function AddProjectModal({
                   onClick={() => void pickFolder()}
                 >
                   <FolderOpen aria-hidden="true" size={15} />
-                  Selecionar
+                  {t("project.modal.selectFolder")}
                 </button>
               </div>
             </div>
@@ -6504,7 +6673,7 @@ function AddProjectModal({
             <span>{t("project.modal.name")}</span>
             <input
               value={name}
-              placeholder={mode === "clone" ? "(opcional — derivado da URL)" : ""}
+              placeholder={mode === "clone" ? t("project.modal.namePlaceholderClone") : ""}
               onChange={(event) => setName(event.target.value)}
             />
           </label>
@@ -6518,7 +6687,7 @@ function AddProjectModal({
               onClick={() => void api.cancelClone(cloneIdRef.current)}
             >
               <X aria-hidden="true" size={16} />
-              Cancelar
+              {t("common.cancel")}
             </button>
           ) : (
             <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>
@@ -6538,8 +6707,8 @@ function AddProjectModal({
             )}
             {busy
               ? mode === "clone"
-                ? "Clonando…"
-                : "Adicionando…"
+                ? t("project.modal.cloning")
+                : t("project.modal.adding")
               : mode === "clone"
                 ? t("project.modal.cloneSubmit")
                 : t("project.modal.addLocal")}
@@ -6577,6 +6746,7 @@ function ProjectAnalysisModal({
   onAnalyzed: () => void;
   onCreateTasks: (items: SuggestionItem[]) => Promise<number>;
 }) {
+  const { t } = useI18n();
   const [mode, setMode] = useState<"idle" | "analyze" | "opportunities">("idle");
   const [question, setQuestion] = useState<{ question: string; options?: string[] } | null>(null);
   const [working, setWorking] = useState("");
@@ -6602,7 +6772,7 @@ function ProjectAnalysisModal({
         setQuestion({ question: parsed.question, options: parsed.options });
         setWorking("");
       } else if (parsed.state === "working") {
-        setWorking(parsed.message ?? "Trabalhando…");
+        setWorking(parsed.message ?? t("analysis.working"));
         setQuestion(null);
       } else {
         setMode("idle");
@@ -6619,7 +6789,7 @@ function ProjectAnalysisModal({
         setQuestion({ question: parsed.question, options: parsed.options });
         setWorking("");
       } else if (parsed.state === "working") {
-        setWorking(parsed.message ?? "Trabalhando…");
+        setWorking(parsed.message ?? t("analysis.working"));
         setQuestion(null);
       } else {
         setMode("idle");
@@ -6640,7 +6810,7 @@ function ProjectAnalysisModal({
     setCreatedCount(null);
     setAnalyzeDone(false);
     setQuestion(null);
-    setWorking("Iniciando…");
+    setWorking(t("analysis.starting"));
     setMode(kind);
     setBusy(true);
     const message =
@@ -6661,7 +6831,7 @@ function ProjectAnalysisModal({
     parsedIdRef.current = null;
     setQuestion(null);
     setNote("");
-    setWorking("Enviando…");
+    setWorking(t("analysis.sending"));
     setBusy(true);
     const message =
       mode === "analyze" ? analyzeAnswerPrompt(answer) : suggestionAnswerPrompt(answer);
@@ -6694,13 +6864,13 @@ function ProjectAnalysisModal({
         <div className="modal-heading">
           <div>
             <span className="section-label">{projectName}</span>
-            <h2 id="analysis-title">Análise do projeto</h2>
+            <h2 id="analysis-title">{t("analysis.title")}</h2>
           </div>
           <button
             className="secondary-button icon-button"
             type="button"
             onClick={onClose}
-            aria-label="Fechar"
+            aria-label={t("common.close")}
           >
             <X aria-hidden="true" size={16} />
           </button>
@@ -6709,17 +6879,19 @@ function ProjectAnalysisModal({
         {!hasAgent ? (
           <div className="task-modal-body">
             <p className="empty-note">
-              Configure um agente antes de rodar a análise. Ela executa{" "}
-              <code>{analyzeCommand}</code> pelo agente local (use um perfil com permissão de
-              escrita para gravar <code>.dw/rules/</code>).
+              {t("analysis.noAgentPrefix")}
+              <code>{analyzeCommand}</code>
+              {t("analysis.noAgentMid")}
+              <code>.dw/rules/</code>
+              {t("analysis.noAgentSuffix")}
             </p>
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={onClose}>
-                Fechar
+                {t("common.close")}
               </button>
               <button className="primary-button" type="button" onClick={onConfigureAgent}>
                 <Bot aria-hidden="true" size={16} />
-                Configurar agente
+                {t("analysis.configureAgent")}
               </button>
             </div>
           </div>
@@ -6727,7 +6899,12 @@ function ProjectAnalysisModal({
           <div className="task-modal-body">
             <div className="field">
               <span>
-                Status: {analyzed === false ? "pendente" : analyzed ? "analisado" : "verificando…"}
+                {t("analysis.status")}:{" "}
+                {analyzed === false
+                  ? t("analysis.statusPending")
+                  : analyzed
+                    ? t("analysis.statusAnalyzed")
+                    : t("analysis.statusChecking")}
               </span>
               <div className="task-run-row">
                 <button
@@ -6737,7 +6914,7 @@ function ProjectAnalysisModal({
                   disabled={busy || running}
                 >
                   <Sparkles aria-hidden="true" size={15} />
-                  {analyzed ? "Reanalisar" : "Analisar projeto"}
+                  {analyzed ? t("analysis.reanalyze") : t("analysis.analyzeProject")}
                 </button>
                 {suggestCommand ? (
                   <button
@@ -6747,17 +6924,15 @@ function ProjectAnalysisModal({
                     disabled={busy || running}
                   >
                     <Sparkles aria-hidden="true" size={15} />
-                    Mapear oportunidades
+                    {t("analysis.mapOpportunities")}
                   </button>
                 ) : null}
               </div>
             </div>
 
-            {analyzeDone ? (
-              <p className="empty-note">Análise concluída — as rules do projeto foram geradas.</p>
-            ) : null}
+            {analyzeDone ? <p className="empty-note">{t("analysis.done")}</p> : null}
             {createdCount != null ? (
-              <p className="empty-note">{createdCount} tarefa(s) criada(s) no kanban.</p>
+              <p className="empty-note">{t("queue.createdTasks", { count: createdCount })}</p>
             ) : null}
 
             {running ? (
@@ -6784,7 +6959,7 @@ function ProjectAnalysisModal({
                     <div className="task-run-row">
                       <input
                         value={note}
-                        placeholder="Sua resposta…"
+                        placeholder={t("analysis.answerPlaceholder")}
                         style={{ flex: 1 }}
                         disabled={busy}
                         onChange={(event) => setNote(event.target.value)}
@@ -6802,7 +6977,7 @@ function ProjectAnalysisModal({
                         onClick={() => void answerWith(note)}
                       >
                         <Send aria-hidden="true" size={15} />
-                        Responder
+                        {t("analysis.answer")}
                       </button>
                     </div>
                   </div>
@@ -6813,7 +6988,10 @@ function ProjectAnalysisModal({
             {suggestions ? (
               <div className="field">
                 <span>
-                  Oportunidades ({selected.size}/{suggestions.length} selecionadas)
+                  {t("analysis.opportunities", {
+                    selected: selected.size,
+                    total: suggestions.length,
+                  })}
                 </span>
                 <ul className="checklist">
                   {suggestions.map((item, index) => (
@@ -6847,7 +7025,7 @@ function ProjectAnalysisModal({
                   onClick={() => void addSelected()}
                 >
                   <Plus aria-hidden="true" size={15} />
-                  Adicionar selecionadas como tarefas
+                  {t("analysis.addSelected")}
                 </button>
               </div>
             ) : null}
@@ -6894,8 +7072,40 @@ function WorkspaceSettingsPanel({
   const [rtkBusyProfileId, setRtkBusyProfileId] = useState<number | null>(null);
   const [rtkError, setRtkError] = useState("");
   const [activeSettingsSection, setActiveSettingsSection] = useState<
-    "theme" | "accent" | "language" | "editor" | "rtk"
+    "theme" | "accent" | "language" | "editor" | "rtk" | "skills"
   >("theme");
+  const skillTargetPath = activeProject?.path ?? workspace.root_path;
+  const [skillBundles, setSkillBundles] = useState<SkillBundle[]>([]);
+  const [installedSkills, setInstalledSkills] = useState<WorkspaceSkill[]>([]);
+  const [skillBundleBusy, setSkillBundleBusy] = useState<string | null>(null);
+  const [skillBundleError, setSkillBundleError] = useState("");
+  const [skillBundleNotice, setSkillBundleNotice] = useState("");
+
+  useEffect(() => {
+    void api.listSkillBundles().then((result) => {
+      if (result.ok) setSkillBundles(result.value);
+    });
+  }, []);
+
+  useEffect(() => {
+    void api.listWorkspaceSkills(skillTargetPath).then((result) => {
+      if (result.ok) setInstalledSkills(result.value);
+    });
+  }, [skillTargetPath]);
+
+  async function handleInstallBundle(bundleId: string) {
+    setSkillBundleError("");
+    setSkillBundleNotice("");
+    setSkillBundleBusy(bundleId);
+    const result = await api.installSkillBundle(skillTargetPath, bundleId, ["claude", "codex"]);
+    setSkillBundleBusy(null);
+    if (!result.ok) {
+      setSkillBundleError(result.error);
+      return;
+    }
+    setInstalledSkills(result.value);
+    setSkillBundleNotice(t("skills.bundles.installed"));
+  }
 
   async function refreshRtkStatus(profile: AgentProfile) {
     const result = await api.getRtkStatus(profile.id, rtkProjectPath);
@@ -7006,17 +7216,24 @@ function WorkspaceSettingsPanel({
     }>;
   }> = [
     {
-      title: "Aparência",
+      title: t("settings.group.appearance"),
       items: [
-        { id: "theme", label: "Tema", icon: <CircleDot aria-hidden="true" size={16} /> },
-        { id: "accent", label: "Cor de destaque", icon: <Pencil aria-hidden="true" size={16} /> },
-        { id: "language", label: "Idioma", icon: <Settings aria-hidden="true" size={16} /> },
-        { id: "editor", label: "Tipografia", icon: <Code2 aria-hidden="true" size={16} /> },
+        { id: "theme", label: t("settings.nav.theme"), icon: <CircleDot aria-hidden="true" size={16} /> },
+        {
+          id: "accent",
+          label: t("settings.nav.accent"),
+          icon: <Pencil aria-hidden="true" size={16} />,
+        },
+        { id: "language", label: t("settings.nav.language"), icon: <Settings aria-hidden="true" size={16} /> },
+        { id: "editor", label: t("settings.nav.editor"), icon: <Code2 aria-hidden="true" size={16} /> },
       ],
     },
     {
-      title: "Agentes",
-      items: [{ id: "rtk", label: "Agent RTK", icon: <Bot aria-hidden="true" size={16} /> }],
+      title: t("settings.group.agents"),
+      items: [
+        { id: "rtk", label: t("settings.nav.rtk"), icon: <Bot aria-hidden="true" size={16} /> },
+        { id: "skills", label: t("settings.nav.skills"), icon: <Boxes aria-hidden="true" size={16} /> },
+      ],
     },
   ];
 
@@ -7024,13 +7241,13 @@ function WorkspaceSettingsPanel({
     <section className="settings-panel" aria-labelledby="workspace-settings-title">
       <header className="settings-topbar screen-topbar">
         <span className="topbar-title" id="workspace-settings-title">
-          Settings
+          {t("settings.title")}
         </span>
         <span className="topbar-path">{workspace.name}</span>
       </header>
 
       <div className="settings-main">
-        <aside className="settings-nav" aria-label="Seções de configurações">
+        <aside className="settings-nav" aria-label={t("settings.sections")}>
           {settingsNavGroups.map((group) => (
             <div className="settings-nav-section" key={group.title}>
               <div className="settings-nav-title">{group.title}</div>
@@ -7331,6 +7548,67 @@ function WorkspaceSettingsPanel({
               </div>
             </section>
           ) : null}
+
+          {activeSettingsSection === "skills" ? (
+            <section className="settings-section" id="settings-skills">
+              <h2 className="settings-section-title">{t("skills.bundles.title")}</h2>
+              <p className="settings-section-desc">{t("skills.bundles.description")}</p>
+              <p className="settings-section-desc">
+                {t("skills.bundles.target", { path: skillTargetPath })}
+              </p>
+              {skillBundleError ? (
+                <div className="error-banner compact">{skillBundleError}</div>
+              ) : null}
+              {skillBundleNotice ? (
+                <div className="status-pill ready">{skillBundleNotice}</div>
+              ) : null}
+              <div className="settings-group">
+                {skillBundles.map((bundle) => (
+                  <article className="settings-row" key={bundle.id}>
+                    <div className="settings-row-info">
+                      <div className="settings-row-label">{bundle.label}</div>
+                      <div className="settings-row-hint">{bundle.description}</div>
+                      <div className="settings-row-hint">
+                        {bundle.skills.map((skill) => skill.name).join(" · ")}
+                      </div>
+                    </div>
+                    <div className="settings-row-control">
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={() => void handleInstallBundle(bundle.id)}
+                        disabled={busy || skillBundleBusy === bundle.id}
+                      >
+                        <Boxes aria-hidden="true" size={14} />
+                        {skillBundleBusy === bundle.id
+                          ? t("skills.bundles.installing")
+                          : t("skills.bundles.install")}
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <h3 className="settings-section-title">{t("skills.bundles.installedSkills")}</h3>
+              <div className="settings-group">
+                {installedSkills.length ? (
+                  installedSkills.map((skill) => (
+                    <div className="settings-row" key={`${skill.source}-${skill.name}`}>
+                      <div className="settings-row-info">
+                        <div className="settings-row-label">{skill.name}</div>
+                        <div className="settings-row-hint">
+                          {skill.description ?? t("skills.noDescription")}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="settings-row">
+                    <div className="empty-note">{t("skills.empty")}</div>
+                  </div>
+                )}
+              </div>
+            </section>
+          ) : null}
         </div>
       </div>
     </section>
@@ -7361,6 +7639,7 @@ function FlowInterviewModal({
   };
   url: string;
 }) {
+  const { t } = useI18n();
   const [selectedProfileId, setSelectedProfileId] = useState(agentProfiles[0]?.id ?? 0);
   const [note, setNote] = useState("");
   const started = state.sessionId !== null || state.status !== "idle";
@@ -7377,18 +7656,15 @@ function FlowInterviewModal({
       >
         <div className="modal-heading">
           <div>
-            <div className="section-label">Novo fluxo</div>
-            <h2 id="flow-interview-title">Criar fluxo de URL (com agente)</h2>
-            <p>
-              Cole a doc da ferramenta; o agente faz algumas perguntas e monta o fluxo. Você revisa
-              no editor antes de salvar.
-            </p>
+            <div className="section-label">{t("flow.interview.section")}</div>
+            <h2 id="flow-interview-title">{t("flow.interview.title")}</h2>
+            <p>{t("flow.interview.desc")}</p>
           </div>
           <button
             className="secondary-button icon-button"
             type="button"
             onClick={onClose}
-            aria-label="Fechar"
+            aria-label={t("common.close")}
           >
             <X aria-hidden="true" size={16} />
           </button>
@@ -7397,23 +7673,23 @@ function FlowInterviewModal({
         <div className="interview-modal-body">
           {!agentProfiles.length ? (
             <div className="form-error" role="status">
-              Nenhum agente configurado. Crie um agente na aba Agents antes de continuar.
+              {t("flow.interview.noAgent")}
             </div>
           ) : null}
 
           {!started ? (
             <div className="interview-start flow-interview-start">
               <label>
-                <span>URL da documentação</span>
+                <span>{t("flow.interview.urlLabel")}</span>
                 <input
                   type="url"
                   value={url}
-                  placeholder="https://github.com/org/ferramenta"
+                  placeholder={t("flow.interview.urlPlaceholder")}
                   onChange={(event) => onUrlChange(event.target.value)}
                 />
               </label>
               <label>
-                <span>Agente</span>
+                <span>{t("flow.interview.agentLabel")}</span>
                 <select
                   value={selectedProfileId}
                   onChange={(event) => setSelectedProfileId(Number(event.target.value))}
@@ -7433,7 +7709,7 @@ function FlowInterviewModal({
                 disabled={!canStart}
               >
                 <Bot aria-hidden="true" size={17} />
-                Começar
+                {t("flow.interview.start")}
               </button>
             </div>
           ) : null}
@@ -7447,7 +7723,10 @@ function FlowInterviewModal({
           {started && state.question ? (
             <div className="interview-question">
               <div className="interview-progress">
-                Pergunta {state.question.question_number} · {state.turns.length} respondida(s)
+                {t("flow.interview.progress", {
+                  number: state.question.question_number,
+                  answered: state.turns.length,
+                })}
               </div>
               <h4>{state.question.question}</h4>
               <div className="interview-options">
@@ -7467,12 +7746,12 @@ function FlowInterviewModal({
                 ))}
               </div>
               <label>
-                <span>Observação opcional</span>
+                <span>{t("flow.interview.noteLabel")}</span>
                 <textarea
                   rows={3}
                   value={note}
                   onChange={(event) => setNote(event.target.value)}
-                  placeholder="Complemente sua escolha se faltar algum detalhe."
+                  placeholder={t("flow.interview.notePlaceholder")}
                 />
               </label>
             </div>
@@ -7480,8 +7759,11 @@ function FlowInterviewModal({
 
           {waiting ? (
             <div className="interview-waiting" role="status">
-              O agente está{" "}
-              {state.turns.length ? "preparando a próxima pergunta" : "lendo a documentação"}…
+              {t("flow.interview.waitingPrefix")}{" "}
+              {state.turns.length
+                ? t("flow.interview.waitingNext")
+                : t("flow.interview.waitingReading")}
+              …
             </div>
           ) : null}
         </div>
@@ -7499,6 +7781,7 @@ function AttachmentPreviewModal({
   onClose: () => void;
   preview: AttachmentPreview;
 }) {
+  const { t } = useI18n();
   const source = `data:${preview.mime_type};base64,${preview.data_base64}`;
   const isPdf = preview.mime_type === "application/pdf";
 
@@ -7512,14 +7795,14 @@ function AttachmentPreviewModal({
       >
         <div className="modal-heading">
           <div>
-            <div className="section-label">Anexo</div>
+            <div className="section-label">{t("preview.attachment")}</div>
             <h2 id="attachment-preview-title">{preview.name}</h2>
           </div>
           <button
             className="secondary-button icon-button"
             type="button"
             onClick={onClose}
-            aria-label="Fechar preview"
+            aria-label={t("common.close")}
           >
             <X aria-hidden="true" size={17} />
           </button>
@@ -7543,6 +7826,7 @@ function DwArtifactPreviewModal({
   onClose: () => void;
   preview: DwArtifactPreview;
 }) {
+  const { t } = useI18n();
   return (
     <div className="modal-backdrop elevated" role="presentation">
       <section
@@ -7553,14 +7837,14 @@ function DwArtifactPreviewModal({
       >
         <div className="modal-heading">
           <div>
-            <div className="section-label">Artefato DW</div>
+            <div className="section-label">{t("preview.dwArtifact")}</div>
             <h2 id="dw-artifact-preview-title">{preview.relativePath}</h2>
           </div>
           <button
             className="secondary-button icon-button"
             type="button"
             onClick={onClose}
-            aria-label="Fechar artefato"
+            aria-label={t("common.close")}
           >
             <X aria-hidden="true" size={17} />
           </button>
@@ -7643,11 +7927,14 @@ function projectBlueprintStatusLabel(
   return labelKey && t ? t(labelKey) : labelKey ? translate("pt-BR", labelKey) : status;
 }
 
-function knowledgeSourceScopeLabel(source: KnowledgeSource) {
-  if (source.scope === "workspace") return "workspace";
-  if (source.scope === "project") return "projeto";
-  if (source.scope === "blueprint") return "blueprint";
-  return source.scope || "fonte";
+function knowledgeSourceScopeLabel(
+  source: KnowledgeSource,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+) {
+  if (source.scope === "workspace") return t("knowledge.scopeWorkspace");
+  if (source.scope === "project") return t("knowledge.scopeProject");
+  if (source.scope === "blueprint") return t("knowledge.scopeBlueprint");
+  return source.scope || t("knowledge.scopeSource");
 }
 
 function toggleNumber(values: number[], value: number) {
@@ -7832,6 +8119,7 @@ function AgentProfileModal({
   onCreate: (draft: AgentProfileDraft) => void;
   profile?: AgentProfile | null;
 }) {
+  const { t } = useI18n();
   const initialProvider = safeAgentProvider(profile?.provider);
   const initialModel = profile?.model ?? null;
   const initialModelOptions = agentModelOptions(initialProvider);
@@ -7867,18 +8155,16 @@ function AgentProfileModal({
       >
         <div className="modal-heading">
           <div>
-            <h2 id="agent-profile-title">{editing ? "Editar agente" : "Novo agente"}</h2>
-            <p>
-              {editing
-                ? "Ajuste nome, tipo, modelo, effort e sandbox usados nas próximas execuções."
-                : "Configure o agente que vai receber as mensagens e etapas do fluxo."}
-            </p>
+            <h2 id="agent-profile-title">
+              {editing ? t("agents.editProfileTitle") : t("agents.newProfileTitle")}
+            </h2>
+            <p>{editing ? t("agents.editProfileDesc") : t("agents.newProfileDesc")}</p>
           </div>
           <button
             className="secondary-button icon-button"
             type="button"
             onClick={onClose}
-            aria-label="Fechar modal"
+            aria-label={t("common.close")}
           >
             <X aria-hidden="true" size={16} />
           </button>
@@ -7900,7 +8186,7 @@ function AgentProfileModal({
           }}
         >
           <label>
-            <span>Nome</span>
+            <span>{t("agents.fieldName")}</span>
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
@@ -7910,7 +8196,7 @@ function AgentProfileModal({
           </label>
 
           <label>
-            <span>Tipo do agente</span>
+            <span>{t("agents.fieldProvider")}</span>
             <select
               value={provider}
               onChange={(event) => {
@@ -7931,14 +8217,14 @@ function AgentProfileModal({
             >
               {agentProviderOptions.map((option) => (
                 <option key={option.value} value={option.value} disabled={!option.enabled}>
-                  {option.enabled ? option.label : `${option.label} - em breve`}
+                  {option.enabled ? option.label : t("agents.comingSoon", { label: option.label })}
                 </option>
               ))}
             </select>
           </label>
 
           <label>
-            <span>Modelo</span>
+            <span>{t("agents.fieldModel")}</span>
             <select
               value={modelChoice}
               onChange={(event) => setModelChoice(event.target.value)}
@@ -7954,11 +8240,11 @@ function AgentProfileModal({
 
           {modelChoice === "custom" ? (
             <label>
-              <span>Modelo customizado</span>
+              <span>{t("agents.fieldCustomModel")}</span>
               <input
                 value={customModel}
                 onChange={(event) => setCustomModel(event.target.value)}
-                placeholder="ex: gpt-5.3-codex"
+                placeholder={t("agents.customModelPlaceholder")}
                 disabled={busy}
               />
             </label>
@@ -7995,7 +8281,7 @@ function AgentProfileModal({
           </label>
 
           <label>
-            <span>Contexto</span>
+            <span>{t("agents.fieldContext")}</span>
             <select
               value={contextMode}
               onChange={(event) => setContextMode(event.target.value as "auto_lean" | "full")}
@@ -8017,17 +8303,14 @@ function AgentProfileModal({
               disabled={busy}
             />
             <span>
-              <strong>Token savings with RTK</strong>
-              <small>
-                Disponibiliza o RTK para comandos shell do agente. Configure os hooks em Workspace
-                settings.
-              </small>
+              <strong>{t("workspace.settings.rtk.title")}</strong>
+              <small>{t("agents.rtkHint")}</small>
             </span>
           </label>
 
           <div className="modal-actions">
             <button className="secondary-button" type="button" onClick={onClose}>
-              Cancelar
+              {t("common.cancel")}
             </button>
             <button
               className="primary-button"
@@ -8035,13 +8318,51 @@ function AgentProfileModal({
               disabled={busy || !name.trim() || (modelChoice === "custom" && !customModel.trim())}
             >
               <Bot aria-hidden="true" size={17} />
-              {editing ? "Salvar agente" : "Criar agente"}
+              {editing ? t("agents.saveProfile") : t("agents.createProfile")}
             </button>
           </div>
         </form>
       </section>
     </div>
   );
+}
+
+/**
+ * Read an image off the OS clipboard via the Tauri plugin and re-encode it to a
+ * base64 PNG in-browser (canvas). Needed because WebKitGTK does not expose pasted
+ * images to a textarea's DOM paste event. Returns null when the clipboard has no image.
+ */
+async function readClipboardImageBase64(): Promise<{ base64: string; name: string } | null> {
+  try {
+    const image = await readClipboardImage();
+    const { width, height } = await image.size();
+    if (!width || !height) return null;
+    const rgba = await image.rgba();
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+    const dataUrl = canvas.toDataURL("image/png");
+    return { base64: dataUrl.slice(dataUrl.indexOf(",") + 1), name: `pasted-image-${Date.now()}.png` };
+  } catch {
+    return null; // no image on the clipboard (e.g. plain text)
+  }
+}
+
+/** Read a Blob/File as base64 (without the `data:...;base64,` prefix). */
+function fileToBase64(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 function AgentsPanel({
@@ -8066,6 +8387,8 @@ function AgentsPanel({
   sessions,
   setComposer,
   skills,
+  resolveSourceRef,
+  onOpenSourceFile,
 }: {
   activeProfile: AgentProfile | null;
   activeSession: AgentSession | null;
@@ -8088,7 +8411,10 @@ function AgentsPanel({
   sessions: AgentSession[];
   setComposer: (value: string) => void;
   skills: WorkspaceSkill[];
+  resolveSourceRef: (token: string) => string | null;
+  onOpenSourceFile: (relativePath: string) => void;
 }) {
+  const { t } = useI18n();
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<AgentProfile | null>(null);
   const [rawOpen, setRawOpen] = useState(false);
@@ -8100,6 +8426,129 @@ function AgentsPanel({
   const [rawPageSize, setRawPageSize] = useState(10);
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
   const [skillAutocompleteHidden, setSkillAutocompleteHidden] = useState(false);
+  const [chatAttachments, setChatAttachments] = useState<{ name: string; path: string }[]>([]);
+  const [chatAttachmentBusy, setChatAttachmentBusy] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+
+  // Native OS file drag-and-drop onto the window (Tauri intercepts file drops and
+  // delivers their on-disk paths). Scoped to the Agents tab since this panel only
+  // mounts there; the dropped paths are attached just like the file picker.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          setDragActive(true);
+        } else if (payload.type === "leave") {
+          setDragActive(false);
+        } else if (payload.type === "drop") {
+          setDragActive(false);
+          if (!project || !payload.paths.length) return;
+          const added = payload.paths.map((path) => ({
+            name: path.split(/[\\/]/).pop() || path,
+            path,
+          }));
+          setChatAttachments((items) => [...items, ...added]);
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [project]);
+
+  // Attach files via the picker — their on-disk paths are passed straight to the agent.
+  async function addPickedAttachments() {
+    if (!project) return;
+    const picked = await api.pickFiles();
+    if (!picked.ok) return;
+    const added = picked.value.map((path) => ({
+      name: path.split(/[\\/]/).pop() || path,
+      path,
+    }));
+    if (added.length) setChatAttachments((items) => [...items, ...added]);
+  }
+
+  // Save pasted/dropped bytes (e.g. a screenshot) under the project, keep its path.
+  async function addBlobAttachment(file: Blob, name: string) {
+    if (!project) return;
+    const base64 = await fileToBase64(file);
+    const result = await api.saveAgentAttachment(project.path, name, base64);
+    if (result.ok) setChatAttachments((items) => [...items, { name, path: result.value }]);
+  }
+
+  // Resolve a clipboard paste with no DOM file: the Linux clipboard image (native
+  // plugin) first, then — on WSL — the Windows clipboard via powershell. WSLg can't
+  // bridge the Windows image clipboard nor drag files in, so this is how a Windows
+  // screenshot (image) or a file copied in Explorer (Ctrl+C) gets attached.
+  async function addPastedClipboard() {
+    if (!project) return;
+    setChatAttachmentBusy(true);
+    try {
+      const native = await readClipboardImageBase64();
+      if (native) {
+        const saved = await api.saveAgentAttachment(project.path, native.name, native.base64);
+        if (saved.ok) {
+          setChatAttachments((items) => [...items, { name: native.name, path: saved.value }]);
+          return;
+        }
+      }
+      const windowsImage = await api.readWindowsClipboardImage(project.path);
+      if (windowsImage.ok && windowsImage.value) {
+        const path = windowsImage.value;
+        // Strip the "<epoch>-" uniqueness prefix from the on-disk name for display.
+        const name = (path.split(/[\\/]/).pop() || "pasted-image.png").replace(/^\d+-/, "");
+        setChatAttachments((items) => [...items, { name, path }]);
+        return;
+      }
+      // Files copied in Windows Explorer → translated to /mnt/... WSL paths.
+      const windowsFiles = await api.readWindowsClipboardFiles();
+      if (windowsFiles.ok && windowsFiles.value.length) {
+        const added = windowsFiles.value.map((path) => ({
+          name: path.split(/[\\/]/).pop() || path,
+          path,
+        }));
+        setChatAttachments((items) => [...items, ...added]);
+      }
+    } finally {
+      setChatAttachmentBusy(false);
+    }
+  }
+
+  function handleComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const data = event.clipboardData;
+    const files: File[] = [];
+    if (data?.items) {
+      for (const item of data.items) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+    }
+    if (files.length) {
+      event.preventDefault();
+      files.forEach((file, index) => {
+        const extension = file.type.split("/")[1] || "bin";
+        const kind = file.type.startsWith("image/") ? "image" : "file";
+        const fallback = `pasted-${kind}-${index + 1}.${extension}`;
+        void addBlobAttachment(file, file.name?.trim() ? file.name : fallback);
+      });
+      return;
+    }
+    // A genuine text paste carries text/plain — let it insert normally (and skip the
+    // powershell round-trip). Only a paste with no file and no text is treated as an
+    // image, probing the Linux then Windows clipboards.
+    if (data?.getData("text/plain")?.trim()) return;
+    event.preventDefault();
+    void addPastedClipboard();
+  }
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const rawBodyRef = useRef<HTMLDivElement | null>(null);
   const working = isAgentRunning(activeSession);
@@ -8114,12 +8563,12 @@ function AgentsPanel({
     .map((message) => ({
       id: message.id,
       type: rawEventType(message.raw_json),
-      summary: rawEventSummary(message.raw_json),
+      summary: rawEventSummary(message.raw_json, t),
       value: formatRawJson(message.raw_json),
     }))
     .reverse();
   const visibleMessages = messages.filter((message) => message.role !== "event");
-  const sessionStatus = activeSession ? agentStatusLabel(activeSession.status) : "Sem conversa";
+  const sessionStatus = activeSession ? agentStatusLabel(activeSession.status) : t("agents.noConversation");
   const rawPayload = formattedRawEvents.map((event) => event.value).join("\n\n");
   const rawPageCount = Math.max(1, Math.ceil(formattedRawEvents.length / rawPageSize));
   const safeRawPage = Math.min(rawPage, rawPageCount - 1);
@@ -8234,7 +8683,7 @@ function AgentsPanel({
             aria-pressed={rawOpen}
           >
             <FileText aria-hidden="true" size={14} />
-            Eventos
+            {t("agents.events")}
           </button>
           <button
             className="topbar-btn"
@@ -8246,14 +8695,14 @@ function AgentsPanel({
             disabled={!activeProfile}
           >
             <Settings aria-hidden="true" size={14} />
-            Perfis
+            {t("agents.profiles")}
           </button>
         </div>
       </header>
-      <aside className="agents-sidebar" aria-label="Agentes">
+      <aside className="agents-sidebar" aria-label={t("agents.sidebarLabel")}>
         <section className="sidebar-section">
           <div className="sidebar-section-title">
-            Perfis
+            {t("agents.profiles")}
             <button
               className="sidebar-section-btn"
               type="button"
@@ -8262,8 +8711,8 @@ function AgentsPanel({
                 setProfileModalOpen(true);
               }}
               disabled={busy}
-              aria-label="Novo agente"
-              title="Novo agente"
+              aria-label={t("agents.newProfileTitle")}
+              title={t("agents.newProfileTitle")}
             >
               <Plus aria-hidden="true" size={14} />
             </button>
@@ -8307,7 +8756,7 @@ function AgentsPanel({
                       </span>
                     </button>
                     {profileWorking ? (
-                      <span className="agent-list-status" aria-label="Agente em trabalho">
+                      <span className="agent-list-status" aria-label={t("agents.agentWorking")}>
                         <span className="agent-spinner compact" aria-hidden="true" />
                       </span>
                     ) : null}
@@ -8318,8 +8767,8 @@ function AgentsPanel({
                         setEditingProfile(profile);
                         setProfileModalOpen(true);
                       }}
-                      aria-label={`Editar ${profile.name}`}
-                      title="Editar agente"
+                      aria-label={t("agents.editNamed", { name: profile.name })}
+                      title={t("agents.editProfileTitle")}
                     >
                       <Pencil aria-hidden="true" size={15} />
                     </button>
@@ -8338,8 +8787,8 @@ function AgentsPanel({
               >
                 <Plus aria-hidden="true" size={18} />
                 <span>
-                  <strong>Criar agente</strong>
-                  <small>Configure um agente para executar o fluxo.</small>
+                  <strong>{t("agents.createProfile")}</strong>
+                  <small>{t("agents.createProfileHint")}</small>
                 </span>
               </button>
             )}
@@ -8348,14 +8797,14 @@ function AgentsPanel({
 
         <section className="sidebar-section agent-session-section">
           <div className="sidebar-section-title">
-            Sessões
+            {t("agents.sessions")}
             <button
               className="sidebar-section-btn"
               type="button"
               onClick={onResetChat}
               disabled={busy || !activeProfile}
-              aria-label="Nova sessão"
-              title="Nova sessão"
+              aria-label={t("agents.newSession")}
+              title={t("agents.newSession")}
             >
               <Plus aria-hidden="true" size={14} />
             </button>
@@ -8377,7 +8826,7 @@ function AgentsPanel({
                 </button>
               ))
             ) : (
-              <div className="empty-note">Nenhuma conversa ainda.</div>
+              <div className="empty-note">{t("agents.noConversations")}</div>
             )}
           </div>
         </section>
@@ -8385,14 +8834,16 @@ function AgentsPanel({
         {activeProfile ? (
           <section className="sidebar-section agent-usage">
             <div className="agent-usage-head">
-              <span>Uso · {agentProviderLabel(activeProfile.provider)}</span>
+              <span>
+                {t("agents.usage")} · {agentProviderLabel(activeProfile.provider)}
+              </span>
               <button
                 className="sidebar-section-btn"
                 type="button"
                 onClick={() => void refreshUsage()}
                 disabled={usageBusy || !project}
-                aria-label="Atualizar uso"
-                title="Atualizar uso"
+                aria-label={t("agents.refreshUsage")}
+                title={t("agents.refreshUsage")}
               >
                 {usageBusy ? (
                   <span className="flow-run-spinner" aria-hidden="true" />
@@ -8402,9 +8853,9 @@ function AgentsPanel({
               </button>
             </div>
             {usage == null ? (
-              <span className="agent-usage-hint">Clique em atualizar para consultar.</span>
+              <span className="agent-usage-hint">{t("agents.usageClickRefresh")}</span>
             ) : !usage.supported ? (
-              <span className="agent-usage-hint">Uso indisponível para este provider.</span>
+              <span className="agent-usage-hint">{t("agents.usageUnsupported")}</span>
             ) : usage.windows.length ? (
               <div className="agent-usage-windows">
                 {usage.windows.map((window, index) => (
@@ -8420,7 +8871,7 @@ function AgentsPanel({
               </div>
             ) : (
               <span className="agent-usage-hint" title={usage.raw}>
-                Uso indisponível (sem dados legíveis).
+                {t("agents.usageNoData")}
               </span>
             )}
           </section>
@@ -8433,14 +8884,14 @@ function AgentsPanel({
             {activeProfile ? authorInitials(activeProfile.name).slice(0, 2) : "AI"}
           </div>
           <div className="chat-profile-info agent-chat-title">
-            <div className="chat-profile-name">{activeProfile?.name || "Selecione um agente"}</div>
+            <div className="chat-profile-name">{activeProfile?.name || t("agents.selectAgent")}</div>
             <div className="chat-profile-status">
               <span className={working ? "chat-profile-dot" : "chat-profile-dot idle"} />
               {activeProfile
-                ? `Ativo · ${activeSession?.title || sessionStatus}`
+                ? `${t("agents.active")} · ${activeSession?.title || sessionStatus}`
                 : project
                   ? projectDisplayName(project)
-                  : "Sem projeto"}
+                  : t("agents.noProject")}
             </div>
           </div>
           <div className="agent-session-actions">
@@ -8453,9 +8904,9 @@ function AgentsPanel({
                 setRawOpen(false);
               }}
               aria-pressed={sessionsOpen}
-              aria-label={sessionsOpen ? "Ocultar conversas" : "Mostrar conversas"}
+              aria-label={sessionsOpen ? t("agents.hideConversations") : t("agents.showConversations")}
             >
-              <span>Conversas</span>
+              <span>{t("agents.conversations")}</span>
               <strong>{activeSessions.length}</strong>
             </button>
             {activeSession ? (
@@ -8477,7 +8928,7 @@ function AgentsPanel({
                 setSessionsOpen(false);
               }}
               aria-pressed={rawOpen}
-              aria-label={rawOpen ? "Ocultar eventos raw" : "Mostrar eventos raw"}
+              aria-label={rawOpen ? t("agents.hideRaw") : t("agents.showRaw")}
             >
               <span>Raw</span>
               <strong>{rawEvents.length}</strong>
@@ -8489,20 +8940,20 @@ function AgentsPanel({
               disabled={busy || !activeProfile}
             >
               <Trash2 aria-hidden="true" size={16} />
-              Limpar chat
+              {t("agents.clearChat")}
             </button>
           </div>
         </div>
 
         {error ? <div className="error-banner">{error}</div> : null}
 
-        <div className="agent-diagnostics" aria-label="Diagnóstico do agente">
+        <div className="agent-diagnostics" aria-label={t("agents.diagnostics")}>
           <span className={health?.ok ? "status-pill ready" : "status-pill"}>
             {health
               ? health.ok
-                ? "Provider pronto"
-                : "Provider com alerta"
-              : "Verificando provider"}
+                ? t("agents.providerReady")
+                : t("agents.providerWarning")
+              : t("agents.providerChecking")}
           </span>
           {health ? (
             <span title={health.message}>
@@ -8512,14 +8963,18 @@ function AgentsPanel({
           ) : null}
           {latestMetric ? (
             <span>
-              {agentMetricPhaseLabel(latestMetric.phase)} · {latestMetric.elapsed_ms}ms
+              {agentMetricPhaseLabel(latestMetric.phase, t)} · {latestMetric.elapsed_ms}ms
             </span>
           ) : null}
           {metricSummary ? <span>{metricSummary}</span> : null}
         </div>
 
         <div className={rawOpen || sessionsOpen ? "agent-chat-shell raw-open" : "agent-chat-shell"}>
-          <div className="chat-messages agent-timeline" ref={timelineRef} aria-label="Histórico do agente">
+          <div
+            className="chat-messages agent-timeline"
+            ref={timelineRef}
+            aria-label={t("agents.timeline")}
+          >
             {visibleMessages.length ? (
               visibleMessages.map((message) => (
                 <article
@@ -8529,18 +8984,26 @@ function AgentsPanel({
                   key={message.id}
                 >
                   <div className="message-header agent-message-meta">
-                    <span className="message-author">{message.role === "user" ? "Você" : activeProfile?.name || "Agente"}</span>
+                    <span className="message-author">
+                      {message.role === "user"
+                        ? t("agents.you")
+                        : activeProfile?.name || t("agents.agentFallback")}
+                    </span>
                     <time>{new Date(message.created_at).toLocaleString()}</time>
                   </div>
                   <div className="message-content">
-                    <AgentMessageContent message={message} />
+                    <AgentMessageContent
+                      message={message}
+                      resolveSourceRef={resolveSourceRef}
+                      onOpenSourceFile={onOpenSourceFile}
+                    />
                   </div>
                 </article>
               ))
             ) : (
               <div className="terminal-empty">
                 <Bot aria-hidden="true" />
-                <span>Envie uma mensagem ou delegue uma etapa do Kanban.</span>
+                <span>{t("agents.emptyTimeline")}</span>
               </div>
             )}
             {working ? (
@@ -8555,11 +9018,11 @@ function AgentsPanel({
           {sessionsOpen ? (
             <aside
               className="agent-raw-panel agent-sessions-drawer"
-              aria-label="Conversas do agente"
+              aria-label={t("agents.conversationsDrawer")}
             >
               <div>
                 <span>
-                  <strong>Conversas</strong>
+                  <strong>{t("agents.conversations")}</strong>
                   <small>{activeSessions.length}</small>
                 </span>
               </div>
@@ -8589,14 +9052,14 @@ function AgentsPanel({
                     </button>
                   ))
                 ) : (
-                  <div className="empty-note">Nenhuma conversa ainda.</div>
+                  <div className="empty-note">{t("agents.noConversations")}</div>
                 )}
               </div>
             </aside>
           ) : null}
 
           {rawOpen ? (
-            <aside className="agent-raw-panel" aria-label="Eventos raw do agente">
+            <aside className="agent-raw-panel" aria-label={t("agents.rawDrawer")}>
               <div>
                 <span>
                   <strong>Raw events</strong>
@@ -8607,8 +9070,8 @@ function AgentsPanel({
                   type="button"
                   onClick={() => void copyRawEvents()}
                   disabled={!rawEvents.length}
-                  aria-label="Copiar eventos raw"
-                  title="Copiar raw"
+                  aria-label={t("agents.copyRaw")}
+                  title={t("agents.copyRawTitle")}
                 >
                   <Copy aria-hidden="true" size={15} />
                 </button>
@@ -8619,7 +9082,7 @@ function AgentsPanel({
                     <header>
                       <span>
                         <strong>{event.type}</strong>
-                        {event.summary !== "Abrir JSON" ? <em>{event.summary}</em> : null}
+                        {event.summary !== t("agents.openJson") ? <em>{event.summary}</em> : null}
                       </span>
                       <small>#{event.id}</small>
                     </header>
@@ -8636,11 +9099,12 @@ function AgentsPanel({
                   onClick={() => setRawPage((page) => Math.max(0, page - 1))}
                   disabled={safeRawPage === 0}
                 >
-                  Anterior
+                  {t("agents.prev")}
                 </button>
                 <span>
                   {rawEvents.length ? rawPageStart + 1 : 0}-
-                  {Math.min(rawPageStart + rawPageSize, rawEvents.length)} de {rawEvents.length}
+                  {Math.min(rawPageStart + rawPageSize, rawEvents.length)} {t("agents.of")}{" "}
+                  {rawEvents.length}
                 </span>
                 <select
                   value={rawPageSize}
@@ -8648,7 +9112,7 @@ function AgentsPanel({
                     setRawPageSize(Number(event.target.value));
                     setRawPage(0);
                   }}
-                  aria-label="Eventos raw por página"
+                  aria-label={t("agents.rawPerPage")}
                 >
                   <option value={10}>10</option>
                   <option value={20}>20</option>
@@ -8660,7 +9124,7 @@ function AgentsPanel({
                   onClick={() => setRawPage((page) => Math.min(rawPageCount - 1, page + 1))}
                   disabled={safeRawPage >= rawPageCount - 1}
                 >
-                  Próxima
+                  {t("agents.next")}
                 </button>
               </div>
             </aside>
@@ -8668,15 +9132,31 @@ function AgentsPanel({
         </div>
 
         <form
-          className="chat-composer agent-composer"
+          className={dragActive ? "chat-composer agent-composer drop-active" : "chat-composer agent-composer"}
           onSubmit={(event) => {
             event.preventDefault();
-            const message = composer.trim();
-            if (!message) return;
+            const text = composer.trim();
+            if (!text && !chatAttachments.length) return;
+            let message = text;
+            if (chatAttachments.length) {
+              const block =
+                "## Anexos (leia estes arquivos)\n" +
+                chatAttachments
+                  .map((attachment) => `- ${attachment.name}: ${attachment.path}`)
+                  .join("\n");
+              message = text ? `${text}\n\n${block}` : block;
+            }
             onSend(message);
             setComposer("");
+            setChatAttachments([]);
           }}
         >
+          {dragActive ? (
+            <div className="composer-drop-hint">
+              <Upload aria-hidden="true" size={14} />
+              {t("agents.dropToAttach")}
+            </div>
+          ) : null}
           <div className="composer-input-wrapper agent-composer-input">
             {skillAutocompleteOpen ? (
               <div className="agent-skill-menu" role="listbox" aria-label="Skills">
@@ -8718,7 +9198,7 @@ function AgentsPanel({
                     ),
                   )
                 ) : (
-                  <div className="agent-skill-empty">Nenhuma skill encontrada.</div>
+                  <div className="agent-skill-empty">{t("agents.noSkillsFound")}</div>
                 )}
               </div>
             ) : null}
@@ -8731,7 +9211,14 @@ function AgentsPanel({
                 setSkillAutocompleteHidden(false);
               }}
               onKeyDown={(event) => {
-                if (!skillAutocompleteOpen) return;
+                if (!skillAutocompleteOpen) {
+                  // Skill menu closed: Enter sends, Shift+Enter inserts a new line.
+                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                  return;
+                }
                 if (!skillSuggestions.length) {
                   if (event.key === "Escape") {
                     event.preventDefault();
@@ -8756,29 +9243,64 @@ function AgentsPanel({
                   setSkillAutocompleteHidden(true);
                 }
               }}
-              placeholder="Digite sua mensagem… (Ctrl+K para skills)"
+              onPaste={handleComposerPaste}
+              placeholder={t("agents.composerPlaceholder")}
               disabled={busy || !project}
             />
             <div className="composer-actions">
-              <button className="composer-btn" type="button" title="Anexar arquivo" disabled>
+              <button
+                className="composer-btn"
+                type="button"
+                title={t("agents.attachFile")}
+                aria-label={t("agents.attachFile")}
+                onClick={() => void addPickedAttachments()}
+                disabled={busy || !project}
+              >
                 <Upload aria-hidden="true" size={18} />
               </button>
               <button
                 className="composer-btn send"
                 type="submit"
-                disabled={busy || !project || !composer.trim()}
-                title="Enviar"
+                disabled={busy || !project || (!composer.trim() && !chatAttachments.length)}
+                title={t("agents.send")}
               >
                 <Send aria-hidden="true" size={18} />
               </button>
             </div>
           </div>
+          {chatAttachments.length || chatAttachmentBusy ? (
+            <div className="composer-attachments">
+              {chatAttachments.map((attachment, index) => (
+                <span className="composer-attachment-chip" key={`${attachment.path}-${index}`}>
+                  <span className="composer-attachment-name">{attachment.name}</span>
+                  <button
+                    type="button"
+                    className="composer-attachment-remove"
+                    aria-label={t("agents.removeAttachment")}
+                    onClick={() =>
+                      setChatAttachments((items) =>
+                        items.filter((_, position) => position !== index),
+                      )
+                    }
+                  >
+                    <X aria-hidden="true" size={12} />
+                  </button>
+                </span>
+              ))}
+              {chatAttachmentBusy ? (
+                <span className="composer-attachment-chip composer-attachment-loading">
+                  <RefreshCw aria-hidden="true" size={12} />
+                  {t("agents.pastingImage")}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
           <div className="composer-hints">
             <span className="composer-hint">
-              <kbd>Enter</kbd> Enviar
+              <kbd>Enter</kbd> {t("agents.send")}
             </span>
             <span className="composer-hint">
-              <kbd>Shift</kbd>+<kbd>Enter</kbd> Nova linha
+              <kbd>Shift</kbd>+<kbd>Enter</kbd> {t("agents.newLine")}
             </span>
             <span className="composer-hint">
               <kbd>Ctrl</kbd>+<kbd>K</kbd> Skills
@@ -8810,8 +9332,11 @@ function rawEventType(value?: string | null) {
   }
 }
 
-function rawEventSummary(value?: string | null) {
-  if (!value) return "Sem payload";
+function rawEventSummary(
+  value: string | null | undefined,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+) {
+  if (!value) return t("agents.noPayload");
   try {
     const parsed = JSON.parse(value) as {
       data?: { content?: unknown; deltaContent?: unknown; status?: unknown };
@@ -8832,27 +9357,31 @@ function rawEventSummary(value?: string | null) {
   } catch {
     return truncateText(value.replace(/\s+/g, " "), 110);
   }
-  return "Abrir JSON";
+  return t("agents.openJson");
 }
 
-function agentMetricPhaseLabel(phase: string) {
-  const labels: Record<string, string> = {
-    started: "Iniciando",
-    command_built: "Comando pronto",
-    process_spawned: "Processo iniciado",
-    context_policy: "Política de contexto",
-    first_event: "Primeiro evento",
-    provider_init: "Contexto carregado",
-    provider_session: "Sessão",
-    model_start: "Modelo iniciou",
-    assistant_output: "Respondendo",
-    assistant_output_fallback: "Resposta capturada",
-    result: "Resultado",
-    finished: "Finalizado",
-    failed: "Falhou",
-    provider_error: "Erro do provider",
+function agentMetricPhaseLabel(
+  phase: string,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+) {
+  const labels: Record<string, TranslationKey> = {
+    started: "agents.phase.started",
+    command_built: "agents.phase.commandBuilt",
+    process_spawned: "agents.phase.processSpawned",
+    context_policy: "agents.phase.contextPolicy",
+    first_event: "agents.phase.firstEvent",
+    provider_init: "agents.phase.providerInit",
+    provider_session: "agents.phase.providerSession",
+    model_start: "agents.phase.modelStart",
+    assistant_output: "agents.phase.assistantOutput",
+    assistant_output_fallback: "agents.phase.assistantOutputFallback",
+    result: "agents.phase.result",
+    finished: "agents.phase.finished",
+    failed: "agents.phase.failed",
+    provider_error: "agents.phase.providerError",
   };
-  return labels[phase] ?? phase;
+  const key = labels[phase];
+  return key ? t(key) : phase;
 }
 
 function summarizeAgentMetrics(metrics: AgentRunEvent[]) {
@@ -9511,6 +10040,7 @@ function SourcePanel({
   explorerWidth: number;
   onExplorerResize: (width: number) => void;
 }) {
+  const { t } = useI18n();
   const language = selectedFile ? monacoLanguage(selectedFile.relative_path) : "plaintext";
   const isMarkdown = language === "markdown";
   const showPreview = previewActive && isMarkdown && Boolean(selectedFile);
@@ -9542,9 +10072,12 @@ function SourcePanel({
     document.body.style.cursor = "col-resize";
   }
 
-  const sourcePathLabel = selectedFile?.relative_path
-    ? `${selectedFile.relative_path.split("/").join(" / ")}`
-    : "Nenhum arquivo";
+  // Full absolute path of the open file (or the project root when nothing is open),
+  // so it's always clear which directory/file is being edited — including projects
+  // that live outside the workspace.
+  const fullSourcePath = selectedFile?.relative_path
+    ? `${searchPath}/${selectedFile.relative_path}`
+    : searchPath;
 
   function toggleDir(path: string) {
     const next = new Set(expanded);
@@ -9555,18 +10088,18 @@ function SourcePanel({
 
   async function promptNewFile() {
     const relativePath = await prompt({
-      title: "Novo arquivo",
-      label: "Caminho relativo (ex.: src/novo.ts)",
-      confirmLabel: "Criar",
+      title: t("editor.newFile"),
+      label: t("editor.relativePathFile"),
+      confirmLabel: t("common.create"),
     });
     if (relativePath) onCreateFile(relativePath);
   }
 
   async function promptNewDir() {
     const relativePath = await prompt({
-      title: "Nova pasta",
-      label: "Caminho relativo (ex.: src/lib)",
-      confirmLabel: "Criar",
+      title: t("editor.newDir"),
+      label: t("editor.relativePathDir"),
+      confirmLabel: t("common.create"),
     });
     if (relativePath) onCreateDir(relativePath);
   }
@@ -9575,13 +10108,13 @@ function SourcePanel({
     <div className="source-panel">
       <header className="source-topbar screen-topbar">
         <span className="topbar-title">Source Code</span>
-        <span className="topbar-path">
-          {selectedFile ? sourcePathLabel : "Selecione um arquivo no explorer"}
+        <span className="topbar-path" title={fullSourcePath || undefined}>
+          {fullSourcePath || t("editor.selectFileTopbar")}
         </span>
         <div className="topbar-actions">
           <button className="topbar-btn" type="button" onClick={onQuickOpen}>
             <Search aria-hidden="true" size={14} />
-            Buscar
+            {t("editor.search")}
           </button>
           <button
             className={previewActive ? "topbar-btn active" : "topbar-btn"}
@@ -9609,8 +10142,8 @@ function SourcePanel({
                   className="explorer-btn explorer-action-btn"
                   type="button"
                   onClick={() => void promptNewFile()}
-                  title="Novo arquivo"
-                  aria-label="Novo arquivo"
+                  title={t("editor.newFile")}
+                  aria-label={t("editor.newFile")}
                 >
                   <FilePlus aria-hidden="true" size={15} />
                 </button>
@@ -9618,8 +10151,8 @@ function SourcePanel({
                   className="explorer-btn explorer-action-btn"
                   type="button"
                   onClick={() => void promptNewDir()}
-                  title="Nova pasta"
-                  aria-label="Nova pasta"
+                  title={t("editor.newDir")}
+                  aria-label={t("editor.newDir")}
                 >
                   <FolderPlus aria-hidden="true" size={15} />
                 </button>
@@ -9627,8 +10160,8 @@ function SourcePanel({
                   className="explorer-btn explorer-action-btn"
                   type="button"
                   onClick={onRefreshTree}
-                  title="Atualizar"
-                  aria-label="Atualizar"
+                  title={t("common.refresh")}
+                  aria-label={t("common.refresh")}
                 >
                   <RefreshCw aria-hidden="true" size={15} />
                 </button>
@@ -9636,8 +10169,8 @@ function SourcePanel({
                   className="explorer-btn explorer-action-btn"
                   type="button"
                   onClick={() => onExpandedPathsChange([])}
-                  title="Recolher tudo"
-                  aria-label="Recolher tudo"
+                  title={t("editor.collapseAll")}
+                  aria-label={t("editor.collapseAll")}
                 >
                   <ChevronsDownUp aria-hidden="true" size={15} />
                 </button>
@@ -9647,7 +10180,7 @@ function SourcePanel({
           <div className="explorer-search">
             <input
               type="search"
-              placeholder="Buscar arquivos..."
+              placeholder={t("editor.searchFiles")}
               onFocus={() => {
                 onSideTabChange("search");
                 onFindInFiles();
@@ -9670,7 +10203,7 @@ function SourcePanel({
               aria-selected={sideTab === "search"}
               className={sideTab === "search" ? "source-side-tab active" : "source-side-tab"}
               onClick={() => onSideTabChange("search")}
-              title="Buscar nos arquivos (Ctrl+Shift+F)"
+              title={t("editor.searchInFiles")}
             >
               Search
             </button>
@@ -9696,9 +10229,7 @@ function SourcePanel({
                   <span className="empty-state-icon">
                     <FolderGit2 aria-hidden="true" size={20} />
                   </span>
-                  <p className="empty-state-desc">
-                    Nenhum projeto carregado. Selecione ou adicione um projeto para ver os arquivos.
-                  </p>
+                  <p className="empty-state-desc">{t("editor.noProjectLoaded")}</p>
                 </div>
               )}
             </>
@@ -9710,7 +10241,7 @@ function SourcePanel({
           className="source-resizer"
           role="separator"
           aria-orientation="vertical"
-          aria-label="Redimensionar explorer"
+          aria-label={t("editor.resizeExplorer")}
           onMouseDown={startExplorerResize}
         />
 
@@ -9756,10 +10287,8 @@ function SourcePanel({
                   <span className="empty-state-icon">
                     <Code2 aria-hidden="true" size={26} />
                   </span>
-                  <h3 className="empty-state-title">Nenhum arquivo aberto</h3>
-                  <p className="empty-state-desc">
-                    Selecione um arquivo no explorer para ver e editar o código.
-                  </p>
+                  <h3 className="empty-state-title">{t("editor.noFileOpen")}</h3>
+                  <p className="empty-state-desc">{t("editor.selectFileToEdit")}</p>
                 </div>
               )}
             </div>
@@ -9777,7 +10306,7 @@ function SourcePanel({
 
           <footer className="source-footer status-bar">
             <div className="source-footer-info">
-              <span className="source-footer-branch" title="Branch atual">
+              <span className="source-footer-branch" title={t("editor.currentBranch")}>
                 <GitBranch aria-hidden="true" size={13} />
                 branch
               </span>
@@ -9788,12 +10317,12 @@ function SourcePanel({
                     {selectedFile.relative_path}
                   </span>
                   <span className="source-footer-sep">·</span>
-                  <span>{sourceLanguage(selectedFile.relative_path)}</span>
+                  <span>{monacoLanguage(selectedFile.relative_path)}</span>
                   <span className="source-footer-sep">·</span>
                   <span>{formatSourceSize(selectedFile.bytes)}</span>
                 </>
               ) : (
-                <span>Nenhum arquivo selecionado</span>
+                <span>{t("editor.noFileSelected")}</span>
               )}
             </div>
             <div className="source-footer-actions">
@@ -9802,22 +10331,28 @@ function SourcePanel({
                   Ln {cursor.line}, Col {cursor.col}
                 </span>
               ) : null}
-              <span>UTF-8</span>
-              <span>Spaces: 2</span>
-              <span>LF</span>
+              {selectedFile ? (
+                <>
+                  <span title={t("editor.encoding")}>
+                    {selectedFile.encoding === "windows-1252" ? "Windows-1252" : "UTF-8"}
+                  </span>
+                  <span>{/^\t/m.test(selectedFile.content) ? "Tabs" : "Spaces"}</span>
+                  <span>{selectedFile.content.includes("\r\n") ? "CRLF" : "LF"}</span>
+                </>
+              ) : null}
               {selectedFile && sourceDirty ? (
-                <span className="source-footer-dirty" title="Alterações não salvas">
-                  ● não salvo
+                <span className="source-footer-dirty" title={t("editor.unsavedChanges")}>
+                  {t("editor.unsaved")}
                 </span>
               ) : null}
               {lsp ? (
                 lsp.installing ? (
-                  <span className="source-footer-lsp" title="Instalando language server">
-                    Instalando {lsp.program}…
+                  <span className="source-footer-lsp" title={t("editor.installingLsp")}>
+                    {t("editor.installingProgram", { program: lsp.program })}
                   </span>
                 ) : !lsp.enabled ? (
                   <button className="source-footer-link" type="button" onClick={onEnableLsp}>
-                    Ativar LSP
+                    {t("editor.enableLsp")}
                   </button>
                 ) : !lsp.installed ? (
                   <button
@@ -9827,14 +10362,17 @@ function SourcePanel({
                     disabled={!lsp.canInstall}
                     title={
                       lsp.canInstall
-                        ? `Instalar ${lsp.program}`
-                        : `Instale o pré-requisito de ${lsp.program} primeiro`
+                        ? t("editor.installProgram", { program: lsp.program })
+                        : t("editor.installPrereqFirst", { program: lsp.program })
                     }
                   >
-                    Instalar {lsp.program}
+                    {t("editor.installProgram", { program: lsp.program })}
                   </button>
                 ) : (
-                  <span className="source-footer-lsp ok" title={`${lsp.program} ativo`}>
+                  <span
+                    className="source-footer-lsp ok"
+                    title={t("editor.programActive", { program: lsp.program })}
+                  >
                     LSP ✓
                   </span>
                 )
@@ -9844,8 +10382,8 @@ function SourcePanel({
                 type="button"
                 onClick={onToggleHistory}
                 disabled={!selectedFile}
-                title="Histórico do arquivo"
-                aria-label="Histórico do arquivo"
+                title={t("editor.fileHistory")}
+                aria-label={t("editor.fileHistory")}
                 aria-pressed={showHistory}
               >
                 <History aria-hidden="true" size={14} />
@@ -9855,8 +10393,8 @@ function SourcePanel({
                 type="button"
                 onClick={onSave}
                 disabled={!selectedFile || !sourceDirty || sourceSaving}
-                title="Salvar (Ctrl+S)"
-                aria-label="Salvar (Ctrl+S)"
+                title={t("editor.saveShortcut")}
+                aria-label={t("editor.saveShortcut")}
               >
                 <CheckCircle2 aria-hidden="true" size={14} />
               </button>
@@ -10160,6 +10698,7 @@ function GitRefTree({
   onMerge?: (full: string) => void;
   onContext?: (leaf: RefLeaf, event: ReactMouseEvent) => void;
 }) {
+  const { t } = useI18n();
   return (
     <>
       {nodes.map((node) =>
@@ -10167,7 +10706,7 @@ function GitRefTree({
           <div className={node.leaf.isHead ? "git-ref-row head" : "git-ref-row"} key={node.path}>
             <button
               type="button"
-              title="Duplo clique para checkout · botão direito para mais ações"
+              title={t("git.checkoutHint")}
               style={{ paddingLeft: 8 + depth * 12 }}
               onDoubleClick={() => onCheckout(node.leaf!.full)}
               onContextMenu={onContext ? (event) => onContext(node.leaf!, event) : undefined}
@@ -10184,7 +10723,7 @@ function GitRefTree({
               <button
                 className="git-ref-action"
                 type="button"
-                title="Merge na branch atual"
+                title={t("git.mergeHint")}
                 onClick={() => onMerge(node.leaf!.full)}
               >
                 merge
@@ -10192,23 +10731,66 @@ function GitRefTree({
             ) : null}
           </div>
         ) : (
-          <div key={node.path}>
-            <div className="git-ref-folder" style={{ paddingLeft: 8 + depth * 12 }}>
-              <FolderOpen aria-hidden="true" size={12} />
-              <span>{node.segment}</span>
-            </div>
-            <GitRefTree
-              nodes={node.children}
-              depth={depth + 1}
-              leafIcon={leafIcon}
-              onCheckout={onCheckout}
-              onMerge={onMerge}
-              onContext={onContext}
-            />
-          </div>
+          <GitRefFolder
+            key={node.path}
+            node={node}
+            depth={depth}
+            leafIcon={leafIcon}
+            onCheckout={onCheckout}
+            onMerge={onMerge}
+            onContext={onContext}
+          />
         ),
       )}
     </>
+  );
+}
+
+/** A collapsible branch folder: toggles its own children open/closed (default open). */
+function GitRefFolder({
+  node,
+  depth,
+  leafIcon,
+  onCheckout,
+  onMerge,
+  onContext,
+}: {
+  node: RefTreeNode;
+  depth: number;
+  leafIcon: ReactNode;
+  onCheckout: (full: string) => void;
+  onMerge?: (full: string) => void;
+  onContext?: (leaf: RefLeaf, event: ReactMouseEvent) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div>
+      <button
+        type="button"
+        className="git-ref-folder"
+        style={{ paddingLeft: 8 + depth * 12 }}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? (
+          <ChevronDown aria-hidden="true" size={12} />
+        ) : (
+          <ChevronRight aria-hidden="true" size={12} />
+        )}
+        <FolderOpen aria-hidden="true" size={12} />
+        <span className="git-ref-name">{node.segment}</span>
+      </button>
+      {open ? (
+        <GitRefTree
+          nodes={node.children}
+          depth={depth + 1}
+          leafIcon={leafIcon}
+          onCheckout={onCheckout}
+          onMerge={onMerge}
+          onContext={onContext}
+        />
+      ) : null}
+    </div>
   );
 }
 
@@ -10226,6 +10808,7 @@ function NewBranchModal({
   onClose: () => void;
   onCreate: (name: string, source: string, checkout: boolean) => void;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const [source, setSource] = useState(initialSource);
   const [checkout, setCheckout] = useState(true);
@@ -10237,15 +10820,15 @@ function NewBranchModal({
         <div className="modal-heading">
           <div>
             <div className="section-label">Git</div>
-            <h2>Criar branch</h2>
+            <h2>{t("git.createBranch")}</h2>
           </div>
         </div>
         <label className="prompt-field">
-          <span>Nome da nova branch</span>
+          <span>{t("git.branchNameLabel")}</span>
           <input
             autoFocus
             value={name}
-            placeholder="feat/minha-branch"
+            placeholder={t("git.branchPlaceholder")}
             onChange={(event) => setName(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && canCreate) onCreate(name.trim(), source, checkout);
@@ -10254,15 +10837,15 @@ function NewBranchModal({
           />
         </label>
         <label className="prompt-field">
-          <span>A partir de</span>
+          <span>{t("git.branchFromLabel")}</span>
           <select value={source} onChange={(event) => setSource(event.target.value)}>
             {!branches.some((branch) => branch.name === source) ? (
-              <option value={source}>{source || "HEAD atual"}</option>
+              <option value={source}>{source || t("git.headCurrent")}</option>
             ) : null}
             {branches.map((branch) => (
               <option key={branch.name} value={branch.name}>
                 {branch.name}
-                {branch.is_head ? " (atual)" : ""}
+                {branch.is_head ? t("git.currentSuffix") : ""}
               </option>
             ))}
           </select>
@@ -10273,11 +10856,11 @@ function NewBranchModal({
             checked={checkout}
             onChange={(event) => setCheckout(event.target.checked)}
           />
-          Fazer checkout após criar
+          {t("git.checkoutAfterCreate")}
         </label>
         <div className="modal-actions">
           <button className="secondary-button" type="button" onClick={onClose}>
-            Cancelar
+            {t("common.cancel")}
           </button>
           <button
             className="primary-button"
@@ -10285,7 +10868,7 @@ function NewBranchModal({
             disabled={!canCreate}
             onClick={() => onCreate(name.trim(), source, checkout)}
           >
-            Criar branch
+            {t("git.createBranch")}
           </button>
         </div>
       </section>
@@ -10307,6 +10890,7 @@ function RebaseDialog({
   onClose: () => void;
   onSubmit: (steps: RebaseStep[]) => void;
 }) {
+  const { t } = useI18n();
   const [rows, setRows] = useState<Array<{ sha: string; subject: string; action: RebaseAction }>>(
     commits.map((commit) => ({ sha: commit.sha, subject: commit.subject, action: "pick" })),
   );
@@ -10328,17 +10912,18 @@ function RebaseDialog({
         <div className="modal-heading">
           <div>
             <div className="section-label">Git</div>
-            <h2>Rebase interativo</h2>
+            <h2>{t("git.rebase.title")}</h2>
             <p>
-              Replay dos commits sobre <code>{base.slice(0, 8)}</code>. Arraste para reordenar;
-              escolha a ação de cada commit. (Mais antigo no topo.)
+              {t("git.rebase.descPrefix")}
+              <code>{base.slice(0, 8)}</code>
+              {t("git.rebase.descSuffix")}
             </p>
           </div>
           <button
             className="secondary-button icon-button"
             type="button"
             onClick={onClose}
-            aria-label="Fechar"
+            aria-label={t("common.close")}
           >
             <X aria-hidden="true" size={16} />
           </button>
@@ -10384,20 +10969,17 @@ function RebaseDialog({
           ))}
         </div>
 
-        <p className="rebase-hint">
-          reword/squash mantêm a mensagem padrão; conflitos param o rebase e são resolvidos no
-          banner de conflito (Continuar/Abortar).
-        </p>
+        <p className="rebase-hint">{t("git.rebase.hint")}</p>
         <div className="modal-actions">
           <button className="secondary-button" type="button" onClick={onClose}>
-            Cancelar
+            {t("common.cancel")}
           </button>
           <button
             className="primary-button"
             type="button"
             onClick={() => onSubmit(rows.map(({ action, sha }) => ({ action, sha })))}
           >
-            Iniciar rebase
+            {t("git.rebase.start")}
           </button>
         </div>
       </section>
@@ -10421,6 +11003,688 @@ function localGitRefreshLabel(state: LocalGitRefreshState) {
     default:
       return "idle";
   }
+}
+
+/** An interactive xterm bound to a PTY `docker exec` session. I/O flows over the
+ * existing terminal commands (`write_terminal_input`/`resize_terminal_session`) and
+ * the `terminal://output` event. xterm is imported lazily. */
+function DockerExecTerminal({ sessionId }: { sessionId: string }) {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let cleanup: (() => void) | undefined;
+    let term: import("@xterm/xterm").Terminal | undefined;
+    void (async () => {
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import("@xterm/xterm"),
+        import("@xterm/addon-fit"),
+      ]);
+      if (disposed || !mountRef.current) return;
+      const xterm = new Terminal({
+        fontSize: 12,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        cursorBlink: true,
+        scrollback: 5000,
+        theme: { background: "#0c1016", foreground: "#d7e2ed" },
+      });
+      const fit = new FitAddon();
+      xterm.loadAddon(fit);
+      xterm.open(mountRef.current);
+      try {
+        fit.fit();
+      } catch {
+        /* host not measured yet — the ResizeObserver below will fit when visible */
+      }
+      void api.resizeTerminalSession(sessionId, xterm.cols, xterm.rows);
+      xterm.focus();
+      const dataSub = xterm.onData((data) => void api.writeTerminalInput(sessionId, data));
+      const un = await listen<{ session_id: string; data: string }>(
+        "terminal://output",
+        (event) => {
+          if (event.payload.session_id === sessionId) xterm.write(event.payload.data);
+        },
+      );
+      if (disposed) {
+        un();
+        dataSub.dispose();
+        xterm.dispose();
+        return;
+      }
+      unlisten = un;
+      term = xterm;
+      const onResize = () => {
+        try {
+          fit.fit();
+        } catch {
+          /* noop */
+        }
+        void api.resizeTerminalSession(sessionId, xterm.cols, xterm.rows);
+      };
+      window.addEventListener("resize", onResize);
+      const observer = new ResizeObserver(onResize);
+      observer.observe(mountRef.current);
+      cleanup = () => {
+        window.removeEventListener("resize", onResize);
+        observer.disconnect();
+        dataSub.dispose();
+      };
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+      cleanup?.();
+      term?.dispose();
+    };
+  }, [sessionId]);
+  return <div className="docker-term" ref={mountRef} />;
+}
+
+/** Docker tab: resource tree (containers grouped by compose stack, images, networks,
+ * volumes) on the left + a multi-tab dock (live logs + interactive terminals) on the
+ * right. Talks to the `docker` CLI via the docker_* commands; logs stream over
+ * `docker://logs`, exec terminals over `terminal://output`. */
+function DockerWorkbench() {
+  const { t } = useI18n();
+  const { confirm, dialog: confirmDialog } = useConfirm();
+  const { menu, open: openMenu, close: closeMenu } = useContextMenu();
+  const [containers, setContainers] = useState<DockerContainer[]>([]);
+  const [images, setImages] = useState<DockerImage[]>([]);
+  const [networks, setNetworks] = useState<DockerNetwork[]>([]);
+  const [volumes, setVolumes] = useState<DockerVolume[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<string>>(
+    () => new Set(["sec:containers", "sec:images", "sec:networks", "sec:volumes"]),
+  );
+  const [openLogs, setOpenLogs] = useState<{ id: string; name: string }[]>([]);
+  const [openTerms, setOpenTerms] = useState<{ sessionId: string; name: string }[]>([]);
+  const [active, setActive] = useState<{ kind: "log" | "term"; id: string } | null>(null);
+  const [logBuffers, setLogBuffers] = useState<Record<string, string[]>>({});
+  const logViewRef = useRef<HTMLPreElement | null>(null);
+
+  const toggle = (key: string) =>
+    setCollapsed((set) => {
+      const next = new Set(set);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  const refreshAll = useCallback(async () => {
+    setBusy(true);
+    const [c, i, n, v] = await Promise.all([
+      api.dockerListContainers(),
+      api.dockerListImages(),
+      api.dockerListNetworks(),
+      api.dockerListVolumes(),
+    ]);
+    if (c.ok) {
+      setContainers(c.value);
+      setError("");
+    } else {
+      setError(c.error);
+    }
+    if (i.ok) setImages(i.value);
+    if (n.ok) setNetworks(n.value);
+    if (v.ok) setVolumes(v.value);
+    setBusy(false);
+  }, []);
+
+  useEffect(() => {
+    void refreshAll();
+  }, [refreshAll]);
+
+  // Append live log lines streamed from the backend (bounded per container).
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    void listen<{ container_id: string; line: string }>("docker://logs", (event) => {
+      const { container_id, line } = event.payload;
+      setLogBuffers((buffers) => {
+        const current = buffers[container_id] ?? [];
+        return { ...buffers, [container_id]: [...current, line].slice(-1000) };
+      });
+    }).then((un) => (disposed ? un() : unlisteners.push(un)));
+    return () => {
+      disposed = true;
+      unlisteners.forEach((un) => un());
+    };
+  }, []);
+
+  // Stop every live log stream when leaving the Docker tab (component unmount).
+  const openLogsRef = useRef(openLogs);
+  openLogsRef.current = openLogs;
+  const openTermsRef = useRef(openTerms);
+  openTermsRef.current = openTerms;
+  useEffect(() => {
+    return () => {
+      openLogsRef.current.forEach((log) => void api.dockerLogsStop(log.id));
+      openTermsRef.current.forEach((term) => void api.stopTerminalSession(term.sessionId));
+    };
+  }, []);
+
+  // Keep the active log scrolled to the bottom as lines arrive.
+  useEffect(() => {
+    const el = logViewRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logBuffers, active]);
+
+  const containerGroups = useMemo(() => {
+    const map = new Map<string, DockerContainer[]>();
+    for (const container of containers) {
+      const key = container.compose_project ?? "";
+      const list = map.get(key);
+      if (list) list.push(container);
+      else map.set(key, [container]);
+    }
+    return [...map.entries()].sort((a, b) => {
+      if (a[0] === "") return 1;
+      if (b[0] === "") return -1;
+      return a[0].localeCompare(b[0]);
+    });
+  }, [containers]);
+
+  const containerLabel = (container: DockerContainer) =>
+    container.compose_service || container.name || container.id.slice(0, 12);
+
+  function openLog(container: DockerContainer) {
+    const name = containerLabel(container);
+    setOpenLogs((logs) =>
+      logs.some((log) => log.id === container.id) ? logs : [...logs, { id: container.id, name }],
+    );
+    setLogBuffers((buffers) =>
+      buffers[container.id] ? buffers : { ...buffers, [container.id]: [] },
+    );
+    setActive({ kind: "log", id: container.id });
+    void api.dockerLogsStart(container.id);
+  }
+
+  function closeLog(id: string) {
+    void api.dockerLogsStop(id);
+    setActive((current) => (current?.kind === "log" && current.id === id ? null : current));
+    setOpenLogs((logs) => logs.filter((log) => log.id !== id));
+    setLogBuffers((buffers) => {
+      const next = { ...buffers };
+      delete next[id];
+      return next;
+    });
+  }
+
+  async function openTerminal(container: DockerContainer) {
+    const result = await api.createDockerExecSession(container.id);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    const name = containerLabel(container);
+    setOpenTerms((terms) =>
+      terms.some((term) => term.sessionId === result.value.id)
+        ? terms
+        : [...terms, { sessionId: result.value.id, name }],
+    );
+    setActive({ kind: "term", id: result.value.id });
+  }
+
+  function closeTerminal(sessionId: string) {
+    void api.stopTerminalSession(sessionId);
+    setActive((current) => (current?.kind === "term" && current.id === sessionId ? null : current));
+    setOpenTerms((terms) => terms.filter((term) => term.sessionId !== sessionId));
+  }
+
+  async function runContainerAction(
+    container: DockerContainer,
+    action: "start" | "stop" | "restart" | "remove",
+  ) {
+    if (action === "remove") {
+      const ok = await confirm({
+        title: t("docker.removeTitle"),
+        body: t("docker.removeBody", { name: containerLabel(container) }),
+        confirmLabel: t("common.remove"),
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    const result = await api.dockerContainerAction(container.id, action);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    if (action === "remove") closeLog(container.id);
+    const refreshed = await api.dockerListContainers();
+    if (refreshed.ok) setContainers(refreshed.value);
+  }
+
+  async function removeResource(
+    kind: "image" | "network" | "volume",
+    id: string,
+    name: string,
+  ) {
+    const ok = await confirm({
+      title: t("docker.removeTitle"),
+      body: t("docker.removeBody", { name }),
+      confirmLabel: t("common.remove"),
+      danger: true,
+    });
+    if (!ok) return;
+    const result =
+      kind === "image"
+        ? await api.dockerRemoveImage(id)
+        : kind === "network"
+          ? await api.dockerRemoveNetwork(id)
+          : await api.dockerRemoveVolume(id);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    void refreshAll();
+  }
+
+  const copyText = (text: string) => {
+    if (navigator.clipboard) void navigator.clipboard.writeText(text);
+  };
+
+  function containerMenu(container: DockerContainer): MenuItem[] {
+    const running = container.state === "running";
+    return [
+      { label: t("docker.logs"), icon: <FileText size={14} />, onSelect: () => openLog(container) },
+      {
+        label: t("docker.terminal"),
+        icon: <SquareTerminal size={14} />,
+        disabled: !running,
+        onSelect: () => void openTerminal(container),
+      },
+      { separator: true },
+      {
+        label: t("docker.start"),
+        icon: <Play size={14} />,
+        disabled: running,
+        onSelect: () => void runContainerAction(container, "start"),
+      },
+      {
+        label: t("docker.stop"),
+        icon: <Square size={14} />,
+        disabled: !running,
+        onSelect: () => void runContainerAction(container, "stop"),
+      },
+      {
+        label: t("docker.restart"),
+        icon: <RotateCw size={14} />,
+        onSelect: () => void runContainerAction(container, "restart"),
+      },
+      { separator: true },
+      { label: t("docker.copyId"), icon: <Copy size={14} />, onSelect: () => copyText(container.id) },
+      {
+        label: t("common.remove"),
+        icon: <Trash2 size={14} />,
+        danger: true,
+        onSelect: () => void runContainerAction(container, "remove"),
+      },
+    ];
+  }
+
+  const SectionHead = ({
+    id,
+    label,
+    count,
+    icon,
+  }: {
+    id: string;
+    label: string;
+    count: number;
+    icon: ReactNode;
+  }) => (
+    <button type="button" className="docker-section-head" onClick={() => toggle(id)}>
+      {collapsed.has(id) ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+      {icon}
+      <span>{label}</span>
+      <span className="docker-count">{count}</span>
+    </button>
+  );
+
+  return (
+    <div className="docker-workbench">
+      <aside className="docker-tree">
+        <header className="docker-topbar screen-topbar">
+          <span className="topbar-title">Docker</span>
+          <button
+            type="button"
+            className="topbar-btn"
+            onClick={() => void refreshAll()}
+            disabled={busy}
+            title={t("common.refresh")}
+          >
+            <RefreshCw aria-hidden="true" size={14} className={busy ? "spin" : undefined} />
+            {t("common.refresh")}
+          </button>
+        </header>
+        {error ? <div className="docker-error">{t("docker.unavailable")} — {error}</div> : null}
+        <div className="docker-sections">
+          <SectionHead
+            id="sec:containers"
+            label={t("docker.containers")}
+            count={containers.length}
+            icon={<Container aria-hidden="true" size={13} />}
+          />
+          {!collapsed.has("sec:containers")
+            ? containerGroups.length
+              ? containerGroups.map(([project, list]) => {
+                  const groupKey = `grp:${project}`;
+                  return (
+                    <div key={groupKey} className="docker-group">
+                      <button
+                        type="button"
+                        className="docker-group-head"
+                        onClick={() => toggle(groupKey)}
+                      >
+                        {collapsed.has(groupKey) ? (
+                          <ChevronRight size={12} />
+                        ) : (
+                          <ChevronDown size={12} />
+                        )}
+                        <Boxes aria-hidden="true" size={12} />
+                        <span>{project || t("docker.standalone")}</span>
+                      </button>
+                      {!collapsed.has(groupKey)
+                        ? list.map((container) => (
+                            <div
+                              key={container.id}
+                              className="docker-row"
+                              onContextMenu={(event) => openMenu(event, containerMenu(container))}
+                            >
+                              <button
+                                type="button"
+                                className="docker-row-main"
+                                title={container.status}
+                                onDoubleClick={() => openLog(container)}
+                              >
+                                <span
+                                  className={
+                                    container.state === "running"
+                                      ? "docker-dot on"
+                                      : "docker-dot off"
+                                  }
+                                />
+                                <span className="docker-row-text">
+                                  <span className="docker-row-name">
+                                    {containerLabel(container)}
+                                  </span>
+                                  <small className="docker-row-sub">
+                                    {container.image}
+                                    {container.ports ? ` · ${container.ports}` : ""}
+                                  </small>
+                                </span>
+                              </button>
+                              <div className="docker-row-actions">
+                                <button
+                                  type="button"
+                                  className="docker-row-act"
+                                  title={t("docker.logs")}
+                                  onClick={() => openLog(container)}
+                                >
+                                  <FileText aria-hidden="true" size={13} />
+                                </button>
+                                {container.state === "running" ? (
+                                  <button
+                                    type="button"
+                                    className="docker-row-act"
+                                    title={t("docker.stop")}
+                                    onClick={() => void runContainerAction(container, "stop")}
+                                  >
+                                    <Square aria-hidden="true" size={13} />
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="docker-row-act"
+                                    title={t("docker.start")}
+                                    onClick={() => void runContainerAction(container, "start")}
+                                  >
+                                    <Play aria-hidden="true" size={13} />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))
+                        : null}
+                    </div>
+                  );
+                })
+              : <div className="docker-empty">{t("docker.empty")}</div>
+            : null}
+
+          <SectionHead
+            id="sec:images"
+            label={t("docker.images")}
+            count={images.length}
+            icon={<Boxes aria-hidden="true" size={13} />}
+          />
+          {!collapsed.has("sec:images")
+            ? images.map((image) => {
+                const name =
+                  image.tag && image.tag !== "<none>"
+                    ? `${image.repository}:${image.tag}`
+                    : image.repository;
+                return (
+                  <div
+                    key={`${image.id}:${image.repository}:${image.tag}`}
+                    className="docker-row"
+                    onContextMenu={(event) =>
+                      openMenu(event, [
+                        { label: t("docker.copyId"), icon: <Copy size={14} />, onSelect: () => copyText(image.id) },
+                        {
+                          label: t("common.remove"),
+                          icon: <Trash2 size={14} />,
+                          danger: true,
+                          onSelect: () => void removeResource("image", image.id, name),
+                        },
+                      ])
+                    }
+                  >
+                    <div className="docker-row-main static">
+                      <Boxes aria-hidden="true" size={12} className="docker-row-icon" />
+                      <span className="docker-row-text">
+                        <span className="docker-row-name">{name}</span>
+                        <small className="docker-row-sub">{image.size}</small>
+                      </span>
+                    </div>
+                    <div className="docker-row-actions">
+                      <button
+                        type="button"
+                        className="docker-row-act"
+                        title={t("common.remove")}
+                        onClick={() => void removeResource("image", image.id, name)}
+                      >
+                        <Trash2 aria-hidden="true" size={13} />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            : null}
+
+          <SectionHead
+            id="sec:networks"
+            label={t("docker.networks")}
+            count={networks.length}
+            icon={<Boxes aria-hidden="true" size={13} />}
+          />
+          {!collapsed.has("sec:networks")
+            ? networks.map((network) => (
+                <div
+                  key={network.id}
+                  className="docker-row"
+                  onContextMenu={(event) =>
+                    openMenu(event, [
+                      { label: t("docker.copyId"), icon: <Copy size={14} />, onSelect: () => copyText(network.id) },
+                      {
+                        label: t("common.remove"),
+                        icon: <Trash2 size={14} />,
+                        danger: true,
+                        onSelect: () => void removeResource("network", network.id, network.name),
+                      },
+                    ])
+                  }
+                >
+                  <div className="docker-row-main static">
+                    <span className="docker-row-text">
+                      <span className="docker-row-name">{network.name}</span>
+                      <small className="docker-row-sub">{network.driver}</small>
+                    </span>
+                  </div>
+                  <div className="docker-row-actions">
+                    <button
+                      type="button"
+                      className="docker-row-act"
+                      title={t("common.remove")}
+                      onClick={() => void removeResource("network", network.id, network.name)}
+                    >
+                      <Trash2 aria-hidden="true" size={13} />
+                    </button>
+                  </div>
+                </div>
+              ))
+            : null}
+
+          <SectionHead
+            id="sec:volumes"
+            label={t("docker.volumes")}
+            count={volumes.length}
+            icon={<Boxes aria-hidden="true" size={13} />}
+          />
+          {!collapsed.has("sec:volumes")
+            ? volumes.map((volume) => (
+                <div
+                  key={volume.name}
+                  className="docker-row"
+                  onContextMenu={(event) =>
+                    openMenu(event, [
+                      { label: t("docker.copyId"), icon: <Copy size={14} />, onSelect: () => copyText(volume.name) },
+                      {
+                        label: t("common.remove"),
+                        icon: <Trash2 size={14} />,
+                        danger: true,
+                        onSelect: () => void removeResource("volume", volume.name, volume.name),
+                      },
+                    ])
+                  }
+                >
+                  <div className="docker-row-main static" title={volume.mountpoint}>
+                    <span className="docker-row-text">
+                      <span className="docker-row-name">{volume.name}</span>
+                      <small className="docker-row-sub">{volume.driver}</small>
+                    </span>
+                  </div>
+                  <div className="docker-row-actions">
+                    <button
+                      type="button"
+                      className="docker-row-act"
+                      title={t("common.remove")}
+                      onClick={() => void removeResource("volume", volume.name, volume.name)}
+                    >
+                      <Trash2 aria-hidden="true" size={13} />
+                    </button>
+                  </div>
+                </div>
+              ))
+            : null}
+        </div>
+      </aside>
+
+      <section className="docker-logs">
+        {openLogs.length || openTerms.length ? (
+          <>
+            <div className="docker-log-tabs">
+              {openLogs.map((log) => (
+                <div
+                  key={`log:${log.id}`}
+                  className={
+                    active?.kind === "log" && active.id === log.id
+                      ? "docker-log-tab active"
+                      : "docker-log-tab"
+                  }
+                >
+                  <button
+                    type="button"
+                    className="docker-log-tab-name"
+                    onClick={() => setActive({ kind: "log", id: log.id })}
+                    title={log.name}
+                  >
+                    <FileText aria-hidden="true" size={12} />
+                    {log.name}
+                  </button>
+                  <button
+                    type="button"
+                    className="docker-log-tab-close"
+                    aria-label={t("common.close")}
+                    onClick={() => closeLog(log.id)}
+                  >
+                    <X aria-hidden="true" size={11} />
+                  </button>
+                </div>
+              ))}
+              {openTerms.map((term) => (
+                <div
+                  key={`term:${term.sessionId}`}
+                  className={
+                    active?.kind === "term" && active.id === term.sessionId
+                      ? "docker-log-tab active"
+                      : "docker-log-tab"
+                  }
+                >
+                  <button
+                    type="button"
+                    className="docker-log-tab-name"
+                    onClick={() => setActive({ kind: "term", id: term.sessionId })}
+                    title={term.name}
+                  >
+                    <SquareTerminal aria-hidden="true" size={12} />
+                    {term.name}
+                  </button>
+                  <button
+                    type="button"
+                    className="docker-log-tab-close"
+                    aria-label={t("common.close")}
+                    onClick={() => closeTerminal(term.sessionId)}
+                  >
+                    <X aria-hidden="true" size={11} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="docker-dock-body">
+              {/* Terminals stay mounted (preserving the xterm session/scrollback); show only the active one. */}
+              {openTerms.map((term) => (
+                <div
+                  key={term.sessionId}
+                  className="docker-term-host"
+                  style={{
+                    display:
+                      active?.kind === "term" && active.id === term.sessionId ? "block" : "none",
+                  }}
+                >
+                  <DockerExecTerminal sessionId={term.sessionId} />
+                </div>
+              ))}
+              {active?.kind === "log" ? (
+                <pre className="docker-log-view" ref={logViewRef}>
+                  {(logBuffers[active.id] ?? []).join("\n")}
+                </pre>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <div className="docker-logs-empty">
+            <FileText aria-hidden="true" size={28} />
+            <p>{t("docker.noLogs")}</p>
+          </div>
+        )}
+      </section>
+
+      {confirmDialog}
+      {menu ? <ContextMenu {...menu} onClose={closeMenu} /> : null}
+    </div>
+  );
 }
 
 function GitWorkbench({
@@ -10450,6 +11714,7 @@ function GitWorkbench({
   sidebarWidth: number;
   onSidebarResize: (width: number) => void;
 }) {
+  const { t } = useI18n();
   const [view, setView] = useState<GitView>("local");
   const [sidebarMode, setSidebarMode] = useState<"commits" | "branches" | "stashes">("commits");
   const [aiCommitBusy, setAiCommitBusy] = useState(false);
@@ -10740,25 +12005,29 @@ function GitWorkbench({
         onSelect: () => void run("Checkout commit", () => api.gitCheckoutCommit(path, commit.sha)),
       },
       {
-        label: "Criar branch aqui…",
+        label: t("git.menu.createBranchHere"),
         onSelect: () =>
           void prompt({
-            title: "Criar branch aqui",
-            label: "Nome",
+            title: t("git.prompt.createBranchHereTitle"),
+            label: t("git.prompt.nameLabel"),
             initial: `branch-${commit.short_sha}`,
           }).then((name) => {
-            if (name) void run("Branch criada", () => api.gitCreateBranch(path, name, commit.sha));
+            if (name)
+              void run(t("git.run.branchCreated"), () =>
+                api.gitCreateBranch(path, name, commit.sha),
+              );
           }),
       },
       {
-        label: "Criar tag aqui…",
+        label: t("git.menu.createTagHere"),
         onSelect: () =>
           void prompt({
-            title: "Criar tag aqui",
-            label: "Nome",
+            title: t("git.prompt.createTagHereTitle"),
+            label: t("git.prompt.nameLabel"),
             initial: `tag-${commit.short_sha}`,
           }).then((name) => {
-            if (name) void run("Tag criada", () => api.gitCreateTag(path, name, commit.sha));
+            if (name)
+              void run(t("git.run.tagCreated"), () => api.gitCreateTag(path, name, commit.sha));
           }),
       },
       { separator: true },
@@ -10788,7 +12057,7 @@ function GitWorkbench({
             onSelect: () =>
               void confirm({
                 title: "Reset --hard?",
-                body: "Descarta mudanças locais até esse commit.",
+                body: t("git.confirm.resetHardBody"),
                 danger: true,
                 confirmLabel: "Reset --hard",
               }).then((ok) => {
@@ -10797,11 +12066,11 @@ function GitWorkbench({
           },
         ],
       },
-      { label: "Rebase interativo a partir daqui", onSelect: () => openRebase(commit.sha) },
+      { label: t("git.menu.interactiveRebaseHere"), onSelect: () => openRebase(commit.sha) },
       { separator: true },
-      { label: "Copiar SHA", onSelect: () => void navigator.clipboard?.writeText(commit.sha) },
+      { label: t("git.menu.copySha"), onSelect: () => void navigator.clipboard?.writeText(commit.sha) },
       {
-        label: "Copiar mensagem",
+        label: t("git.menu.copyMessage"),
         onSelect: () => void navigator.clipboard?.writeText(commit.subject),
       },
     ];
@@ -10812,42 +12081,46 @@ function GitWorkbench({
     return [
       { label: "Checkout", disabled: isHead, onSelect: () => requestCheckout(leaf.full) },
       {
-        label: "Criar branch a partir desta…",
+        label: t("git.menu.createBranchFrom"),
         onSelect: () => setNewBranchModal({ source: leaf.full }),
       },
       {
-        label: "Merge na atual",
+        label: t("git.menu.mergeIntoCurrent"),
         disabled: isHead,
         onSelect: () => void run(`Merge ${leaf.full}`, () => api.gitMergeBranch(path, leaf.full)),
       },
       {
-        label: "Rebase atual sobre esta",
+        label: t("git.menu.rebaseCurrentOnto"),
         disabled: isHead,
         onSelect: () =>
           void run(`Rebase onto ${leaf.full}`, () => api.gitRebaseBranch(path, leaf.full)),
       },
       { separator: true },
       {
-        label: "Renomear…",
+        label: t("git.menu.rename"),
         onSelect: () =>
-          void prompt({ title: "Renomear branch", label: "Novo nome", initial: leaf.full }).then(
-            (name) => {
-              if (name && name !== leaf.full)
-                void run("Branch renomeada", () => api.gitRenameBranch(path, leaf.full, name));
-            },
-          ),
+          void prompt({
+            title: t("git.prompt.renameBranchTitle"),
+            label: t("git.prompt.newNameLabel"),
+            initial: leaf.full,
+          }).then((name) => {
+            if (name && name !== leaf.full)
+              void run(t("git.run.branchRenamed"), () =>
+                api.gitRenameBranch(path, leaf.full, name),
+              );
+          }),
       },
       {
-        label: "Excluir",
+        label: t("git.menu.delete"),
         danger: true,
         disabled: isHead,
         onSelect: () =>
           void confirm({
-            title: `Excluir branch ${leaf.full}?`,
+            title: t("git.confirm.deleteBranchTitle", { name: leaf.full }),
             danger: true,
-            confirmLabel: "Excluir",
+            confirmLabel: t("git.menu.delete"),
           }).then((ok) => {
-            if (ok) void run("Branch excluída", () => api.gitDeleteBranch(path, leaf.full));
+            if (ok) void run(t("git.run.branchDeleted"), () => api.gitDeleteBranch(path, leaf.full));
           }),
       },
       { separator: true },
@@ -10867,15 +12140,15 @@ function GitWorkbench({
         onSelect: () => void run("Checkout tag", () => api.gitCheckoutCommit(path, sha)),
       },
       {
-        label: "Excluir",
+        label: t("git.menu.delete"),
         danger: true,
         onSelect: () =>
           void confirm({
-            title: `Excluir tag ${name}?`,
+            title: t("git.confirm.deleteTagTitle", { name }),
             danger: true,
-            confirmLabel: "Excluir",
+            confirmLabel: t("git.menu.delete"),
           }).then((ok) => {
-            if (ok) void run("Tag excluída", () => api.gitDeleteTag(path, name));
+            if (ok) void run(t("git.run.tagDeleted"), () => api.gitDeleteTag(path, name));
           }),
       },
     ];
@@ -10884,29 +12157,35 @@ function GitWorkbench({
   function stashMenuItems(index: number): MenuItem[] {
     return [
       {
-        label: "Pop (aplicar e remover)",
+        label: t("git.menu.stashPop"),
         onSelect: () => void run("Stash pop", () => api.gitStashPop(path, index)),
       },
       {
-        label: "Apply (aplicar e manter)",
+        label: t("git.menu.stashApply"),
         onSelect: () => void run("Stash apply", () => api.gitStashApply(path, index)),
       },
       {
-        label: "Drop (descartar)",
+        label: t("git.menu.stashDrop"),
         danger: true,
         onSelect: () =>
-          void confirm({ title: "Descartar stash?", danger: true, confirmLabel: "Drop" }).then(
-            (ok) => {
-              if (ok) void run("Stash drop", () => api.gitStashDrop(path, index));
-            },
-          ),
+          void confirm({
+            title: t("git.confirm.dropStashTitle"),
+            danger: true,
+            confirmLabel: "Drop",
+          }).then((ok) => {
+            if (ok) void run("Stash drop", () => api.gitStashDrop(path, index));
+          }),
       },
     ];
   }
 
   function saveStash() {
-    void prompt({ title: "Stash", label: "Mensagem", initial: "WIP" }).then((message) => {
-      if (message) void run("Stash criado", () => api.gitStashSave(path, message, true));
+    void prompt({
+      title: t("git.prompt.stashTitle"),
+      label: t("git.prompt.messageLabel"),
+      initial: "WIP",
+    }).then((message) => {
+      if (message) void run(t("git.run.stashCreated"), () => api.gitStashSave(path, message, true));
     });
   }
 
@@ -10948,7 +12227,7 @@ function GitWorkbench({
 
   function openRebase(sha: string) {
     if (repoState?.dirty) {
-      setError("Faça commit ou stash das mudanças antes do rebase interativo.");
+      setError(t("git.error.commitBeforeRebase"));
       return;
     }
     setRebaseBase(sha);
@@ -10956,7 +12235,7 @@ function GitWorkbench({
 
   function startRebase(base: string, steps: RebaseStep[]) {
     setRebaseBase(null);
-    void run("Rebase interativo", () => api.gitStartInteractiveRebase(path, base, steps));
+    void run(t("git.run.interactiveRebase"), () => api.gitStartInteractiveRebase(path, base, steps));
   }
 
   function createNewBranch(name: string, source: string, checkout: boolean) {
@@ -11069,10 +12348,10 @@ function GitWorkbench({
         <div className="git-conflict-banner">
           <div className="git-conflict-head">
             <span>
-              <strong>{repoState.operation}</strong> em progresso
+              <strong>{repoState.operation}</strong> {t("git.opInProgress")}
               {repoState.conflicts.length
-                ? ` — ${repoState.conflicts.length} conflito(s)`
-                : " — sem conflitos"}
+                ? t("git.conflictsSuffix", { count: repoState.conflicts.length })
+                : t("git.noConflictsSuffix")}
               .
             </span>
             <div>
@@ -11083,14 +12362,14 @@ function GitWorkbench({
                 className="primary-button"
                 type="button"
                 disabled={busy || repoState.conflicts.length > 0}
-                title={repoState.conflicts.length ? "Resolva os conflitos primeiro" : undefined}
+                title={repoState.conflicts.length ? t("git.resolveConflictsFirst") : undefined}
                 onClick={() =>
-                  void run("Continuar", () =>
+                  void run(t("git.continue"), () =>
                     api.gitContinueOperation(path, repoState.operation as string),
                   )
                 }
               >
-                Continuar
+                {t("git.continue")}
               </button>
               <button
                 className="secondary-button"
@@ -11101,7 +12380,7 @@ function GitWorkbench({
                   )
                 }
               >
-                Abortar
+                {t("git.abort")}
               </button>
             </div>
           </div>
@@ -11114,23 +12393,27 @@ function GitWorkbench({
                     <button
                       type="button"
                       className="ghost-button"
-                      onClick={() => void run("Usar ours", () => api.gitUseOurs(path, file))}
+                      onClick={() => void run(t("git.useOurs"), () => api.gitUseOurs(path, file))}
                     >
-                      Usar ours
+                      {t("git.useOurs")}
                     </button>
                     <button
                       type="button"
                       className="ghost-button"
-                      onClick={() => void run("Usar theirs", () => api.gitUseTheirs(path, file))}
+                      onClick={() =>
+                        void run(t("git.useTheirs"), () => api.gitUseTheirs(path, file))
+                      }
                     >
-                      Usar theirs
+                      {t("git.useTheirs")}
                     </button>
                     <button
                       type="button"
                       className="ghost-button"
-                      onClick={() => void run("Resolvido", () => api.gitMarkResolved(path, file))}
+                      onClick={() =>
+                        void run(t("git.run.resolved"), () => api.gitMarkResolved(path, file))
+                      }
                     >
-                      Marcar resolvido
+                      {t("git.markResolved")}
                     </button>
                   </span>
                 </li>
@@ -11194,7 +12477,7 @@ function GitWorkbench({
                   <span className="commit-hash">worktree</span>
                   <span className="commit-msg">Local Changes</span>
                   <span className="commit-meta">
-                    <span className="commit-author">{changedCount} arquivos</span>
+                    <span className="commit-author">{t("git.changedFiles", { count: changedCount })}</span>
                     <span>{localGitRefreshLabel(diffProps.refreshState ?? "idle")}</span>
                   </span>
                 </button>
@@ -11202,7 +12485,7 @@ function GitWorkbench({
                   className="git-commit-search"
                   type="search"
                   value={commitQuery}
-                  placeholder="Buscar commits"
+                  placeholder={t("git.searchCommits")}
                   onChange={(e) => setCommitQuery(e.target.value)}
                 />
                 {visibleCommits.map((commit) => (
@@ -11227,19 +12510,19 @@ function GitWorkbench({
                     type="button"
                     onClick={() => setLimit((n) => n + 200)}
                   >
-                    Carregar mais
+                    {t("git.loadMore")}
                   </button>
                 ) : null}
               </div>
             ) : sidebarMode === "branches" ? (
               <>
                 <div className="git-section-head">
-                  <span>Branches</span>
+                  <span>{t("git.branches")}</span>
                   <button
                     className="ghost-button icon-only"
                     type="button"
-                    title="Nova branch"
-                    aria-label="Nova branch"
+                    title={t("git.newBranch")}
+                    aria-label={t("git.newBranch")}
                     onClick={() => setNewBranchModal({ source: currentBranch ?? "" })}
                   >
                     <Plus aria-hidden="true" size={14} />
@@ -11260,7 +12543,7 @@ function GitWorkbench({
                 {remoteBranches.length ? (
                   <>
                     <div className="git-section-head">
-                      <span>Remotes</span>
+                      <span>{t("git.remotes")}</span>
                     </div>
                     <div className="git-ref-list">
                       <GitRefTree
@@ -11275,7 +12558,7 @@ function GitWorkbench({
                 {tags.length ? (
                   <>
                     <div className="git-section-head">
-                      <span>Tags</span>
+                      <span>{t("git.tags")}</span>
                     </div>
                     <div className="git-ref-list">
                       {tags.map((tag) => (
@@ -11298,20 +12581,20 @@ function GitWorkbench({
                 {submodules.length ? (
                   <>
                     <div className="git-section-head">
-                      <span>Submódulos</span>
+                      <span>{t("git.submodules")}</span>
                       <button
                         className="git-ref-action"
                         type="button"
                         title="submodule sync + update --init --recursive"
                         disabled={busy}
                         onClick={() =>
-                          void run("Submódulos atualizados", async () => {
+                          void run(t("git.run.submodulesUpdated"), async () => {
                             await api.gitSyncSubmodules(path);
                             return api.gitUpdateAllSubmodules(path, true);
                           })
                         }
                       >
-                        atualizar todos
+                        {t("git.updateAll")}
                       </button>
                     </div>
                     <div className="git-ref-list">
@@ -11334,7 +12617,7 @@ function GitWorkbench({
                             title="submodule update --init --recursive"
                             disabled={busy}
                             onClick={() =>
-                              void run("Submódulo atualizado", () =>
+                              void run(t("git.run.submoduleUpdated"), () =>
                                 api.gitUpdateSubmodule(path, sub.path, true),
                               )
                             }
@@ -11344,10 +12627,10 @@ function GitWorkbench({
                           <button
                             className="git-ref-action"
                             type="button"
-                            title="submodule update --remote (seguir branch rastreada)"
+                            title={t("git.submoduleRemoteTitle")}
                             disabled={busy}
                             onClick={() =>
-                              void run("Submódulo (branch) atualizado", () =>
+                              void run(t("git.run.submoduleRemoteUpdated"), () =>
                                 api.gitUpdateSubmoduleRemote(path, sub.path),
                               )
                             }
@@ -11358,10 +12641,10 @@ function GitWorkbench({
                             <button
                               className="git-ref-action"
                               type="button"
-                              title="checkout da branch rastreada (sai do detached HEAD)"
+                              title={t("git.submoduleBranchTitle")}
                               disabled={busy}
                               onClick={() =>
-                                void run("Submódulo na branch", () =>
+                                void run(t("git.run.submoduleOnBranch"), () =>
                                   api.gitCheckoutSubmoduleBranch(path, sub.path),
                                 )
                               }
@@ -11378,7 +12661,7 @@ function GitWorkbench({
             ) : (
               <div className="commit-list">
                 <button className="secondary-button" type="button" onClick={saveStash} disabled={busy}>
-                  <Archive aria-hidden="true" size={14} /> Criar stash
+                  <Archive aria-hidden="true" size={14} /> {t("git.createStash")}
                 </button>
                 {stashes.length ? (
                   stashes.map((stash) => (
@@ -11399,7 +12682,7 @@ function GitWorkbench({
                     </button>
                   ))
                 ) : (
-                  <div className="empty-note">Nenhum stash salvo.</div>
+                  <div className="empty-note">{t("git.noStash")}</div>
                 )}
               </div>
             )}
@@ -11410,7 +12693,7 @@ function GitWorkbench({
           className="git-sidebar-resizer"
           role="separator"
           aria-orientation="vertical"
-          aria-label="Redimensionar lista de branches"
+          aria-label={t("git.resizeBranchList")}
           onMouseDown={startSidebarResize}
         />
 
@@ -11427,7 +12710,7 @@ function GitWorkbench({
                         className="ai-commit-btn"
                         type="button"
                         disabled={busy || aiCommitBusy || !aiProfileValue}
-                        title="Gerar mensagem de commit com IA a partir das mudanças"
+                        title={t("git.aiCommitTitle")}
                         onClick={async () => {
                           setAiCommitBusy(true);
                           const message = await onRequestAiCommit(aiProfileValue);
@@ -11482,7 +12765,7 @@ function GitWorkbench({
                         <select
                           className="git-ai-profile-select"
                           value={aiProfileValue ?? ""}
-                          aria-label="Agente do AI Commit"
+                          aria-label={t("git.aiCommitAgent")}
                           disabled={busy || aiCommitBusy}
                           onChange={(event) => {
                             const value = Number(event.target.value);
@@ -11523,7 +12806,7 @@ function GitWorkbench({
                   className="git-commit-search"
                   type="search"
                   value={commitQuery}
-                  placeholder="Buscar (mensagem, autor, SHA)"
+                  placeholder={t("git.searchPlaceholder")}
                   onChange={(e) => setCommitQuery(e.target.value)}
                 />
                 <label className="git-toggle">
@@ -11532,7 +12815,7 @@ function GitWorkbench({
                     checked={includeRemotes}
                     onChange={(e) => setIncludeRemotes(e.target.checked)}
                   />{" "}
-                  remotas
+                  {t("git.remotesToggle")}
                 </label>
                 <label className="git-toggle">
                   <input
@@ -11556,10 +12839,7 @@ function GitWorkbench({
                   onContextMenu={(commit, event) => openMenu(event, commitMenuItems(commit))}
                 />
                 {commitQuery.trim() && commits.length >= limit ? (
-                  <div className="git-graph-hint">
-                    Buscando só nos primeiros {commits.length} commits — use “Carregar mais” para ir
-                    mais fundo.
-                  </div>
+                  <div className="git-graph-hint">{t("git.searchHint", { count: commits.length })}</div>
                 ) : null}
                 {commits.length >= limit ? (
                   <button
@@ -11567,7 +12847,7 @@ function GitWorkbench({
                     type="button"
                     onClick={() => setLimit((n) => n + 200)}
                   >
-                    Carregar mais
+                    {t("git.loadMore")}
                   </button>
                 ) : null}
               </div>
@@ -11598,7 +12878,7 @@ function GitWorkbench({
                             className="secondary-button"
                             onClick={() => void navigator.clipboard?.writeText(selectedStash.label)}
                           >
-                            Copiar ref
+                            {t("git.copyRef")}
                           </button>
                           <button
                             type="button"
@@ -11636,7 +12916,7 @@ function GitWorkbench({
                             disabled={busy}
                             onClick={() =>
                               void confirm({
-                                title: "Descartar stash?",
+                                title: t("git.confirm.dropStashTitle"),
                                 danger: true,
                                 confirmLabel: "Drop",
                               }).then((ok) => {
@@ -11663,7 +12943,7 @@ function GitWorkbench({
                             className="secondary-button"
                             onClick={() => void navigator.clipboard?.writeText(detail.sha)}
                           >
-                            Copiar SHA
+                            {t("git.menu.copySha")}
                           </button>
                           <button
                             type="button"
@@ -11690,12 +12970,12 @@ function GitWorkbench({
                             className="secondary-button"
                             disabled={busy}
                             onClick={() =>
-                              void run("Branch criada", () =>
+                              void run(t("git.run.branchCreated"), () =>
                                 api.gitCreateBranch(path, `branch-${detail.short_sha}`, detail.sha),
                               )
                             }
                           >
-                            Branch aqui
+                            {t("git.branchHere")}
                           </button>
                           <button
                             type="button"
@@ -11714,7 +12994,7 @@ function GitWorkbench({
                             className="secondary-button"
                             disabled={busy}
                             onClick={() =>
-                              void run("Tag criada", () =>
+                              void run(t("git.run.tagCreated"), () =>
                                 api.gitCreateTag(path, `tag-${detail.short_sha}`, detail.sha),
                               )
                             }
@@ -11839,10 +13119,11 @@ function GitWorkbench({
           >
             <div className="modal-heading">
               <div>
-                <h2 id="checkout-confirm-title">Mudanças pendentes</h2>
+                <h2 id="checkout-confirm-title">{t("git.checkout.pendingTitle")}</h2>
                 <p>
-                  Há alterações não commitadas. O que fazer ao trocar para{" "}
-                  <strong>{pendingCheckout}</strong>?
+                  {t("git.checkout.pendingBodyPrefix")}
+                  <strong>{pendingCheckout}</strong>
+                  {t("git.checkout.pendingBodySuffix")}
                 </p>
               </div>
             </div>
@@ -11852,28 +13133,28 @@ function GitWorkbench({
                 type="button"
                 onClick={() => doCheckout(pendingCheckout, "stash_apply")}
               >
-                Stash + aplicar na branch destino
+                {t("git.checkout.stashApply")}
               </button>
               <button
                 className="secondary-button"
                 type="button"
                 onClick={() => doCheckout(pendingCheckout, "stash")}
               >
-                Só fazer stash (guardar)
+                {t("git.checkout.stashOnly")}
               </button>
               <button
                 className="secondary-button checkout-discard"
                 type="button"
                 onClick={() => doCheckout(pendingCheckout, "discard")}
               >
-                Descartar mudanças
+                {t("git.checkout.discard")}
               </button>
               <button
                 className="secondary-button"
                 type="button"
                 onClick={() => setPendingCheckout(null)}
               >
-                Cancelar
+                {t("common.cancel")}
               </button>
             </div>
           </section>
@@ -11993,7 +13274,7 @@ function DiffView({
   hunkActionLabel,
   onHunkAction,
   onHunkDiscard,
-  emptyLabel = "Selecione um arquivo.",
+  emptyLabel,
 }: {
   patch: FilePatch | null;
   language: SourceLanguage;
@@ -12003,8 +13284,9 @@ function DiffView({
   onHunkDiscard?: (hunk: PatchHunk) => void;
   emptyLabel?: string;
 }) {
+  const { t } = useI18n();
   if (!patch || (!patch.patch && patch.hunks.length === 0)) {
-    return <div className="diff-empty">{emptyLabel}</div>;
+    return <div className="diff-empty">{emptyLabel ?? t("diff.selectFile")}</div>;
   }
   const blocks = parsePatchToBlocks(patch);
   return (
@@ -12131,6 +13413,7 @@ function DiffPanel({
   onListResize: (width: number) => void;
   commitSlot?: ReactNode;
 }) {
+  const { t } = useI18n();
   const groups = groupChangedFiles(changedFiles);
   const selectedCanStageHunks = canStageHunks(selectedFile);
   const layoutRef = useRef<HTMLDivElement>(null);
@@ -12290,9 +13573,7 @@ function DiffPanel({
               />
             ) : (
               <div className="diff-empty">
-                {diffBusy
-                  ? "Carregando patch..."
-                  : "Nenhum patch selecionado. Arquivos staged, untracked ou binários podem precisar de revisão por arquivo."}
+                {diffBusy ? t("diff.loadingPatch") : t("diff.noPatchSelected")}
               </div>
             )}
           </div>
@@ -12300,7 +13581,7 @@ function DiffPanel({
       {commitSlot}
 
       <details className="imported-patch-details">
-        <summary>Importar patch (avançado)</summary>
+        <summary>{t("diff.importPatchAdvanced")}</summary>
         <section className="imported-patch-panel" aria-label="Imported patch review">
           <div className="patch-meta">
             <div>
@@ -12376,6 +13657,7 @@ function ChangedFileNodes({
   onContextFile?: (file: ChangedFile, event: ReactMouseEvent) => void;
   selectedFile: ChangedFile | null;
 }) {
+  const { t } = useI18n();
   return (
     <>
       {nodes.map((node) => {
@@ -12392,9 +13674,7 @@ function ChangedFileNodes({
               onClick={() => onSelect(file)}
               onContextMenu={(event) => onContextFile?.(file, event)}
               onDoubleClick={() => onToggleStage(file)}
-              title={
-                file.area === "staged" ? "Duplo clique para unstage" : "Duplo clique para stage"
-              }
+              title={file.area === "staged" ? t("diff.dblclickUnstage") : t("diff.dblclickStage")}
             >
               <span
                 className={file.area === "staged" ? "git-file-check checked" : "git-file-check"}

@@ -465,6 +465,8 @@ export type SourceFile = {
   extension?: string | null;
   bytes: number;
   content: string;
+  /** On-disk text encoding ("utf-8" | "windows-1252"), round-tripped on save. */
+  encoding: string;
 };
 
 export type SearchMatch = {
@@ -904,6 +906,18 @@ export type WorkspaceSkillSearchResult = {
   raw: string;
 };
 
+export type SkillBundleSkill = {
+  name: string;
+  description: string;
+};
+
+export type SkillBundle = {
+  id: string;
+  label: string;
+  description: string;
+  skills: SkillBundleSkill[];
+};
+
 export type WorkspaceFramework = {
   id: string;
   label: string;
@@ -999,4 +1013,40 @@ export type WorkflowStateSummary = {
   }>;
   gates: WorkflowGate[];
   resume_entries: WorkflowResumeEntry[];
+};
+
+export type DockerContainer = {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  ports: string;
+  created: string;
+  compose_project?: string | null;
+  compose_service?: string | null;
+};
+
+export type DockerImage = {
+  id: string;
+  repository: string;
+  tag: string;
+  size: string;
+  created: string;
+  containers: string;
+};
+
+export type DockerNetwork = {
+  id: string;
+  name: string;
+  driver: string;
+  scope: string;
+  compose_project?: string | null;
+};
+
+export type DockerVolume = {
+  name: string;
+  driver: string;
+  scope: string;
+  mountpoint: string;
 };

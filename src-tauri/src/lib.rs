@@ -6,11 +6,13 @@ mod deploy_executor;
 mod deploy_package;
 mod deploy_plan;
 mod deploy_repair;
+mod docker;
 mod git;
 mod lsp;
 mod machine;
 mod rtk;
 mod shell;
+mod skill_bundles;
 mod solution;
 mod store;
 mod terminal;
@@ -157,6 +159,9 @@ struct SourceFile {
     extension: Option<String>,
     bytes: u64,
     content: String,
+    /// Detected on-disk text encoding ("utf-8" | "windows-1252"). Round-tripped on
+    /// write so non-UTF-8 sources (e.g. ANSI/Latin-1 Protheus .prw) keep their encoding.
+    encoding: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2031,6 +2036,56 @@ fn git_list_branches(path: String) -> AppResult<Vec<git::Branch>> {
 }
 
 #[tauri::command]
+fn docker_list_containers() -> AppResult<Vec<docker::DockerContainer>> {
+    Ok(docker::list_containers()?)
+}
+
+#[tauri::command]
+fn docker_list_images() -> AppResult<Vec<docker::DockerImage>> {
+    Ok(docker::list_images()?)
+}
+
+#[tauri::command]
+fn docker_list_networks() -> AppResult<Vec<docker::DockerNetwork>> {
+    Ok(docker::list_networks()?)
+}
+
+#[tauri::command]
+fn docker_list_volumes() -> AppResult<Vec<docker::DockerVolume>> {
+    Ok(docker::list_volumes()?)
+}
+
+#[tauri::command]
+fn docker_container_action(id: String, action: String) -> AppResult<()> {
+    Ok(docker::container_action(&id, &action)?)
+}
+
+#[tauri::command]
+fn docker_remove_image(id: String) -> AppResult<()> {
+    Ok(docker::remove_image(&id)?)
+}
+
+#[tauri::command]
+fn docker_remove_network(id: String) -> AppResult<()> {
+    Ok(docker::remove_network(&id)?)
+}
+
+#[tauri::command]
+fn docker_remove_volume(name: String) -> AppResult<()> {
+    Ok(docker::remove_volume(&name)?)
+}
+
+#[tauri::command]
+fn docker_logs_start(app: tauri::AppHandle, container_id: String) -> AppResult<()> {
+    Ok(docker::logs_start(app, container_id)?)
+}
+
+#[tauri::command]
+fn docker_logs_stop(container_id: String) -> AppResult<()> {
+    Ok(docker::logs_stop(&container_id)?)
+}
+
+#[tauri::command]
 fn git_list_remote_branches(path: String) -> AppResult<Vec<git::RemoteBranch>> {
     let root = canonical_project_root(&PathBuf::from(path))?;
     Ok(git::list_remote_branches(&root)?)
@@ -2365,6 +2420,21 @@ fn create_terminal_session(
 }
 
 #[tauri::command]
+fn create_docker_exec_session(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, terminal::TerminalManager>,
+    container_id: String,
+    shell: Option<String>,
+) -> AppResult<terminal::TerminalSession> {
+    Ok(terminal::create_exec_session(
+        app,
+        state.inner().clone(),
+        container_id,
+        shell,
+    )?)
+}
+
+#[tauri::command]
 fn write_terminal_input(
     state: tauri::State<'_, terminal::TerminalManager>,
     session_id: String,
@@ -2432,7 +2502,23 @@ fn read_source_file(path: String, relative_path: String) -> AppResult<SourceFile
         return Err(anyhow::anyhow!("source file appears to be binary").into());
     }
 
-    let content = std::fs::read_to_string(&file_path).map_err(anyhow::Error::from)?;
+    // Detect the on-disk encoding so it can be preserved on write. Non-UTF-8 bytes →
+    // Windows-1252 (ANSI/Latin-1, the TOTVS standard). Pure-ASCII AdvPL/Protheus
+    // sources also default to Windows-1252 so a later accented edit saves as cp1252,
+    // not UTF-8. Files that already contain genuine UTF-8 multibyte stay UTF-8.
+    let bytes = std::fs::read(&file_path).map_err(anyhow::Error::from)?;
+    let encoding = match std::str::from_utf8(&bytes) {
+        Ok(text) if !text.is_ascii() => "utf-8",
+        Ok(_) if is_advpl_source(&file_path) => "windows-1252",
+        Ok(_) => "utf-8",
+        Err(_) => "windows-1252",
+    };
+    let content = if encoding == "windows-1252" {
+        encoding_rs::WINDOWS_1252.decode(&bytes).0.into_owned()
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let encoding = encoding.to_string();
     let name = file_path
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -2444,6 +2530,7 @@ fn read_source_file(path: String, relative_path: String) -> AppResult<SourceFile
         extension: file_extension(&file_path),
         bytes: metadata.len(),
         content,
+        encoding,
     })
 }
 
@@ -2452,6 +2539,7 @@ fn write_source_file(
     path: String,
     relative_path: String,
     content: String,
+    encoding: Option<String>,
 ) -> AppResult<SourceFile> {
     if content.len() as u64 > MAX_SOURCE_FILE_BYTES {
         return Err(anyhow::anyhow!("source file exceeds 1 MiB write limit").into());
@@ -2467,7 +2555,14 @@ fn write_source_file(
         return Err(anyhow::anyhow!("source file appears to be binary").into());
     }
 
-    std::fs::write(&file_path, content.as_bytes()).map_err(anyhow::Error::from)?;
+    // Round-trip the original encoding so we don't silently convert ANSI/Latin-1
+    // sources (e.g. Protheus .prw) to UTF-8 on save.
+    let encoding = encoding.unwrap_or_else(|| "utf-8".to_string());
+    let bytes = match encoding.as_str() {
+        "windows-1252" => encoding_rs::WINDOWS_1252.encode(&content).0.into_owned(),
+        _ => content.clone().into_bytes(),
+    };
+    std::fs::write(&file_path, &bytes).map_err(anyhow::Error::from)?;
     let metadata = std::fs::metadata(&file_path).map_err(anyhow::Error::from)?;
     Ok(SourceFile {
         relative_path,
@@ -2478,6 +2573,7 @@ fn write_source_file(
         extension: file_extension(&file_path),
         bytes: metadata.len(),
         content,
+        encoding,
     })
 }
 
@@ -2650,7 +2746,157 @@ fn create_source_file(path: String, relative_path: String) -> AppResult<SourceFi
         extension: file_extension(&file_path),
         bytes: 0,
         content: String::new(),
+        encoding: if is_advpl_source(&file_path) {
+            "windows-1252".to_string()
+        } else {
+            "utf-8".to_string()
+        },
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentAttachmentInput {
+    project_path: String,
+    file_name: String,
+    data_base64: String,
+}
+
+/// Persist a pasted/dropped chat attachment (base64 bytes) under the project's
+/// `.dw/gui/agent-attachments/` and return its absolute path. The chat references
+/// that path in the agent prompt, and the agent (which runs in the project dir)
+/// reads the file with its own file/vision tool.
+#[tauri::command]
+fn save_agent_attachment(input: AgentAttachmentInput) -> AppResult<String> {
+    let root = canonical_project_root(&PathBuf::from(&input.project_path))?;
+    let dir = root.join(".dw").join("gui").join("agent-attachments");
+    std::fs::create_dir_all(&dir).map_err(anyhow::Error::from)?;
+
+    let base = Path::new(input.file_name.trim())
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "attachment".to_string());
+    let safe: String = base
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+
+    let bytes = general_purpose::STANDARD
+        .decode(input.data_base64.as_bytes())
+        .map_err(anyhow::Error::from)?;
+    let target = dir.join(format!("{stamp}-{safe}"));
+    std::fs::write(&target, bytes).map_err(anyhow::Error::from)?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// On WSL, pull an image off the *Windows* clipboard (WSLg does not bridge the image
+/// clipboard to Linux) by shelling out to `powershell.exe`, saving it as a PNG under
+/// the project's agent-attachments dir, and returning that path. Returns `Ok(None)`
+/// when not on WSL or when the Windows clipboard holds no image.
+#[tauri::command]
+fn read_windows_clipboard_image(project_path: String) -> AppResult<Option<String>> {
+    let is_wsl = std::fs::read_to_string("/proc/version")
+        .map(|version| version.to_ascii_lowercase().contains("microsoft"))
+        .unwrap_or(false);
+    if !is_wsl {
+        return Ok(None);
+    }
+
+    let root = canonical_project_root(&PathBuf::from(&project_path))?;
+    let dir = root.join(".dw").join("gui").join("agent-attachments");
+    std::fs::create_dir_all(&dir).map_err(anyhow::Error::from)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let target = dir.join(format!("{stamp}-pasted-image.png"));
+
+    // Translate the destination to a Windows path PowerShell can write to (UNC).
+    let win_path_out = Command::new("wslpath")
+        .arg("-w")
+        .arg(&target)
+        .output()
+        .map_err(anyhow::Error::from)?;
+    if !win_path_out.status.success() {
+        return Ok(None);
+    }
+    let win_path = String::from_utf8_lossy(&win_path_out.stdout).trim().to_string();
+    if win_path.is_empty() {
+        return Ok(None);
+    }
+    let escaped = win_path.replace('\'', "''");
+
+    // `Clipboard.GetImage()` needs an STA thread (-STA). Saves the bitmap as PNG.
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+         $img=[System.Windows.Forms.Clipboard]::GetImage(); \
+         if($img){{ $img.Save('{escaped}',[System.Drawing.Imaging.ImageFormat]::Png); 'OK' }} \
+         else {{ 'NONE' }}"
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-Command", &script])
+        .output()
+        .map_err(anyhow::Error::from)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if stdout.contains("OK") && target.exists() {
+        Ok(Some(target.to_string_lossy().to_string()))
+    } else {
+        let _ = std::fs::remove_file(&target);
+        Ok(None)
+    }
+}
+
+/// On WSL, return the WSL paths of files copied to the *Windows* clipboard (e.g.
+/// "Copy" in Explorer — WSLg can't drag files into the window, so copy+paste is the
+/// substitute). Each Windows path is translated to its `/mnt/...` mount via `wslpath`,
+/// which the agent (running in the project dir) can read. Empty when not on WSL or
+/// when the Windows clipboard holds no files.
+#[tauri::command]
+fn read_windows_clipboard_files() -> AppResult<Vec<String>> {
+    let is_wsl = std::fs::read_to_string("/proc/version")
+        .map(|version| version.to_ascii_lowercase().contains("microsoft"))
+        .unwrap_or(false);
+    if !is_wsl {
+        return Ok(Vec::new());
+    }
+
+    // `GetFileDropList` needs an STA thread; print one Windows path per line.
+    let script = "Add-Type -AssemblyName System.Windows.Forms; \
+         $list=[System.Windows.Forms.Clipboard]::GetFileDropList(); \
+         if($list){ foreach($p in $list){ [Console]::Out.WriteLine($p) } }";
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .output()
+        .map_err(anyhow::Error::from)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut paths = Vec::new();
+    for line in stdout.lines() {
+        let win = line.trim();
+        if win.is_empty() {
+            continue;
+        }
+        if let Ok(conv) = Command::new("wslpath").arg("-u").arg(win).output() {
+            if conv.status.success() {
+                let wsl = String::from_utf8_lossy(&conv.stdout).trim().to_string();
+                if !wsl.is_empty() && Path::new(&wsl).exists() {
+                    paths.push(wsl);
+                }
+            }
+        }
+    }
+    Ok(paths)
 }
 
 /// Does a project-relative path (file OR dir, inside or outside `.dw/`) exist?
@@ -3101,6 +3347,18 @@ fn sync_workspace_skill(
     input: solution::WorkspaceSkillSyncInput,
 ) -> AppResult<Vec<solution::WorkspaceSkillSummary>> {
     Ok(solution::sync_workspace_skill(input)?)
+}
+
+#[tauri::command]
+fn list_skill_bundles() -> AppResult<Vec<skill_bundles::SkillBundleInfo>> {
+    Ok(skill_bundles::list_bundles())
+}
+
+#[tauri::command]
+fn install_skill_bundle(
+    input: skill_bundles::InstallSkillBundleInput,
+) -> AppResult<Vec<solution::WorkspaceSkillSummary>> {
+    Ok(solution::install_skill_bundle(input)?)
 }
 
 #[tauri::command]
@@ -4181,12 +4439,29 @@ fn should_exclude_source_dir(root: &Path, path: &Path, name: &str, is_root: bool
     normalize_relative_path(root, path).is_ok_and(|relative| relative == "src-tauri/target")
 }
 
-fn should_include_source_file(path: &Path, name: &str, is_root: bool) -> bool {
+fn should_include_source_file(_path: &Path, name: &str, is_root: bool) -> bool {
+    // List every file in the folder (the user asked to see all sources). Hidden
+    // dotfiles are still only surfaced at the project root; heavy directories are
+    // pruned separately by `should_exclude_source_dir`. `is_supported_source_file`
+    // stays in use to gate which new files the editor may create.
     if name.starts_with('.') {
         return is_root;
     }
 
-    is_supported_source_file(path)
+    true
+}
+
+/// AdvPL / TLPP (TOTVS Protheus) source extensions — conventionally Windows-1252.
+fn is_advpl_source(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| {
+            matches!(
+                extension.as_str(),
+                "prw" | "prx" | "prg" | "ppx" | "ppp" | "tlpp" | "ch" | "th" | "ahu" | "apl" | "apw"
+            )
+        })
 }
 
 fn is_supported_source_file(path: &Path) -> bool {
@@ -4701,6 +4976,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(terminal::TerminalManager::new())
         .manage(lsp::LspManager::new())
         .setup(|app| {
@@ -4763,6 +5039,9 @@ pub fn run() {
             reset_agent_chat,
             send_agent_message,
             stop_agent_session,
+            save_agent_attachment,
+            read_windows_clipboard_image,
+            read_windows_clipboard_files,
             agent_usage,
             check_agent_provider_health,
             list_agent_run_metrics,
@@ -4813,6 +5092,8 @@ pub fn run() {
             list_workspace_capabilities,
             find_workspace_skills,
             sync_workspace_skill,
+            list_skill_bundles,
+            install_skill_bundle,
             read_workspace_flow_artifact,
             write_workspace_flow_artifact,
             sync_workspace_flows,
@@ -4871,6 +5152,17 @@ pub fn run() {
             git_commit_file_diff,
             git_repo_state,
             git_list_branches,
+            docker_list_containers,
+            docker_list_images,
+            docker_list_networks,
+            docker_list_volumes,
+            docker_container_action,
+            docker_remove_image,
+            docker_remove_network,
+            docker_remove_volume,
+            docker_logs_start,
+            docker_logs_stop,
+            create_docker_exec_session,
             git_list_remote_branches,
             git_list_tags,
             git_list_stashes,
@@ -5012,10 +5304,12 @@ mod tests {
             root.display().to_string(),
             "src/app.ts".to_string(),
             "export const value = 2;\n".to_string(),
+            None,
         )
         .expect("write source file");
 
         assert_eq!(file.content, "export const value = 2;\n");
+        assert_eq!(file.encoding, "utf-8");
         assert_eq!(
             std::fs::read_to_string(root.join("src/app.ts")).expect("read written file"),
             "export const value = 2;\n"

@@ -37,7 +37,13 @@ describe("buildCommitMessagePrompt", () => {
     expect(prompt).toContain("scope curto e específico");
     expect(prompt).toContain("Não use mensagens vagas");
     expect(prompt).toContain("regras e fluxos");
-    expect(prompt).toContain("descrição curta");
+  });
+
+  it("always asks for a descriptive body, not just a subject", () => {
+    const prompt = buildCommitMessagePrompt("diff --git a/x b/x");
+    expect(prompt).toContain("SEMPRE escreva um corpo");
+    expect(prompt).toContain("Como escrever o corpo");
+    expect(prompt).toContain("BREAKING CHANGE");
   });
 
   it("truncates very large diffs", () => {

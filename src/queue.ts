@@ -1,13 +1,14 @@
+import type { TranslationKey } from "./i18n";
 import type { ChecklistItem, Project, RequirementCard } from "./types";
 
 export type QueueBucket = "pending" | "doing" | "validating" | "done";
 
-/** The four fixed kanban columns, in order, with their pt-BR labels. */
-export const QUEUE_BUCKETS: Array<{ id: QueueBucket; label: string }> = [
-  { id: "pending", label: "A fazer" },
-  { id: "doing", label: "Fazendo" },
-  { id: "validating", label: "Validando" },
-  { id: "done", label: "Feito" },
+/** The four fixed kanban columns, in order, with their i18n label keys. */
+export const QUEUE_BUCKETS: Array<{ id: QueueBucket; labelKey: TranslationKey }> = [
+  { id: "pending", labelKey: "queue.bucket.pending" },
+  { id: "doing", labelKey: "queue.bucket.doing" },
+  { id: "validating", labelKey: "queue.bucket.validating" },
+  { id: "done", labelKey: "queue.bucket.done" },
 ];
 
 /** Canonical status persisted to the backend when a card lands in each column. */

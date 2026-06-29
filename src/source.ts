@@ -42,6 +42,10 @@ export function monacoLanguage(relativePath: string): string {
   if (ext === "c" || ext === "h") return "c";
   if (["cpp", "cc", "hpp"].includes(ext)) return "cpp";
   if (ext === "dockerfile" || name === "dockerfile") return "dockerfile";
+  // TOTVS AdvPL / TLPP sources (highlighting registered in src/monaco/advpl.ts).
+  if (["prw", "prx", "prg", "ppx", "ppp", "tlpp", "ch", "th", "ahu", "apl", "apw"].includes(ext)) {
+    return "advpl";
+  }
   return "plaintext";
 }
 
