@@ -16,6 +16,10 @@ function isWsl() {
 const env = { ...process.env };
 
 if (isWsl()) {
+  // Force the GTK/WebKit display onto X11 (XWayland). WSLg's native Wayland path crashes
+  // WebKitGTK with "Error reading events from display: Connection reset by peer" under
+  // rendering load (tab switches, agent output) — XWayland is far more stable here.
+  env.GDK_BACKEND ??= "x11";
   env.WEBKIT_DISABLE_COMPOSITING_MODE ??= "1";
   env.WEBKIT_DISABLE_DMABUF_RENDERER ??= "1";
   env.LIBGL_ALWAYS_SOFTWARE ??= "1";

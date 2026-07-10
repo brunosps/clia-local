@@ -188,6 +188,26 @@ pub fn container_action(id: &str, action: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run one action across many containers in a single `docker` invocation (docker applies it
+/// to all IDs concurrently). Backs the Docker tab's per-group "stop/remove all" actions.
+pub fn containers_action(ids: &[String], action: &str) -> anyhow::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut args: Vec<&str> = match action {
+        "start" => vec!["start"],
+        "stop" => vec!["stop"],
+        "restart" => vec!["restart"],
+        "remove" => vec!["rm", "-f"],
+        other => return Err(anyhow!("unknown container action: {other}")),
+    };
+    for id in ids {
+        args.push(id.as_str());
+    }
+    docker(&args)?;
+    Ok(())
+}
+
 pub fn remove_image(id: &str) -> anyhow::Result<()> {
     docker(&["rmi", "-f", id])?;
     Ok(())

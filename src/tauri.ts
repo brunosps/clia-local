@@ -5,6 +5,7 @@ import type {
   AgentMessage,
   AgentProviderHealth,
   AgentProfile,
+  AgentRawEventsPage,
   AgentRunEvent,
   AgentSkillInvocation,
   RtkInstallResult,
@@ -342,6 +343,7 @@ export const api = {
     priority?: string | null;
     checklist_json?: string | null;
     agent_prompt?: string | null;
+    referenced_files_json?: string | null;
   }) {
     return invokeSafe<RequirementCard>("update_requirement_card", { input });
   },
@@ -387,6 +389,11 @@ export const api = {
   addRequirementAttachment(cardId: number, filePath: string, name?: string | null) {
     return invokeSafe<RequirementAttachment>("add_requirement_attachment", {
       input: { card_id: cardId, file_path: filePath, name: name || null },
+    });
+  },
+  saveRequirementAttachment(cardId: number, fileName: string, dataBase64: string) {
+    return invokeSafe<RequirementAttachment>("save_requirement_attachment", {
+      input: { card_id: cardId, file_name: fileName, data_base64: dataBase64 },
     });
   },
   removeRequirementAttachment(id: number) {
@@ -588,6 +595,12 @@ export const api = {
   listAgentRunMetrics(sessionId: number) {
     return invokeSafe<AgentRunEvent[]>("list_agent_run_metrics", { sessionId });
   },
+  listAgentRawEvents(sessionId: number, limit: number, offset: number) {
+    return invokeSafe<AgentRawEventsPage>("list_agent_raw_events", { sessionId, limit, offset });
+  },
+  getAgentRawPayload(sessionId: number) {
+    return invokeSafe<string>("get_agent_raw_payload", { sessionId });
+  },
   warmAgentRuntime(input: {
     profile_id: number;
     workspace_id: number;
@@ -725,6 +738,9 @@ export const api = {
   },
   dockerContainerAction(id: string, action: "start" | "stop" | "restart" | "remove") {
     return invokeSafe<void>("docker_container_action", { id, action });
+  },
+  dockerContainersAction(ids: string[], action: "start" | "stop" | "restart" | "remove") {
+    return invokeSafe<void>("docker_containers_action", { ids, action });
   },
   dockerRemoveImage(id: string) {
     return invokeSafe<void>("docker_remove_image", { id });

@@ -15,6 +15,7 @@ function card(patch: Partial<RequirementCard>): RequirementCard {
     priority: "medium",
     checklist_json: "[]",
     agent_prompt: "",
+    referenced_files_json: "[]",
     status: "todo",
     created_at: "2026-06-01T10:00:00Z",
     updated_at: "2026-06-01T10:00:00Z",

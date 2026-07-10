@@ -42,6 +42,10 @@ pub struct RequirementCard {
     pub priority: String,
     pub checklist_json: String,
     pub agent_prompt: String,
+    /// JSON-encoded `[{ "name", "path" }]` of source files referenced via `@`
+    /// mentions in the task body. `path` is project-relative; `name` is the
+    /// basename shown inline. Fed to the agent prompt when running the task.
+    pub referenced_files_json: String,
     pub status: String,
     pub prd_slug: Option<String>,
     /// Which workbench flow this card follows (`.dw/flows/<id>.json`). `None` =
@@ -233,6 +237,18 @@ pub struct AgentRunEvent {
     pub elapsed_ms: i64,
     pub details_json: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentRawEvent {
+    pub id: i64,
+    pub raw_json: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentRawEventsPage {
+    pub items: Vec<AgentRawEvent>,
+    pub total: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1318,7 +1334,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "select id, workspace_id, project_id, public_id, title, slug, body, status, prd_slug,
                     archived_from_status, archived_at, created_at, updated_at, flow_id,
-                    priority, checklist_json, agent_prompt
+                    priority, checklist_json, agent_prompt, referenced_files_json
              from requirement_cards
              where workspace_id = ?1
              order by updated_at desc, id desc",
@@ -1344,6 +1360,7 @@ impl Database {
                 priority: row.get(14)?,
                 checklist_json: row.get(15)?,
                 agent_prompt: row.get(16)?,
+                referenced_files_json: row.get(17)?,
             })
         })?;
         let mut cards = collect_rows(rows)?;
@@ -1477,6 +1494,7 @@ impl Database {
 
     /// Update the editable fields of a task card. Every argument is optional;
     /// `None` leaves the existing value untouched (SQL `coalesce`).
+    #[allow(clippy::too_many_arguments)]
     pub fn update_requirement_card(
         &self,
         id: i64,
@@ -1485,6 +1503,7 @@ impl Database {
         priority: Option<&str>,
         checklist_json: Option<&str>,
         agent_prompt: Option<&str>,
+        referenced_files_json: Option<&str>,
     ) -> anyhow::Result<RequirementCard> {
         let now = Utc::now().to_rfc3339();
         let conn = self.workspace_connect_for_card(id)?;
@@ -1498,8 +1517,9 @@ impl Database {
                  priority = coalesce(?4, priority),
                  checklist_json = coalesce(?5, checklist_json),
                  agent_prompt = coalesce(?6, agent_prompt),
-                 updated_at = ?7
-             where id = ?8",
+                 referenced_files_json = coalesce(?7, referenced_files_json),
+                 updated_at = ?8
+             where id = ?9",
             params![
                 title,
                 slug,
@@ -1507,6 +1527,7 @@ impl Database {
                 priority,
                 checklist_json,
                 agent_prompt,
+                referenced_files_json,
                 now,
                 id
             ],
@@ -1736,6 +1757,47 @@ impl Database {
                 )
             })?;
         }
+        let managed_path = managed_path.display().to_string();
+        conn.execute(
+            "insert into requirement_attachments (card_id, name, file_path, created_at)
+             values (?1, ?2, ?3, ?4)",
+            params![card_id, attachment_name, managed_path, created_at],
+        )?;
+        let id = conn.last_insert_rowid();
+        Ok(RequirementAttachment {
+            id,
+            card_id,
+            name: attachment_name,
+            file_path: managed_path,
+            created_at,
+        })
+    }
+
+    /// Persist raw bytes (e.g. a pasted image) as a managed attachment on a card.
+    /// Mirrors `add_requirement_attachment` but writes the bytes directly instead of
+    /// copying an on-disk source — so it needs no file dialog and no project path.
+    pub fn save_requirement_attachment_bytes(
+        &self,
+        card_id: i64,
+        name: &str,
+        bytes: &[u8],
+    ) -> anyhow::Result<RequirementAttachment> {
+        let created_at = Utc::now().to_rfc3339();
+        let conn = self.workspace_connect_for_card(card_id)?;
+        let card = self.get_requirement_card_with_conn(&conn, card_id)?;
+        let workspace = self.get_workspace(card.workspace_id)?;
+        let trimmed = name.trim();
+        let attachment_name = if trimmed.is_empty() {
+            "attachment".to_string()
+        } else {
+            trimmed.to_string()
+        };
+        let managed_dir = workspace_attachment_dir(&workspace.root_path, card_id);
+        std::fs::create_dir_all(&managed_dir)
+            .with_context(|| format!("failed to create {}", managed_dir.display()))?;
+        let managed_path = unique_attachment_path(&managed_dir, &attachment_name);
+        std::fs::write(&managed_path, bytes)
+            .with_context(|| format!("failed to write attachment {}", managed_path.display()))?;
         let managed_path = managed_path.display().to_string();
         conn.execute(
             "insert into requirement_attachments (card_id, name, file_path, created_at)
@@ -2771,16 +2833,103 @@ impl Database {
             {
                 continue;
             }
+            // `raw_json` is deliberately NOT selected (and `event` rows are skipped): the
+            // raw provider stream is hundreds of large rows per run, and loading it on every
+            // conversation switch was the dominant cost. The raw is fetched lazily, paginated,
+            // only when the user opens the "raw" drawer (see `list_agent_raw_events`).
             let mut stmt = conn.prepare(
-                "select id, session_id, role, content, raw_json, created_at
+                "select id, session_id, role, content, null as raw_json, created_at
                  from agent_messages
-                 where session_id = ?1
+                 where session_id = ?1 and role <> 'event'
                  order by id asc",
             )?;
             let rows = stmt.query_map([session_id], agent_message_from_row)?;
             return collect_rows(rows);
         }
         Ok(Vec::new())
+    }
+
+    /// One page of raw provider events for a session, newest first. Backs the lazily-loaded
+    /// "raw" drawer so the heavy `raw_json` blobs never enter the chat message load.
+    pub fn list_agent_raw_events(
+        &self,
+        session_id: i64,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<AgentRawEventsPage> {
+        for workspace in self.list_workspaces()? {
+            let conn = self.workspace_connect(&workspace)?;
+            if self
+                .find_agent_session_with_conn(&conn, session_id)?
+                .is_none()
+            {
+                continue;
+            }
+            let total: i64 = conn.query_row(
+                "select count(*) from agent_messages
+                 where session_id = ?1 and raw_json is not null",
+                [session_id],
+                |row| row.get(0),
+            )?;
+            let mut stmt = conn.prepare(
+                "select id, raw_json from agent_messages
+                 where session_id = ?1 and raw_json is not null
+                 order by id desc
+                 limit ?2 offset ?3",
+            )?;
+            let rows = stmt.query_map(params![session_id, limit, offset], |row| {
+                Ok(AgentRawEvent {
+                    id: row.get(0)?,
+                    raw_json: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                })
+            })?;
+            let items = collect_rows(rows)?;
+            return Ok(AgentRawEventsPage { items, total });
+        }
+        Ok(AgentRawEventsPage {
+            items: Vec::new(),
+            total: 0,
+        })
+    }
+
+    /// All raw events for a session joined newest-first — feeds the drawer's "copy" button
+    /// without materializing every blob in the UI.
+    pub fn get_agent_raw_payload(&self, session_id: i64) -> anyhow::Result<String> {
+        for workspace in self.list_workspaces()? {
+            let conn = self.workspace_connect(&workspace)?;
+            if self
+                .find_agent_session_with_conn(&conn, session_id)?
+                .is_none()
+            {
+                continue;
+            }
+            let mut stmt = conn.prepare(
+                "select raw_json from agent_messages
+                 where session_id = ?1 and raw_json is not null
+                 order by id desc",
+            )?;
+            let rows = stmt
+                .query_map([session_id], |row| {
+                    Ok(row.get::<_, Option<String>>(0)?.unwrap_or_default())
+                })?;
+            let values: Vec<String> = collect_rows(rows)?;
+            return Ok(values.join("\n\n"));
+        }
+        Ok(String::new())
+    }
+
+    /// On startup, mark any session left in `running` as `stopped`. A child agent process
+    /// never survives an app restart, so a persisted `running` is always stale — and it would
+    /// otherwise keep the UI's 3s reconcile poll (and full-app re-render) spinning forever.
+    pub fn mark_stale_running_sessions(&self) -> anyhow::Result<()> {
+        for workspace in self.list_workspaces()? {
+            let conn = self.workspace_connect(&workspace)?;
+            conn.execute(
+                "update agent_sessions set status = 'stopped' where status = 'running'",
+                [],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn add_agent_run_event(
@@ -3058,7 +3207,7 @@ impl Database {
         conn.query_row(
             "select id, workspace_id, project_id, public_id, title, slug, body, status, prd_slug,
                     archived_from_status, archived_at, created_at, updated_at, flow_id,
-                    priority, checklist_json, agent_prompt
+                    priority, checklist_json, agent_prompt, referenced_files_json
              from requirement_cards
              where id = ?1",
             [id],
@@ -3082,6 +3231,7 @@ impl Database {
                     priority: row.get(14)?,
                     checklist_json: row.get(15)?,
                     agent_prompt: row.get(16)?,
+                    referenced_files_json: row.get(17)?,
                 })
             },
         )
@@ -3675,6 +3825,12 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
         "requirement_cards",
         "agent_prompt",
         "text not null default ''",
+    )?;
+    ensure_column(
+        conn,
+        "requirement_cards",
+        "referenced_files_json",
+        "text not null default '[]'",
     )?;
     ensure_column(conn, "workspace_machines", "access_user", "text")?;
     ensure_column(conn, "agent_profiles", "reasoning_effort", "text")?;

@@ -28,6 +28,7 @@ import {
   Folder,
   FolderOpen,
   ListChecks,
+  MoreVertical,
   Pencil,
   GitFork,
   GitBranch,
@@ -194,6 +195,7 @@ import type {
   AgentProviderHealth,
   AgentProfile,
   AgentProvider,
+  AgentRawEvent,
   AgentRunEvent,
   AgentSession,
   AgentSkillInvocation,
@@ -244,6 +246,7 @@ import type {
   WorkspaceSolutionImportReport,
   RequirementCard,
   ChecklistItem,
+  ReferencedFile,
   RequirementAttachment,
 } from "./types";
 import { computeGraph } from "./gitGraph";
@@ -280,6 +283,13 @@ import {
   type QueueBucket,
   type QueueCard,
 } from "./queue";
+import {
+  parseReferencedFiles,
+  serializeReferencedFiles,
+  dedupeReferencedFiles,
+  detectMention,
+  insertMention,
+} from "./mentions";
 
 const DeployPackagesPanel = lazy(() => import("./DeployPackagesPanel"));
 const MonacoSource = lazy(() =>
@@ -5989,6 +5999,20 @@ function TaskModal({
   const [runHistory, setRunHistory] = useState<AgentSession[]>([]);
   const [runTranscripts, setRunTranscripts] = useState<Record<number, AgentMessage[]>>({});
 
+  // `@`-mention of source files in the Description. The body shows only `@<name>`;
+  // the full project-relative path is kept in `referencedFiles` and persisted as
+  // `referenced_files_json`, so the agent gets the exact file when running the task.
+  const [referencedFiles, setReferencedFiles] = useState<ReferencedFile[]>(
+    parseReferencedFiles(card?.referenced_files_json),
+  );
+  const [fileIndex, setFileIndex] = useState<ReferencedFile[]>([]);
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
+  // Pasting an image/file into the Description saves it as a task attachment and
+  // inserts an inline `@name` reference — sidesteps the WSLg-flaky GTK file picker.
+  const [attachBusy, setAttachBusy] = useState(false);
+
   // Focus + select the title when the modal opens so a freshly created task
   // ("Nova tarefa") can be renamed by just typing.
   useEffect(() => {
@@ -6015,6 +6039,8 @@ function TaskModal({
     );
     setChecklist(parseChecklist(next.checklist_json));
     setAgentPrompt(next.agent_prompt ?? "");
+    setReferencedFiles(parseReferencedFiles(next.referenced_files_json));
+    setMention(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cardId]);
 
@@ -6047,6 +6073,92 @@ function TaskModal({
     void api.listAgentMessages(sessionId).then((result) => {
       if (result.ok) setRunTranscripts((prev) => ({ ...prev, [sessionId]: result.value }));
     });
+  }
+
+  // Source files of the task's primary project, for the `@` autocomplete. Multi-project
+  // tasks index the first selected project (falls back to the active project).
+  const taskProjectPath = useMemo(() => {
+    const pid = projectIds[0] ?? activeProjectId ?? null;
+    if (pid == null) return null;
+    return projects.find((item) => item.id === pid)?.path ?? null;
+  }, [projectIds, activeProjectId, projects]);
+
+  useEffect(() => {
+    if (!taskProjectPath) {
+      setFileIndex([]);
+      return;
+    }
+    let cancelled = false;
+    void api.listSourceTree(taskProjectPath).then((result) => {
+      if (cancelled || !result.ok) return;
+      const files: ReferencedFile[] = [];
+      const walk = (entries: SourceEntry[]) => {
+        for (const entry of entries) {
+          if (entry.kind === "file") files.push({ name: entry.name, path: entry.relative_path });
+          if (entry.children?.length) walk(entry.children);
+        }
+      };
+      walk(result.value);
+      setFileIndex(files);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskProjectPath]);
+
+  const mentionSuggestions = useMemo(() => {
+    if (!mention) return [];
+    const query = mention.query.toLowerCase();
+    // Suggest both source files and the card's current attachments (pasted/picked
+    // files), so `@` finds either. Attachments first (most recently relevant).
+    const all: ReferencedFile[] = [
+      ...attachments.map((item) => ({ name: item.name, path: item.file_path })),
+      ...fileIndex,
+    ];
+    const matches = query ? all.filter((file) => file.name.toLowerCase().includes(query)) : all;
+    const seen = new Set<string>();
+    const out: ReferencedFile[] = [];
+    for (const file of matches) {
+      if (seen.has(file.path)) continue;
+      seen.add(file.path);
+      out.push(file);
+      if (out.length >= 12) break;
+    }
+    return out;
+  }, [mention, fileIndex, attachments]);
+  const mentionOpen = mention != null && (fileIndex.length > 0 || attachments.length > 0);
+  const activeMentionIndex = mentionSuggestions.length
+    ? Math.min(mentionIndex, mentionSuggestions.length - 1)
+    : 0;
+
+  function handleDescriptionChange(value: string, caret: number) {
+    setDescription(value);
+    setMention(detectMention(value, caret));
+    setMentionIndex(0);
+  }
+
+  function applyMention(file: ReferencedFile) {
+    const el = descriptionRef.current;
+    if (!el || !mention) return;
+    const caret = el.selectionStart ?? description.length;
+    const next = insertMention(description, mention.start, caret, file.name);
+    setDescription(next.text);
+    // Attachments already carry their path via the `## Anexos` block — only source-file
+    // mentions go into referencedFiles (`## Arquivos referenciados`), avoiding duplication.
+    const isAttachment = attachments.some((item) => item.file_path === file.path);
+    if (!isAttachment) {
+      setReferencedFiles((prev) => dedupeReferencedFiles([...prev, file]));
+    }
+    setMention(null);
+    setMentionIndex(0);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(next.caret, next.caret);
+    });
+  }
+
+  function removeReferencedFile(path: string) {
+    setReferencedFiles((prev) => prev.filter((file) => file.path !== path));
   }
 
   const statusOptions = [
@@ -6091,6 +6203,112 @@ function TaskModal({
     else setModalError(result.error);
   }
 
+  // Insert an `@name` reference into the Description at the caret (or append at the end
+  // when the textarea is not focused, e.g. right after a paste).
+  function insertReference(name: string) {
+    const token = `@${name} `;
+    const el = descriptionRef.current;
+    if (el && document.activeElement === el) {
+      const caret = el.selectionStart ?? description.length;
+      const text = description.slice(0, caret) + token + description.slice(caret);
+      setDescription(text);
+      const nextCaret = caret + token.length;
+      requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(nextCaret, nextCaret);
+      });
+    } else {
+      setDescription((prev) => prev + (prev.length && !/\s$/.test(prev) ? " " : "") + token);
+    }
+  }
+
+  async function attachBytes(name: string, base64: string) {
+    const saved = await api.saveRequirementAttachment(cardId, name, base64);
+    if (saved.ok) {
+      setAttachments((items) => [saved.value, ...items]);
+      insertReference(saved.value.name);
+    } else {
+      setModalError(saved.error);
+    }
+  }
+
+  async function attachPath(path: string, name?: string) {
+    const result = await api.addRequirementAttachment(cardId, path, name ?? null);
+    if (result.ok) {
+      setAttachments((items) => [result.value, ...items]);
+      insertReference(result.value.name);
+    } else {
+      setModalError(result.error);
+    }
+  }
+
+  // Mirror of the chat composer's clipboard fallback, but persisting as task attachments:
+  // native image → Windows clipboard image (WSL) → Windows clipboard files (WSL).
+  async function pasteClipboardFallback(): Promise<boolean> {
+    const native = await readClipboardImageBase64();
+    if (native) {
+      await attachBytes(native.name, native.base64);
+      return true;
+    }
+    if (taskProjectPath) {
+      const windowsImage = await api.readWindowsClipboardImage(taskProjectPath);
+      if (windowsImage.ok && windowsImage.value) {
+        const path = windowsImage.value;
+        const name = (path.split(/[\\/]/).pop() || "pasted-image.png").replace(/^\d+-/, "");
+        await attachPath(path, name);
+        return true;
+      }
+    }
+    const windowsFiles = await api.readWindowsClipboardFiles();
+    if (windowsFiles.ok && windowsFiles.value.length) {
+      for (const path of windowsFiles.value) {
+        await attachPath(path, path.split(/[\\/]/).pop() || path);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function handleTaskPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const data = event.clipboardData;
+    const files: File[] = [];
+    if (data?.items) {
+      for (const item of data.items) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+    }
+    if (files.length) {
+      event.preventDefault();
+      setModalError("");
+      setAttachBusy(true);
+      void (async () => {
+        try {
+          for (const [index, file] of files.entries()) {
+            const extension = file.type.split("/")[1] || "bin";
+            const kind = file.type.startsWith("image/") ? "image" : "file";
+            const fallback = `pasted-${kind}-${index + 1}.${extension}`;
+            const name = file.name?.trim() ? file.name : fallback;
+            const base64 = await fileToBase64(file);
+            await attachBytes(name, base64);
+          }
+        } finally {
+          setAttachBusy(false);
+        }
+      })();
+      return;
+    }
+    // A genuine text paste carries text/plain — let it insert normally. Only a paste with
+    // no file and no text probes the Linux/Windows clipboards for an image/file.
+    if (data?.getData("text/plain")?.trim()) return;
+    event.preventDefault();
+    setModalError("");
+    setAttachBusy(true);
+    void pasteClipboardFallback().finally(() => setAttachBusy(false));
+  }
+
   async function save() {
     setSaving(true);
     setModalError("");
@@ -6101,6 +6319,7 @@ function TaskModal({
       priority,
       checklist_json: serializeChecklist(checklist),
       agent_prompt: agentPrompt,
+      referenced_files_json: serializeReferencedFiles(referencedFiles),
     });
     if (!updated.ok) {
       setModalError(updated.error);
@@ -6136,6 +6355,12 @@ function TaskModal({
       );
     }
     if (agentPrompt.trim()) parts.push("## Instruções\n" + agentPrompt.trim());
+    if (referencedFiles.length) {
+      parts.push(
+        "## Arquivos referenciados (leia estes)\n" +
+          referencedFiles.map((file) => `- ${file.name}: ${file.path}`).join("\n"),
+      );
+    }
     if (attachments.length) {
       parts.push(
         "## Anexos (leia estes arquivos)\n" +
@@ -6195,14 +6420,107 @@ function TaskModal({
             />
           </label>
 
-          <label className="field">
+          <div className="field task-description-field">
             <span>{t("task.description")}</span>
-            <textarea
-              value={description}
-              rows={4}
-              onChange={(event) => setDescription(event.target.value)}
-            />
-          </label>
+            <div className="mention-wrap">
+              <textarea
+                ref={descriptionRef}
+                value={description}
+                rows={4}
+                placeholder={t("task.descriptionMentionHint")}
+                onChange={(event) =>
+                  handleDescriptionChange(
+                    event.target.value,
+                    event.target.selectionStart ?? event.target.value.length,
+                  )
+                }
+                onKeyDown={(event) => {
+                  if (!mentionOpen) return;
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setMentionIndex((i) =>
+                      mentionSuggestions.length ? (i + 1) % mentionSuggestions.length : 0,
+                    );
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setMentionIndex((i) =>
+                      mentionSuggestions.length
+                        ? (i - 1 + mentionSuggestions.length) % mentionSuggestions.length
+                        : 0,
+                    );
+                  } else if (event.key === "Enter" || event.key === "Tab") {
+                    if (!mentionSuggestions.length) return;
+                    event.preventDefault();
+                    applyMention(mentionSuggestions[activeMentionIndex] ?? mentionSuggestions[0]);
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    setMention(null);
+                  }
+                }}
+                onBlur={() => requestAnimationFrame(() => setMention(null))}
+                onPaste={handleTaskPaste}
+              />
+              {mentionOpen ? (
+                <div
+                  className="mention-menu"
+                  role="listbox"
+                  aria-label={t("task.referencedFiles")}
+                >
+                  {mentionSuggestions.length ? (
+                    mentionSuggestions.map((file, index) => (
+                      <button
+                        key={file.path}
+                        type="button"
+                        role="option"
+                        aria-selected={index === activeMentionIndex}
+                        className={
+                          index === activeMentionIndex ? "mention-option active" : "mention-option"
+                        }
+                        onMouseEnter={() => setMentionIndex(index)}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          applyMention(file);
+                        }}
+                      >
+                        <strong>{file.name}</strong>
+                        <small>{file.path}</small>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="mention-empty">{t("task.noFilesFound")}</div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+            <div className="task-paste-hint">
+              {attachBusy ? (
+                <span className="task-paste-busy">
+                  <RefreshCw aria-hidden="true" size={12} />
+                  {t("task.pasting")}
+                </span>
+              ) : (
+                <span>{t("task.pasteHint")}</span>
+              )}
+            </div>
+            {referencedFiles.length ? (
+              <div className="task-reffiles">
+                {referencedFiles.map((file) => (
+                  <span className="composer-attachment-chip" key={file.path} title={file.path}>
+                    <FileText size={12} aria-hidden="true" />
+                    <span className="composer-attachment-name">{file.name}</span>
+                    <button
+                      type="button"
+                      className="composer-attachment-remove"
+                      aria-label={t("task.removeReference")}
+                      onClick={() => removeReferencedFile(file.path)}
+                    >
+                      <X size={11} aria-hidden="true" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
 
           <div className="task-modal-row">
             <label className="field">
@@ -8423,7 +8741,13 @@ function AgentsPanel({
   const [usageBusy, setUsageBusy] = useState(false);
   const usage = activeProfile ? (usageByProfile[activeProfile.id] ?? null) : null;
   const [rawPage, setRawPage] = useState(0);
-  const [rawPageSize, setRawPageSize] = useState(10);
+  const [rawPageSize, setRawPageSize] = useState(5);
+  // Raw provider events are loaded lazily + paginated from the DB only while the drawer is
+  // open — they never enter the chat `messages` load (that bulk load was the lag when
+  // switching conversations).
+  const [rawItems, setRawItems] = useState<AgentRawEvent[]>([]);
+  const [rawTotal, setRawTotal] = useState(0);
+  const [rawLoading, setRawLoading] = useState(false);
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
   const [skillAutocompleteHidden, setSkillAutocompleteHidden] = useState(false);
   const [chatAttachments, setChatAttachments] = useState<{ name: string; path: string }[]>([]);
@@ -8552,28 +8876,28 @@ function AgentsPanel({
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const rawBodyRef = useRef<HTMLDivElement | null>(null);
   const working = isAgentRunning(activeSession);
-  const rawEvents = messages.filter((message) => message.raw_json);
   const latestMetric = metrics.at(-1) ?? null;
   const latestRunMetrics = latestMetric
     ? metrics.filter((metric) => metric.run_id === latestMetric.run_id)
     : [];
   const metricSummary = summarizeAgentMetrics(latestRunMetrics);
-  // Newest first (chronological, recent → old).
-  const formattedRawEvents = rawEvents
-    .map((message) => ({
-      id: message.id,
-      type: rawEventType(message.raw_json),
-      summary: rawEventSummary(message.raw_json, t),
-      value: formatRawJson(message.raw_json),
-    }))
-    .reverse();
   const visibleMessages = messages.filter((message) => message.role !== "event");
   const sessionStatus = activeSession ? agentStatusLabel(activeSession.status) : t("agents.noConversation");
-  const rawPayload = formattedRawEvents.map((event) => event.value).join("\n\n");
-  const rawPageCount = Math.max(1, Math.ceil(formattedRawEvents.length / rawPageSize));
+  const rawPageCount = Math.max(1, Math.ceil(rawTotal / rawPageSize));
   const safeRawPage = Math.min(rawPage, rawPageCount - 1);
   const rawPageStart = safeRawPage * rawPageSize;
-  const pagedRawEvents = formattedRawEvents.slice(rawPageStart, rawPageStart + rawPageSize);
+  // Only the ≤rawPageSize items currently on screen get parsed/formatted (and memoized) —
+  // never the whole event stream.
+  const formattedRawItems = useMemo(
+    () =>
+      rawItems.map((item) => ({
+        id: item.id,
+        type: rawEventType(item.raw_json),
+        summary: rawEventSummary(item.raw_json, t),
+        value: formatRawJson(item.raw_json),
+      })),
+    [rawItems, t],
+  );
   const lastVisibleMessage = visibleMessages.at(-1);
   const skillQuery = skillAutocompleteQuery(composer);
   const skillSuggestions = useMemo(() => {
@@ -8608,8 +8932,9 @@ function AgentsPanel({
     : 0;
 
   async function copyRawEvents() {
-    if (!rawPayload) return;
-    await navigator.clipboard.writeText(rawPayload);
+    if (!activeSession || !rawTotal) return;
+    const result = await api.getAgentRawPayload(activeSession.id);
+    if (result.ok && result.value) await navigator.clipboard.writeText(result.value);
   }
 
   async function refreshUsage() {
@@ -8645,7 +8970,32 @@ function AgentsPanel({
     window.requestAnimationFrame(() => {
       rawBody.scrollTop = 0;
     });
-  }, [rawOpen, safeRawPage, rawPageSize, pagedRawEvents.length]);
+  }, [rawOpen, safeRawPage, rawPageSize, formattedRawItems.length]);
+
+  // Reset to the first raw page whenever the conversation changes.
+  useEffect(() => {
+    setRawPage(0);
+  }, [activeSession?.id]);
+
+  // Lazily fetch one page of raw events — only while the drawer is open. This keeps the
+  // heavy `raw_json` blobs out of the conversation-switch load entirely.
+  useEffect(() => {
+    if (!rawOpen || !activeSession) return;
+    const sessionId = activeSession.id;
+    let cancelled = false;
+    setRawLoading(true);
+    void api.listAgentRawEvents(sessionId, rawPageSize, rawPage * rawPageSize).then((result) => {
+      if (cancelled) return;
+      if (result.ok) {
+        setRawItems(result.value.items);
+        setRawTotal(result.value.total);
+      }
+      setRawLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [rawOpen, activeSession?.id, rawPage, rawPageSize]);
 
   function applyAgentSkillSuggestion(skill: WorkspaceSkill) {
     setComposer(applySkillAutocomplete(composer, skill.name));
@@ -8931,7 +9281,6 @@ function AgentsPanel({
               aria-label={rawOpen ? t("agents.hideRaw") : t("agents.showRaw")}
             >
               <span>Raw</span>
-              <strong>{rawEvents.length}</strong>
             </button>
             <button
               className="secondary-button"
@@ -9063,13 +9412,13 @@ function AgentsPanel({
               <div>
                 <span>
                   <strong>Raw events</strong>
-                  <small>{rawEvents.length}</small>
+                  <small>{rawTotal}</small>
                 </span>
                 <button
                   className="secondary-button icon-button"
                   type="button"
                   onClick={() => void copyRawEvents()}
-                  disabled={!rawEvents.length}
+                  disabled={!rawTotal}
                   aria-label={t("agents.copyRaw")}
                   title={t("agents.copyRawTitle")}
                 >
@@ -9077,20 +9426,28 @@ function AgentsPanel({
                 </button>
               </div>
               <div className="agent-raw-body" ref={rawBodyRef}>
-                {pagedRawEvents.map((event) => (
-                  <article className="agent-raw-event" key={event.id}>
-                    <header>
-                      <span>
-                        <strong>{event.type}</strong>
-                        {event.summary !== t("agents.openJson") ? <em>{event.summary}</em> : null}
-                      </span>
-                      <small>#{event.id}</small>
-                    </header>
-                    <pre className="agent-raw-json">
-                      <code>{highlightJson(event.value)}</code>
-                    </pre>
-                  </article>
-                ))}
+                {rawLoading && !formattedRawItems.length ? (
+                  <div className="empty-note">{t("common.loading")}</div>
+                ) : formattedRawItems.length ? (
+                  formattedRawItems.map((event) => (
+                    <article className="agent-raw-event" key={event.id}>
+                      <header>
+                        <span>
+                          <strong>{event.type}</strong>
+                          {event.summary !== t("agents.openJson") ? (
+                            <em>{event.summary}</em>
+                          ) : null}
+                        </span>
+                        <small>#{event.id}</small>
+                      </header>
+                      <pre className="agent-raw-json">
+                        <code>{highlightJson(event.value)}</code>
+                      </pre>
+                    </article>
+                  ))
+                ) : (
+                  <div className="empty-note">{t("agents.noPayload")}</div>
+                )}
               </div>
               <div className="agent-raw-controls">
                 <button
@@ -9102,9 +9459,8 @@ function AgentsPanel({
                   {t("agents.prev")}
                 </button>
                 <span>
-                  {rawEvents.length ? rawPageStart + 1 : 0}-
-                  {Math.min(rawPageStart + rawPageSize, rawEvents.length)} {t("agents.of")}{" "}
-                  {rawEvents.length}
+                  {rawTotal ? rawPageStart + 1 : 0}-
+                  {Math.min(rawPageStart + rawPageSize, rawTotal)} {t("agents.of")} {rawTotal}
                 </span>
                 <select
                   value={rawPageSize}
@@ -9114,6 +9470,7 @@ function AgentsPanel({
                   }}
                   aria-label={t("agents.rawPerPage")}
                 >
+                  <option value={5}>5</option>
                   <option value={10}>10</option>
                   <option value={20}>20</option>
                   <option value={50}>50</option>
@@ -9484,7 +9841,23 @@ function truncateText(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
 }
 
-function highlightJson(value: string) {
+// Above this size, skip per-token highlighting and render the JSON as plain text: a big
+// event would otherwise emit thousands of <span>s (and the old per-token `value.slice` made
+// it O(n²)), which froze the software-rendered webview.
+const RAW_HIGHLIGHT_LIMIT = 8000;
+
+/** True if the next non-whitespace char at/after `from` is `:` (i.e. the preceding string is
+ *  an object key). O(1) amortized — replaces an O(n) `value.slice(...).trimStart()` per token. */
+function jsonKeyFollows(value: string, from: number) {
+  let i = from;
+  while (i < value.length && (value[i] === " " || value[i] === "\t" || value[i] === "\n")) {
+    i += 1;
+  }
+  return value[i] === ":";
+}
+
+function highlightJson(value: string): ReactNode {
+  if (value.length > RAW_HIGHLIGHT_LIMIT) return value;
   const tokenPattern =
     /("(?:\\u[\da-fA-F]{4}|\\[^u]|[^"\\])*"(?=\s*:)|"(?:\\u[\da-fA-F]{4}|\\[^u]|[^"\\])*"|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
   const parts: ReactNode[] = [];
@@ -9497,7 +9870,7 @@ function highlightJson(value: string) {
       parts.push(value.slice(lastIndex, index));
     }
 
-    const className = jsonTokenClass(token, value.slice(index + token.length));
+    const className = jsonTokenClass(token, jsonKeyFollows(value, index + token.length));
     parts.push(
       <span className={className} key={`${index}-${token}`}>
         {token}
@@ -9513,9 +9886,9 @@ function highlightJson(value: string) {
   return parts;
 }
 
-function jsonTokenClass(token: string, rest: string) {
+function jsonTokenClass(token: string, isKey: boolean) {
   if (token.startsWith('"')) {
-    return rest.trimStart().startsWith(":") ? "json-key" : "json-string";
+    return isKey ? "json-key" : "json-string";
   }
   if (token === "true" || token === "false") return "json-boolean";
   if (token === "null") return "json-null";
@@ -11255,6 +11628,73 @@ function DockerWorkbench() {
     if (refreshed.ok) setContainers(refreshed.value);
   }
 
+  // Act on a whole compose group at once (e.g. stop/remove every `vizzita-dev` container).
+  // "start"/"stop" only target containers that aren't already in the desired state.
+  async function runGroupAction(
+    project: string,
+    list: DockerContainer[],
+    action: "start" | "stop" | "restart" | "remove",
+  ) {
+    const targets =
+      action === "start"
+        ? list.filter((container) => container.state !== "running")
+        : action === "stop"
+          ? list.filter((container) => container.state === "running")
+          : list;
+    if (!targets.length) return;
+    const groupName = project || t("docker.standalone");
+    if (action === "remove") {
+      const ok = await confirm({
+        title: t("docker.groupRemoveTitle"),
+        body: t("docker.groupRemoveBody", { name: groupName, count: targets.length }),
+        confirmLabel: t("common.remove"),
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    const result = await api.dockerContainersAction(
+      targets.map((container) => container.id),
+      action,
+    );
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    if (action === "remove") targets.forEach((container) => closeLog(container.id));
+    const refreshed = await api.dockerListContainers();
+    if (refreshed.ok) setContainers(refreshed.value);
+  }
+
+  function groupMenu(project: string, list: DockerContainer[]): MenuItem[] {
+    const running = list.filter((container) => container.state === "running").length;
+    return [
+      {
+        label: t("docker.groupStopAll"),
+        icon: <Square size={14} />,
+        disabled: !running,
+        onSelect: () => void runGroupAction(project, list, "stop"),
+      },
+      {
+        label: t("docker.groupStartAll"),
+        icon: <Play size={14} />,
+        disabled: running === list.length,
+        onSelect: () => void runGroupAction(project, list, "start"),
+      },
+      {
+        label: t("docker.groupRestartAll"),
+        icon: <RotateCw size={14} />,
+        onSelect: () => void runGroupAction(project, list, "restart"),
+      },
+      { separator: true },
+      {
+        label: t("docker.groupRemoveAll"),
+        icon: <Trash2 size={14} />,
+        danger: true,
+        onSelect: () => void runGroupAction(project, list, "remove"),
+      },
+    ];
+  }
+
   async function removeResource(
     kind: "image" | "network" | "volume",
     id: string,
@@ -11372,19 +11812,45 @@ function DockerWorkbench() {
                   const groupKey = `grp:${project}`;
                   return (
                     <div key={groupKey} className="docker-group">
-                      <button
-                        type="button"
+                      <div
                         className="docker-group-head"
-                        onClick={() => toggle(groupKey)}
+                        onContextMenu={(event) => openMenu(event, groupMenu(project, list))}
                       >
-                        {collapsed.has(groupKey) ? (
-                          <ChevronRight size={12} />
-                        ) : (
-                          <ChevronDown size={12} />
-                        )}
-                        <Boxes aria-hidden="true" size={12} />
-                        <span>{project || t("docker.standalone")}</span>
-                      </button>
+                        <button
+                          type="button"
+                          className="docker-group-toggle"
+                          onClick={() => toggle(groupKey)}
+                        >
+                          {collapsed.has(groupKey) ? (
+                            <ChevronRight size={12} />
+                          ) : (
+                            <ChevronDown size={12} />
+                          )}
+                          <Boxes aria-hidden="true" size={12} />
+                          <span>{project || t("docker.standalone")}</span>
+                        </button>
+                        <span className="docker-count">{list.length}</span>
+                        <div className="docker-group-actions">
+                          {list.some((container) => container.state === "running") ? (
+                            <button
+                              type="button"
+                              className="docker-row-act"
+                              title={t("docker.groupStopAll")}
+                              onClick={() => void runGroupAction(project, list, "stop")}
+                            >
+                              <Square aria-hidden="true" size={13} />
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="docker-row-act"
+                            title={t("docker.groupActions")}
+                            onClick={(event) => openMenu(event, groupMenu(project, list))}
+                          >
+                            <MoreVertical aria-hidden="true" size={13} />
+                          </button>
+                        </div>
+                      </div>
                       {!collapsed.has(groupKey)
                         ? list.map((container) => (
                             <div

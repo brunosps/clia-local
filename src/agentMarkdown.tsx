@@ -1,4 +1,4 @@
-import { isValidElement, useState, type ComponentProps, type ReactNode } from "react";
+import { isValidElement, memo, useState, type ComponentProps, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -8,9 +8,14 @@ import "highlight.js/styles/atom-one-dark.css";
 import { useI18n } from "./i18n";
 import type { AgentMessage } from "./types";
 
-// highlight.js: detect language when untagged; don't throw on unknown tags (e.g. advpl).
+// highlight.js: only colorize blocks with an explicit language tag (```sql, ```ts, …);
+// don't throw on unknown tags (e.g. advpl). `detect` is deliberately OFF — auto-detecting
+// the language runs every bundled grammar against every block on each render, which pegs
+// the UI thread while streaming a long agent reply (re-highlighting all messages per token)
+// and froze the webview on WSLg. highlight.js ships no AdvPL grammar anyway, so detection
+// only ever mis-tagged AdvPL/TLPP — dropping it costs nothing and keeps the tab responsive.
 const rehypePlugins: ComponentProps<typeof Markdown>["rehypePlugins"] = [
-  [rehypeHighlight, { detect: true, ignoreMissing: true }],
+  [rehypeHighlight, { ignoreMissing: true }],
 ];
 
 type FileLinkProps = {
@@ -111,7 +116,12 @@ export function AgentMarkdown({ text, ...links }: { text: string } & FileLinkPro
   );
 }
 
-export function AgentMessageContent({
+// Memoized: the timeline maps every message through this, so without memoization a single
+// streaming token (which replaces only the in-flight message) would re-render — and
+// re-highlight — every prior message. `appendAgentStreamingDelta` keeps stable references
+// for untouched messages and the link callbacks are `useCallback`-stable, so the default
+// shallow comparison correctly re-renders only the message whose content actually changed.
+export const AgentMessageContent = memo(function AgentMessageContent({
   message,
   ...links
 }: { message: AgentMessage } & FileLinkProps) {
@@ -138,4 +148,4 @@ export function AgentMessageContent({
   }
 
   return null;
-}
+});

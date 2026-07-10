@@ -277,6 +277,7 @@ struct RequirementCardUpdateInput {
     priority: Option<String>,
     checklist_json: Option<String>,
     agent_prompt: Option<String>,
+    referenced_files_json: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +298,13 @@ struct RequirementAttachmentInput {
     card_id: i64,
     file_path: String,
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveRequirementAttachmentInput {
+    card_id: i64,
+    file_name: String,
+    data_base64: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -966,7 +974,9 @@ fn create_requirement_card(
     if let Some(priority) = input.priority.as_deref() {
         let priority = normalize_card_priority(priority);
         if priority != "medium" {
-            return Ok(db.update_requirement_card(card.id, None, None, Some(&priority), None, None)?);
+            return Ok(
+                db.update_requirement_card(card.id, None, None, Some(&priority), None, None, None)?,
+            );
         }
     }
     Ok(card)
@@ -1050,6 +1060,13 @@ fn update_requirement_card(
             "[]".to_string()
         }
     });
+    let referenced_files_json = input.referenced_files_json.as_deref().map(|value| {
+        if serde_json::from_str::<serde_json::Value>(value).is_ok() {
+            value.trim().to_string()
+        } else {
+            "[]".to_string()
+        }
+    });
     let db = store::Database::open(&app_data_dir(&app)?)?;
     Ok(db.update_requirement_card(
         input.id,
@@ -1058,6 +1075,7 @@ fn update_requirement_card(
         priority.as_deref(),
         checklist_json.as_deref(),
         input.agent_prompt.as_deref(),
+        referenced_files_json.as_deref(),
     )?)
 }
 
@@ -1126,6 +1144,22 @@ fn add_requirement_attachment(
     let file_path = path.display().to_string();
     let db = store::Database::open(&app_data_dir(&app)?)?;
     Ok(db.add_requirement_attachment(input.card_id, &name, &file_path)?)
+}
+
+/// Persist a pasted image / clipboard bytes directly as a managed task attachment
+/// (no file dialog, no project path). Used by the Description paste handler.
+#[tauri::command]
+fn save_requirement_attachment(
+    app: tauri::AppHandle,
+    input: SaveRequirementAttachmentInput,
+) -> AppResult<store::RequirementAttachment> {
+    let bytes = general_purpose::STANDARD
+        .decode(input.data_base64.as_bytes())
+        .map_err(anyhow::Error::from)?;
+    let trimmed = input.file_name.trim();
+    let name = if trimmed.is_empty() { "attachment" } else { trimmed };
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(db.save_requirement_attachment_bytes(input.card_id, name, &bytes)?)
 }
 
 #[tauri::command]
@@ -1704,6 +1738,25 @@ fn list_agent_run_metrics(
     Ok(db.list_agent_run_events(session_id)?)
 }
 
+/// Lazily-loaded, paginated raw provider events (newest first) for the "raw" drawer. Kept
+/// out of `list_agent_messages` so switching conversations doesn't pull every raw blob.
+#[tauri::command]
+fn list_agent_raw_events(
+    app: tauri::AppHandle,
+    session_id: i64,
+    limit: i64,
+    offset: i64,
+) -> AppResult<store::AgentRawEventsPage> {
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(db.list_agent_raw_events(session_id, limit, offset)?)
+}
+
+#[tauri::command]
+fn get_agent_raw_payload(app: tauri::AppHandle, session_id: i64) -> AppResult<String> {
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(db.get_agent_raw_payload(session_id)?)
+}
+
 #[derive(Debug, Deserialize)]
 struct WarmAgentRuntimeInput {
     profile_id: i64,
@@ -1779,8 +1832,22 @@ fn configure_rtk(
     )?)
 }
 
+// Runs on a blocking thread pool (never the main thread): it spawns the provider CLI
+// (`codex`/`claude`) for a health/warm check, which can take many seconds. As a plain sync
+// command it ran on Tauri's main thread and serialized behind every other command — so a
+// conversation switch (which fires this) blocked `list_agent_messages` for ~15s. Keeping the
+// blocking work off the main thread lets the chat load instantly.
 #[tauri::command]
-fn warm_agent_runtime(
+async fn warm_agent_runtime(
+    app: tauri::AppHandle,
+    input: WarmAgentRuntimeInput,
+) -> AppResult<agent::AgentProviderHealth> {
+    tauri::async_runtime::spawn_blocking(move || warm_agent_runtime_inner(app, input))
+        .await
+        .map_err(|error| anyhow::anyhow!("warm runtime task failed: {error}"))?
+}
+
+fn warm_agent_runtime_inner(
     app: tauri::AppHandle,
     input: WarmAgentRuntimeInput,
 ) -> AppResult<agent::AgentProviderHealth> {
@@ -2058,6 +2125,17 @@ fn docker_list_volumes() -> AppResult<Vec<docker::DockerVolume>> {
 #[tauri::command]
 fn docker_container_action(id: String, action: String) -> AppResult<()> {
     Ok(docker::container_action(&id, &action)?)
+}
+
+/// Bulk container action (stop/remove/… a whole compose group). Async + spawn_blocking so the
+/// blocking `docker` call — which may take several seconds across many containers — never
+/// stalls Tauri's main thread and freezes the UI.
+#[tauri::command]
+async fn docker_containers_action(ids: Vec<String>, action: String) -> AppResult<()> {
+    tauri::async_runtime::spawn_blocking(move || docker::containers_action(&ids, &action))
+        .await
+        .map_err(|error| anyhow::anyhow!("docker bulk action task failed: {error}"))??;
+    Ok(())
 }
 
 #[tauri::command]
@@ -4961,6 +5039,19 @@ fn app_data_dir(app: &tauri::AppHandle) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
+/// True when running under WSL (used to apply WSLg-specific rendering workarounds).
+fn is_wsl() -> bool {
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSL_INTEROP").is_some() {
+        return true;
+    }
+    std::fs::read_to_string("/proc/version")
+        .map(|version| {
+            let version = version.to_ascii_lowercase();
+            version.contains("microsoft") || version.contains("wsl")
+        })
+        .unwrap_or(false)
+}
+
 pub fn run() {
     // Hidden subcommand: when invoked by git as the interactive-rebase sequence
     // editor (`<exe> --dwgui-rebase-editor <todo-file>`), overwrite the todo file
@@ -4974,6 +5065,25 @@ pub fn run() {
         std::process::exit(0);
     }
 
+    // WSLg's native Wayland path crashes WebKitGTK with "Error reading events from display:
+    // Connection reset by peer" under rendering load (tab switches, agent output). Force GTK
+    // onto X11 (XWayland) + software rendering when running under WSL — mirrors
+    // scripts/dev-tauri.mjs so a packaged build is as stable as `pnpm dev`. Safe here: this
+    // runs before Tauri starts any threads or initializes GTK.
+    if is_wsl() {
+        for (key, value) in [
+            ("GDK_BACKEND", "x11"),
+            ("WEBKIT_DISABLE_COMPOSITING_MODE", "1"),
+            ("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+            ("LIBGL_ALWAYS_SOFTWARE", "1"),
+            ("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe"),
+        ] {
+            if std::env::var_os(key).is_none() {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -4982,6 +5092,17 @@ pub fn run() {
         .setup(|app| {
             if let Err(error) = app.state::<terminal::TerminalManager>().cleanup_temp_logs() {
                 eprintln!("failed to clean terminal temp logs: {error}");
+            }
+            // A child agent process never survives an app restart, so any session persisted
+            // as `running` is stale. Reset them now — otherwise the UI's 3s reconcile poll
+            // (and full-app re-render) spins forever, making the whole app feel laggy.
+            match app_data_dir(app.handle()).and_then(|dir| store::Database::open(&dir)) {
+                Ok(db) => {
+                    if let Err(error) = db.mark_stale_running_sessions() {
+                        eprintln!("failed to reset stale running agent sessions: {error}");
+                    }
+                }
+                Err(error) => eprintln!("failed to open db for stale-session sweep: {error}"),
             }
             // Make Deploy → Máquinas work out of the box: point WINBOX_BIN at the
             // bundled winbox CLI when the user hasn't set it explicitly. (Running the
@@ -5015,6 +5136,7 @@ pub fn run() {
             upsert_requirement_stage_form,
             list_requirement_attachments,
             add_requirement_attachment,
+            save_requirement_attachment,
             remove_requirement_attachment,
             preview_requirement_attachment,
             download_requirement_attachment,
@@ -5036,6 +5158,8 @@ pub fn run() {
             list_agent_sessions,
             list_agent_sessions_for_card,
             list_agent_messages,
+            list_agent_raw_events,
+            get_agent_raw_payload,
             reset_agent_chat,
             send_agent_message,
             stop_agent_session,
@@ -5157,6 +5281,7 @@ pub fn run() {
             docker_list_networks,
             docker_list_volumes,
             docker_container_action,
+            docker_containers_action,
             docker_remove_image,
             docker_remove_network,
             docker_remove_volume,

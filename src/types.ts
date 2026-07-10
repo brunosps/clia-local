@@ -331,6 +331,8 @@ export type RequirementCard = {
   checklist_json: string;
   /** Free-form instructions appended to the agent prompt when running this task. */
   agent_prompt: string;
+  /** JSON-encoded ReferencedFile[] — source files linked via `@` mentions in the body. */
+  referenced_files_json: string;
   status: RequirementStatus | string;
   prd_slug?: string | null;
   /** Which workbench flow this card follows; null/undefined = shared intake backlog. */
@@ -346,6 +348,14 @@ export type ChecklistItem = {
   id: string;
   text: string;
   done: boolean;
+};
+
+/** A source file linked from a task body via an `@` mention (`referenced_files_json`).
+ *  `name` is the basename shown inline; `path` is the project-relative path stored so
+ *  the agent can read the exact file. */
+export type ReferencedFile = {
+  name: string;
+  path: string;
 };
 
 export type RequirementStageForm = {
@@ -743,6 +753,18 @@ export type AgentMessage = {
   content: string;
   raw_json?: string | null;
   created_at: string;
+};
+
+/** A single raw provider event, fetched lazily/paginated for the "raw" drawer
+ *  (kept out of the chat message load — see `api.listAgentRawEvents`). */
+export type AgentRawEvent = {
+  id: number;
+  raw_json: string;
+};
+
+export type AgentRawEventsPage = {
+  items: AgentRawEvent[];
+  total: number;
 };
 
 export type AgentRunEvent = {
