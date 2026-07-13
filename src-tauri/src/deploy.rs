@@ -24,6 +24,21 @@ pub struct ApproveDeployVersionInput {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ReviewFindingOverrideInput {
+    pub version_id: String,
+    pub path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DismissReviewFindingInput {
+    pub version_id: String,
+    pub path: String,
+    pub reason: String,
+    pub justification: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct PrepareDeployTargetInput {
     pub version_id: String,
     pub machine_id: String,
@@ -118,6 +133,26 @@ pub fn approve_version(
         anyhow::bail!("deploy version has blocking secret findings");
     }
     db.approve_deploy_version(&input.version_id)
+}
+
+pub fn dismiss_review_finding(
+    db: &store::Database,
+    input: DismissReviewFindingInput,
+) -> anyhow::Result<store::DeployVersion> {
+    deploy_package::dismiss_review_finding(
+        db,
+        &input.version_id,
+        &input.path,
+        &input.reason,
+        &input.justification,
+    )
+}
+
+pub fn restore_review_finding(
+    db: &store::Database,
+    input: ReviewFindingOverrideInput,
+) -> anyhow::Result<store::DeployVersion> {
+    deploy_package::restore_review_finding(db, &input.version_id, &input.path, &input.reason)
 }
 
 pub fn get_environment(

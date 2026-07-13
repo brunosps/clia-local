@@ -35,6 +35,18 @@ pub struct SecretFinding {
     pub blocking: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DismissedReviewFinding {
+    pub path: String,
+    pub reason: String,
+    pub justification: String,
+    pub dismissed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_from_version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_from_label: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct PackagedProject {
     project: store::Project,
@@ -114,6 +126,7 @@ pub fn create_package(
         manifest_path: &manifest_path.display().to_string(),
         manifest_json: "{}",
         blocking_findings_json: "[]",
+        dismissed_findings_json: "[]",
     })?;
     let mut findings = Vec::<SecretFinding>::new();
     deploy_plan::write_analysis_artifacts(&artifact_root, &plan_bundle)?;
@@ -192,6 +205,7 @@ pub fn create_package(
         &plan_bundle,
         &package_strategy,
     )?;
+    let dismissed_findings = inherited_dismissed_findings(db, &version, &findings)?;
     let manifest = build_manifest(
         &workspace,
         &stack,
@@ -201,16 +215,19 @@ pub fn create_package(
         &detection,
         &plan_bundle,
         &findings,
+        &dismissed_findings,
     )?;
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     std::fs::write(&manifest_path, &manifest_json)
         .with_context(|| format!("failed to write {}", manifest_path.display()))?;
     let findings_json = serde_json::to_string(&findings)?;
+    let dismissed_findings_json = serde_json::to_string(&dismissed_findings)?;
     db.update_deploy_version_manifest(
         &version.id,
         &manifest_path.display().to_string(),
         &manifest_json,
         &findings_json,
+        &dismissed_findings_json,
     )
 }
 
@@ -295,6 +312,7 @@ pub fn create_repair_version_from_run(
         manifest_path: &manifest_path.display().to_string(),
         manifest_json: "{}",
         blocking_findings_json: &source_version.blocking_findings_json,
+        dismissed_findings_json: &source_version.dismissed_findings_json,
     })?;
     for project in db.list_deploy_version_projects(&source_version.id)? {
         db.add_deploy_version_project(store::DeployVersionProjectCreate {
@@ -337,6 +355,7 @@ pub fn create_repair_version_from_run(
             json!({
                 "status": "pending",
                 "blocking_findings": serde_json::from_str::<serde_json::Value>(&source_version.blocking_findings_json).unwrap_or_else(|_| json!([])),
+                "dismissed_findings": serde_json::from_str::<serde_json::Value>(&source_version.dismissed_findings_json).unwrap_or_else(|_| json!([])),
             }),
         );
     }
@@ -348,13 +367,139 @@ pub fn create_repair_version_from_run(
         &manifest_path.display().to_string(),
         &manifest_json,
         &source_version.blocking_findings_json,
+        &source_version.dismissed_findings_json,
     )
 }
 
 pub fn has_blocking_findings(version: &store::DeployVersion) -> bool {
-    serde_json::from_str::<Vec<SecretFinding>>(&version.blocking_findings_json)
-        .map(|findings| findings.iter().any(|finding| finding.blocking))
+    active_blocking_findings(version)
+        .map(|findings| !findings.is_empty())
         .unwrap_or(true)
+}
+
+pub fn active_blocking_findings(
+    version: &store::DeployVersion,
+) -> anyhow::Result<Vec<SecretFinding>> {
+    let findings = parse_review_findings(&version.blocking_findings_json)?;
+    let dismissed = parse_dismissed_findings_lossy(&version.dismissed_findings_json);
+    Ok(findings
+        .into_iter()
+        .filter(|finding| finding.blocking && !finding_is_dismissed(finding, &dismissed))
+        .collect())
+}
+
+pub fn dismiss_review_finding(
+    db: &store::Database,
+    version_id: &str,
+    path: &str,
+    reason: &str,
+    justification: &str,
+) -> anyhow::Result<store::DeployVersion> {
+    let justification = justification.trim();
+    if justification.chars().count() < 10 {
+        anyhow::bail!("review finding dismissal requires a justification with at least 10 chars");
+    }
+    let version = db.get_deploy_version(version_id)?;
+    let findings = parse_review_findings(&version.blocking_findings_json)?;
+    let Some(finding) = findings
+        .iter()
+        .find(|finding| finding.blocking && finding_matches(finding, path, reason))
+    else {
+        anyhow::bail!("blocking review finding not found for this deploy version");
+    };
+    let mut dismissed = parse_dismissed_findings_lossy(&version.dismissed_findings_json);
+    dismissed.retain(|item| !dismissed_matches(item, path, reason));
+    dismissed.push(DismissedReviewFinding {
+        path: finding.path.clone(),
+        reason: finding.reason.clone(),
+        justification: justification.to_string(),
+        dismissed_at: chrono::Utc::now().to_rfc3339(),
+        inherited_from_version_id: None,
+        inherited_from_label: None,
+    });
+    let dismissed_json = serde_json::to_string(&dismissed)?;
+    eprintln!(
+        "deploy_review_finding_dismissed version={} path={} reason={}",
+        version.id, finding.path, finding.reason
+    );
+    db.update_deploy_version_dismissed_findings(&version.id, &dismissed_json)
+}
+
+pub fn restore_review_finding(
+    db: &store::Database,
+    version_id: &str,
+    path: &str,
+    reason: &str,
+) -> anyhow::Result<store::DeployVersion> {
+    let version = db.get_deploy_version(version_id)?;
+    let mut dismissed = parse_dismissed_findings_lossy(&version.dismissed_findings_json);
+    let original_len = dismissed.len();
+    dismissed.retain(|item| !dismissed_matches(item, path, reason));
+    if dismissed.len() == original_len {
+        return Ok(version);
+    }
+    let dismissed_json = serde_json::to_string(&dismissed)?;
+    eprintln!(
+        "deploy_review_finding_restored version={} path={} reason={}",
+        version.id, path, reason
+    );
+    db.update_deploy_version_dismissed_findings(&version.id, &dismissed_json)
+}
+
+fn inherited_dismissed_findings(
+    db: &store::Database,
+    version: &store::DeployVersion,
+    findings: &[SecretFinding],
+) -> anyhow::Result<Vec<DismissedReviewFinding>> {
+    let previous_versions = db.list_deploy_versions(&version.stack_id)?;
+    let mut inherited = Vec::new();
+    for finding in findings.iter().filter(|finding| finding.blocking) {
+        for previous in previous_versions
+            .iter()
+            .filter(|previous| previous.id != version.id)
+        {
+            let previous_dismissed =
+                parse_dismissed_findings_lossy(&previous.dismissed_findings_json);
+            if let Some(match_) = previous_dismissed
+                .iter()
+                .find(|item| dismissed_matches(item, &finding.path, &finding.reason))
+            {
+                inherited.push(DismissedReviewFinding {
+                    path: finding.path.clone(),
+                    reason: finding.reason.clone(),
+                    justification: match_.justification.clone(),
+                    dismissed_at: match_.dismissed_at.clone(),
+                    inherited_from_version_id: Some(previous.id.clone()),
+                    inherited_from_label: Some(previous.label.clone()),
+                });
+                break;
+            }
+        }
+    }
+    Ok(inherited)
+}
+
+fn parse_review_findings(payload: &str) -> anyhow::Result<Vec<SecretFinding>> {
+    serde_json::from_str::<Vec<SecretFinding>>(payload)
+        .with_context(|| "invalid deploy review findings payload")
+}
+
+fn parse_dismissed_findings_lossy(payload: &str) -> Vec<DismissedReviewFinding> {
+    serde_json::from_str::<Vec<DismissedReviewFinding>>(payload).unwrap_or_default()
+}
+
+fn finding_is_dismissed(finding: &SecretFinding, dismissed: &[DismissedReviewFinding]) -> bool {
+    dismissed
+        .iter()
+        .any(|item| dismissed_matches(item, &finding.path, &finding.reason))
+}
+
+fn finding_matches(finding: &SecretFinding, path: &str, reason: &str) -> bool {
+    finding.path == path && finding.reason == reason
+}
+
+fn dismissed_matches(item: &DismissedReviewFinding, path: &str, reason: &str) -> bool {
+    item.path == path && item.reason == reason
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -367,6 +512,7 @@ fn build_manifest(
     detection: &deploy_detect::DeployDetectionReport,
     plan_bundle: &deploy_plan::DeployPlanBundle,
     findings: &[SecretFinding],
+    dismissed_findings: &[DismissedReviewFinding],
 ) -> anyhow::Result<serde_json::Value> {
     Ok(json!({
         "schema_version": "1.0",
@@ -424,7 +570,8 @@ fn build_manifest(
         },
         "review": {
             "status": "pending",
-            "blocking_findings": findings
+            "blocking_findings": findings,
+            "dismissed_findings": dismissed_findings
         }
     }))
 }
@@ -2275,6 +2422,7 @@ mod tests {
             review_status: "pending".to_string(),
             reviewed_at: None,
             blocking_findings_json: r#"[{"path":".env","reason":"legacy"}]"#.to_string(),
+            dismissed_findings_json: "[]".to_string(),
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
@@ -2283,6 +2431,106 @@ mod tests {
             r#"[{"path":".env","reason":"excluded","severity":"warning","blocking":false}]"#
                 .to_string();
         assert!(!has_blocking_findings(&version));
+    }
+
+    #[test]
+    fn dismissed_review_finding_allows_approval() {
+        let (root, db, version, finding) = review_finding_version("dismiss-allows-approval", None);
+
+        assert!(crate::deploy::approve_version(
+            &db,
+            crate::deploy::ApproveDeployVersionInput {
+                version_id: version.id.clone(),
+            },
+        )
+        .is_err());
+
+        let dismissed = dismiss_review_finding(
+            &db,
+            &version.id,
+            &finding.path,
+            &finding.reason,
+            "owner accepted fake test token",
+        )
+        .expect("dismiss finding");
+        assert!(!has_blocking_findings(&dismissed));
+
+        let approved = crate::deploy::approve_version(
+            &db,
+            crate::deploy::ApproveDeployVersionInput {
+                version_id: version.id,
+            },
+        )
+        .expect("approve dismissed version");
+        assert_eq!(approved.review_status, "approved");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn dismissed_review_finding_is_inherited_by_content() {
+        let (root, db, first, finding) = review_finding_version("dismiss-inherit", None);
+        let first = dismiss_review_finding(
+            &db,
+            &first.id,
+            &finding.path,
+            &finding.reason,
+            "owner accepted fake test token",
+        )
+        .expect("dismiss first finding");
+        let stack = db.get_deploy_stack(&first.stack_id).expect("stack");
+        let second = db
+            .create_deploy_version(store::DeployVersionCreate {
+                stack_id: &stack.id,
+                workspace_id: first.workspace_id,
+                label: "deploy-002",
+                target_machine_id: None,
+                artifact_path: "/tmp/package-2",
+                manifest_path: "/tmp/package-2/manifest.json",
+                manifest_json: "{}",
+                blocking_findings_json: &serde_json::to_string(&vec![finding.clone()])
+                    .expect("findings"),
+                dismissed_findings_json: "[]",
+            })
+            .expect("second version");
+
+        let inherited = inherited_dismissed_findings(&db, &second, std::slice::from_ref(&finding))
+            .expect("inherit dismissed finding");
+
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].path, finding.path);
+        assert_eq!(inherited[0].reason, finding.reason);
+        assert_eq!(
+            inherited[0].inherited_from_label.as_deref(),
+            Some("deploy-001")
+        );
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn restored_review_finding_blocks_again() {
+        let (root, db, version, finding) = review_finding_version("dismiss-restore", None);
+        let dismissed = dismiss_review_finding(
+            &db,
+            &version.id,
+            &finding.path,
+            &finding.reason,
+            "owner accepted fake test token",
+        )
+        .expect("dismiss finding");
+        assert!(!has_blocking_findings(&dismissed));
+
+        let restored = restore_review_finding(&db, &version.id, &finding.path, &finding.reason)
+            .expect("restore finding");
+
+        assert!(has_blocking_findings(&restored));
+        assert!(crate::deploy::approve_version(
+            &db,
+            crate::deploy::ApproveDeployVersionInput {
+                version_id: version.id,
+            },
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
@@ -2302,6 +2550,7 @@ mod tests {
             review_status: "pending".to_string(),
             reviewed_at: None,
             blocking_findings_json: "[]".to_string(),
+            dismissed_findings_json: "[]".to_string(),
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
@@ -3010,5 +3259,48 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).expect("mkdir");
         root
+    }
+
+    fn review_finding_version(
+        label: &str,
+        dismissed_findings_json: Option<&str>,
+    ) -> (
+        PathBuf,
+        store::Database,
+        store::DeployVersion,
+        SecretFinding,
+    ) {
+        let root = temp_root(label);
+        let db = store::Database::open(&root).expect("open db");
+        let workspace_root = root.join("workspace");
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("workspace");
+        let stack = db
+            .create_deploy_stack(store::DeployStackCreate {
+                workspace_id: workspace.id,
+                name: "App deploy",
+                slug: "app-deploy",
+            })
+            .expect("stack");
+        let finding = SecretFinding::blocking(
+            "projects/app/source/src/lib.rs".to_string(),
+            "secret-like content marker `bearer `".to_string(),
+        );
+        let findings_json = serde_json::to_string(&vec![finding.clone()]).expect("findings");
+        let version = db
+            .create_deploy_version(store::DeployVersionCreate {
+                stack_id: &stack.id,
+                workspace_id: workspace.id,
+                label: "deploy-001",
+                target_machine_id: None,
+                artifact_path: "/tmp/package",
+                manifest_path: "/tmp/package/manifest.json",
+                manifest_json: "{}",
+                blocking_findings_json: &findings_json,
+                dismissed_findings_json: dismissed_findings_json.unwrap_or("[]"),
+            })
+            .expect("version");
+        (root, db, version, finding)
     }
 }

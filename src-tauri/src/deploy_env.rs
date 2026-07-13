@@ -436,6 +436,7 @@ mod tests {
                 manifest_path: &artifact.join("manifest.json").display().to_string(),
                 manifest_json: "{}",
                 blocking_findings_json: "[]",
+                dismissed_findings_json: "[]",
             })
             .expect("version");
 
@@ -518,6 +519,7 @@ mod tests {
             review_status: "pending".to_string(),
             reviewed_at: None,
             blocking_findings_json: "[]".to_string(),
+            dismissed_findings_json: "[]".to_string(),
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }

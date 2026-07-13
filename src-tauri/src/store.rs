@@ -327,6 +327,7 @@ pub struct DeployVersion {
     pub review_status: String,
     pub reviewed_at: Option<String>,
     pub blocking_findings_json: String,
+    pub dismissed_findings_json: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -404,6 +405,7 @@ pub struct DeployVersionCreate<'a> {
     pub manifest_path: &'a str,
     pub manifest_json: &'a str,
     pub blocking_findings_json: &'a str,
+    pub dismissed_findings_json: &'a str,
 }
 
 pub struct DeployVersionProjectCreate<'a> {
@@ -853,9 +855,9 @@ impl Database {
             "insert into deploy_versions (
                id, stack_id, workspace_id, label, status, target_machine_id, artifact_path,
                manifest_path, manifest_json, review_status, reviewed_at,
-               blocking_findings_json, created_at, updated_at
+               blocking_findings_json, dismissed_findings_json, created_at, updated_at
              ) values (?1, ?2, ?3, ?4, 'review_required', ?5, ?6, ?7, ?8,
-                       'pending', null, ?9, ?10, ?10)",
+                       'pending', null, ?9, ?10, ?11, ?11)",
             params![
                 id,
                 input.stack_id.trim(),
@@ -866,6 +868,7 @@ impl Database {
                 input.manifest_path.trim(),
                 input.manifest_json,
                 input.blocking_findings_json,
+                input.dismissed_findings_json,
                 now
             ],
         )?;
@@ -888,7 +891,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "select id, stack_id, workspace_id, label, status, target_machine_id, artifact_path,
                     manifest_path, manifest_json, review_status, reviewed_at,
-                    blocking_findings_json, created_at, updated_at
+                    blocking_findings_json, dismissed_findings_json, created_at, updated_at
              from deploy_versions
              where stack_id = ?1
              order by created_at desc",
@@ -985,6 +988,7 @@ impl Database {
         manifest_path: &str,
         manifest_json: &str,
         blocking_findings_json: &str,
+        dismissed_findings_json: &str,
     ) -> anyhow::Result<DeployVersion> {
         let version = self.get_deploy_version(version_id)?;
         let conn = self.workspace_connect_by_id(version.workspace_id)?;
@@ -994,15 +998,35 @@ impl Database {
              set manifest_path = ?1,
                  manifest_json = ?2,
                  blocking_findings_json = ?3,
-                 updated_at = ?4
-             where id = ?5",
+                 dismissed_findings_json = ?4,
+                 updated_at = ?5
+             where id = ?6",
             params![
                 manifest_path.trim(),
                 manifest_json,
                 blocking_findings_json,
+                dismissed_findings_json,
                 now,
                 version_id
             ],
+        )?;
+        self.get_deploy_version(version_id)
+    }
+
+    pub fn update_deploy_version_dismissed_findings(
+        &self,
+        version_id: &str,
+        dismissed_findings_json: &str,
+    ) -> anyhow::Result<DeployVersion> {
+        let version = self.get_deploy_version(version_id)?;
+        let conn = self.workspace_connect_by_id(version.workspace_id)?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "update deploy_versions
+             set dismissed_findings_json = ?1,
+                 updated_at = ?2
+             where id = ?3",
+            params![dismissed_findings_json, now, version_id],
         )?;
         self.get_deploy_version(version_id)
     }
@@ -3527,6 +3551,7 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
               review_status text not null,
               reviewed_at text,
               blocking_findings_json text not null default '[]',
+              dismissed_findings_json text not null default '[]',
               created_at text not null,
               updated_at text not null,
               unique(stack_id, label)
@@ -3869,6 +3894,12 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
     ensure_column(conn, "deploy_runs", "agent_name", "text")?;
     ensure_column(conn, "deploy_runs", "agent_provider", "text")?;
     ensure_column(conn, "deploy_runs", "agent_model", "text")?;
+    ensure_column(
+        conn,
+        "deploy_versions",
+        "dismissed_findings_json",
+        "text not null default '[]'",
+    )?;
     ensure_column(
         conn,
         "deploy_runs",
@@ -5283,8 +5314,9 @@ fn deploy_version_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeployVe
         review_status: row.get(9)?,
         reviewed_at: row.get(10)?,
         blocking_findings_json: row_text_lossy(row, 11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        dismissed_findings_json: row_text_lossy(row, 12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -5370,7 +5402,7 @@ fn find_deploy_version_with_conn(
     conn.query_row(
         "select id, stack_id, workspace_id, label, status, target_machine_id, artifact_path,
                 manifest_path, manifest_json, review_status, reviewed_at,
-                blocking_findings_json, created_at, updated_at
+                blocking_findings_json, dismissed_findings_json, created_at, updated_at
          from deploy_versions
          where id = ?1
          limit 1",
@@ -5716,6 +5748,7 @@ mod tests {
                 manifest_path: &artifact_root.join("manifest.json").display().to_string(),
                 manifest_json: "{}",
                 blocking_findings_json: "[]",
+                dismissed_findings_json: "[]",
             })
             .expect("create version");
         db.add_deploy_version_project(DeployVersionProjectCreate {
@@ -5845,6 +5878,7 @@ mod tests {
                 manifest_path: "/tmp/package/manifest.json",
                 manifest_json: "{}",
                 blocking_findings_json: "[]",
+                dismissed_findings_json: "[]",
             })
             .expect("create version");
         let conn = Connection::open(workspace_db_path(&workspace.root_path)).expect("workspace db");

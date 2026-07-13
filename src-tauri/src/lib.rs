@@ -3822,6 +3822,24 @@ fn approve_deploy_version(
 }
 
 #[tauri::command]
+fn dismiss_review_finding(
+    app: tauri::AppHandle,
+    input: deploy::DismissReviewFindingInput,
+) -> AppResult<store::DeployVersion> {
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(deploy::dismiss_review_finding(&db, input)?)
+}
+
+#[tauri::command]
+fn restore_review_finding(
+    app: tauri::AppHandle,
+    input: deploy::ReviewFindingOverrideInput,
+) -> AppResult<store::DeployVersion> {
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(deploy::restore_review_finding(&db, input)?)
+}
+
+#[tauri::command]
 fn create_deploy_repair_version(
     app: tauri::AppHandle,
     input: deploy::CreateDeployRepairVersionInput,
@@ -5289,6 +5307,8 @@ pub fn run() {
             create_deploy_package,
             read_deploy_artifact,
             approve_deploy_version,
+            dismiss_review_finding,
+            restore_review_finding,
             create_deploy_repair_version,
             get_deploy_environment,
             save_deploy_environment,
