@@ -51,6 +51,7 @@ pub struct DeployPlanReport {
 pub struct DeployPlanFinding {
     pub path: String,
     pub reason: String,
+    pub hint: String,
     pub severity: String,
     pub blocking: bool,
 }
@@ -372,7 +373,7 @@ Required JSON shape:
         "docker": true
       }},
       "ports": [],
-      "healthcheck": null,
+      "healthcheck": "curl -fsS http://127.0.0.1:8080/health" or "http://127.0.0.1:8080/health" or {{"type":"http","url":"http://127.0.0.1:8080/health","interval_seconds":10}} or null,
       "risks": []
     }}
   ],
@@ -393,7 +394,7 @@ Rules:
 - Use only paths below scripts/ for scripts.
 - Do not include secret values.
 - Do not write outside the deploy package or copied project directories.
-- For web_service/custom_compose/mixed, include a healthcheck.
+- For web_service/custom_compose/mixed, include a healthcheck as a non-empty string command/URL or an object with non-empty url, command, or test.
 - For desktop_dev, include build-dev.sh, verify-dev.sh, and run-dev.sh scripts.
 - For Windows targets, include install-deploy.ps1 guidance when relevant.
 
@@ -476,7 +477,7 @@ fn validation_errors(validation: &Value) -> Vec<String> {
     validation_findings(validation)
         .into_iter()
         .filter(|finding| finding.blocking)
-        .map(|finding| format!("{}: {}", finding.path, finding.reason))
+        .map(|finding| format!("{}: {} — {}", finding.path, finding.reason, finding.hint))
         .collect()
 }
 
@@ -494,6 +495,13 @@ fn validation_findings(validation: &Value) -> Vec<DeployPlanFinding> {
                         .unwrap_or("analysis/deploy-plan.json")
                         .trim();
                     let reason = finding.get("reason").and_then(Value::as_str)?.trim();
+                    let hint = finding
+                        .get("hint")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|hint| !hint.is_empty())
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| finding_hint(path, reason));
                     Some(DeployPlanFinding {
                         path: if path.is_empty() {
                             "analysis/deploy-plan.json".to_string()
@@ -501,6 +509,7 @@ fn validation_findings(validation: &Value) -> Vec<DeployPlanFinding> {
                             path.to_string()
                         },
                         reason: reason.to_string(),
+                        hint,
                         severity: finding
                             .get("severity")
                             .and_then(Value::as_str)
@@ -583,14 +592,19 @@ fn validate_plan(
             "analysis/deploy-plan.json",
             "unsupported deploy plan schema_version",
             true,
+            "Defina `schema_version` como `1.0` e regenere o plano no formato atual do ADE.",
         ));
     }
     let strategy = plan.get("strategy").and_then(Value::as_str).unwrap_or("");
-    if strategy != package_strategy(&detection.projects) {
+    let detected_strategy = package_strategy(&detection.projects);
+    if strategy != detected_strategy {
         findings.push(finding(
             "analysis/deploy-plan.json",
             "deploy plan strategy does not match detected project set",
             true,
+            &format!(
+                "A estratégia detectada para esta seleção é `{detected_strategy}`; regenere o plano ou ajuste a seleção de projetos."
+            ),
         ));
     }
     let detected_project_ids = detection
@@ -615,6 +629,7 @@ fn validate_plan(
             "analysis/deploy-plan.json",
             "deploy plan projects do not match selected projects",
             true,
+            "Liste exatamente os `project_id` selecionados em `projects[]` ou ajuste a seleção de projetos antes de replanejar.",
         ));
     }
     if plan.get("confidence").and_then(Value::as_str) == Some("low") {
@@ -622,6 +637,7 @@ fn validate_plan(
             "analysis/deploy-plan.json",
             "agent deploy plan confidence is low",
             true,
+            "O agente declarou confiança baixa; revise o contexto do projeto (evidence files) e replaneje.",
         ));
     }
     if strategy == "desktop_dev" && target.map(is_invalid_desktop_dev_target).unwrap_or(false) {
@@ -629,6 +645,7 @@ fn validate_plan(
             "analysis/deploy-plan.json",
             "desktop_dev deploy requires an Ubuntu Desktop Deploy VM or Windows 11 target",
             true,
+            "Selecione uma Ubuntu Desktop Deploy VM ou um alvo Windows 11 antes de executar este plano desktop_dev.",
         ));
     }
     if matches!(strategy, "web_service" | "custom_compose" | "mixed")
@@ -638,19 +655,26 @@ fn validate_plan(
             "analysis/deploy-plan.json",
             "web or compose deploy plans must include at least one healthcheck",
             true,
+            "Inclua `projects[].healthcheck` (string de comando/URL ou objeto {url, interval_seconds, ...}) ou um healthcheck top-level no plano.",
         ));
     }
     match file_artifacts_from_plan(plan) {
         Ok(artifacts) => {
             for (path, body) in artifacts {
                 if contains_secret_marker(&body) {
-                    findings.push(finding(&path, "artifact contains secret-like marker", true));
+                    findings.push(finding(
+                        &path,
+                        "artifact contains secret-like marker",
+                        true,
+                        SECRET_MARKER_HINT,
+                    ));
                 }
                 if contains_dangerous_command(&body) {
                     findings.push(finding(
                         &path,
                         "artifact contains dangerous host command",
                         true,
+                        DANGEROUS_COMMAND_HINT,
                     ));
                 }
             }
@@ -660,6 +684,7 @@ fn validate_plan(
                 "analysis/deploy-plan.json",
                 &error.to_string(),
                 true,
+                artifact_error_hint(&error.to_string()),
             ));
         }
     }
@@ -674,12 +699,18 @@ fn validate_plan(
             "analysis/deploy-plan.json",
             "deploy plan must include package-local scripts",
             true,
+            "Inclua ao menos um item em `artifacts.scripts[]` com `path` em `scripts/` e `body` executável.",
         ));
     }
     for script in scripts {
         let path = script.get("path").and_then(Value::as_str).unwrap_or("");
         if !safe_script_path(path) {
-            findings.push(finding(path, "script path must stay under scripts/", true));
+            findings.push(finding(
+                path,
+                "script path must stay under scripts/",
+                true,
+                "Mova o script para `scripts/<nome>.sh` — só esse diretório é permitido.",
+            ));
         }
         if script
             .get("body")
@@ -688,17 +719,28 @@ fn validate_plan(
             .unwrap_or("")
             .is_empty()
         {
-            findings.push(finding(path, "script body is required", true));
+            findings.push(finding(
+                path,
+                "script body is required",
+                true,
+                "Preencha `artifacts.scripts[].body` com o conteúdo do script ou remova o item vazio.",
+            ));
         }
         if let Some(body) = script.get("body").and_then(Value::as_str) {
             if contains_secret_marker(body) {
-                findings.push(finding(path, "script contains secret-like marker", true));
+                findings.push(finding(
+                    path,
+                    "script contains secret-like marker",
+                    true,
+                    SECRET_MARKER_HINT,
+                ));
             }
             if contains_dangerous_command(body) {
                 findings.push(finding(
                     path,
                     "script contains dangerous host command",
                     true,
+                    DANGEROUS_COMMAND_HINT,
                 ));
             }
         }
@@ -854,21 +896,49 @@ fn same_project_ids(detected: &[i64], planned: &[i64]) -> bool {
 
 fn plan_healthchecks(plan: &Value) -> Vec<String> {
     let mut healthchecks = Vec::new();
-    if let Some(value) = plan.get("healthcheck").and_then(Value::as_str) {
-        if !value.trim().is_empty() {
-            healthchecks.push(value.to_string());
-        }
+    if let Some(value) = plan.get("healthcheck").and_then(healthcheck_repr) {
+        healthchecks.push(value);
     }
     if let Some(projects) = plan.get("projects").and_then(Value::as_array) {
         for project in projects {
-            if let Some(value) = project.get("healthcheck").and_then(Value::as_str) {
-                if !value.trim().is_empty() {
-                    healthchecks.push(value.to_string());
-                }
+            if let Some(value) = project.get("healthcheck").and_then(healthcheck_repr) {
+                healthchecks.push(value);
             }
         }
     }
     healthchecks
+}
+
+fn healthcheck_repr(value: &Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return non_empty_string(value);
+    }
+    let object = value.as_object()?;
+    ["url", "command", "test"]
+        .into_iter()
+        .find_map(|key| object.get(key).and_then(healthcheck_field_repr))
+}
+
+fn healthcheck_field_repr(value: &Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return non_empty_string(value);
+    }
+    if let Some(values) = value.as_array() {
+        let joined = values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        return non_empty_string(&joined);
+    }
+    None
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn package_strategy(projects: &[DeployProjectDetection]) -> String {
@@ -913,13 +983,69 @@ fn target_json(machine: &store::WorkspaceMachine) -> Value {
     })
 }
 
-fn finding(path: &str, reason: &str, blocking: bool) -> Value {
+const SECRET_MARKER_HINT: &str = "Troque o valor literal por placeholder `${VAR}` e declare a chave em `env.required` para preenchê-la na UI de deploy.";
+const DANGEROUS_COMMAND_HINT: &str = "Remova ou ajuste o comando apontado no artefato; alvos na raiz (`rm -rf /`) são bloqueados — use paths específicos.";
+
+fn finding(path: &str, reason: &str, blocking: bool, hint: &str) -> Value {
     json!({
         "path": if path.trim().is_empty() { "analysis/deploy-plan.json" } else { path },
         "reason": reason,
+        "hint": hint,
         "severity": if blocking { "error" } else { "warning" },
         "blocking": blocking,
     })
+}
+
+fn finding_hint(_path: &str, reason: &str) -> String {
+    match reason {
+        "unsupported deploy plan schema_version" => {
+            "Defina `schema_version` como `1.0` e regenere o plano no formato atual do ADE."
+        }
+        "deploy plan strategy does not match detected project set" => {
+            "Regenere o plano com a estratégia detectada para a seleção atual ou ajuste a seleção de projetos."
+        }
+        "deploy plan projects do not match selected projects" => {
+            "Liste exatamente os `project_id` selecionados em `projects[]` ou ajuste a seleção de projetos antes de replanejar."
+        }
+        "agent deploy plan confidence is low" => {
+            "O agente declarou confiança baixa; revise o contexto do projeto (evidence files) e replaneje."
+        }
+        "desktop_dev deploy requires an Ubuntu Desktop Deploy VM or Windows 11 target" => {
+            "Selecione uma Ubuntu Desktop Deploy VM ou um alvo Windows 11 antes de executar este plano desktop_dev."
+        }
+        "web or compose deploy plans must include at least one healthcheck" => {
+            "Inclua `projects[].healthcheck` (string de comando/URL ou objeto {url, interval_seconds, ...}) ou um healthcheck top-level no plano."
+        }
+        "artifact contains secret-like marker" | "script contains secret-like marker" => {
+            SECRET_MARKER_HINT
+        }
+        "artifact contains dangerous host command" | "script contains dangerous host command" => {
+            DANGEROUS_COMMAND_HINT
+        }
+        "script path must stay under scripts/" => {
+            "Mova o script para `scripts/<nome>.sh` — só esse diretório é permitido."
+        }
+        "script body is required" => {
+            "Preencha `artifacts.scripts[].body` com o conteúdo do script ou remova o item vazio."
+        }
+        "deploy plan must include package-local scripts" => {
+            "Inclua ao menos um item em `artifacts.scripts[]` com `path` em `scripts/` e `body` executável."
+        }
+        _ => artifact_error_hint(reason),
+    }
+    .to_string()
+}
+
+fn artifact_error_hint(reason: &str) -> &'static str {
+    if reason.contains("artifact path escapes package") {
+        "Mantenha artefatos dentro do pacote ou `projects/<nome>/...`; paths absolutos e `..` são bloqueados."
+    } else if reason.contains("artifact missing path") {
+        "Defina `path` no artefato de compose/Dockerfile dentro do pacote antes de replanejar."
+    } else if reason.contains("artifact missing body") {
+        "Defina `body` no artefato de compose/Dockerfile com o conteúdo que será empacotado."
+    } else {
+        "Corrija o artefato indicado pelo validador e regenere o plano antes de empacotar."
+    }
 }
 
 fn safe_script_path(path: &str) -> bool {
@@ -1140,6 +1266,14 @@ mod tests {
         }
     }
 
+    fn custom_compose_detection(root: &str) -> DeployDetectionReport {
+        let mut detection = web_detection(root);
+        detection.projects[0].has_compose = true;
+        detection.projects[0].deploy_strategy = "custom_compose".to_string();
+        detection.projects[0].strategy_reason = "Compose runtime contract detected".to_string();
+        detection
+    }
+
     fn web_plan_with_dockerfile(body: &str) -> Value {
         json!({
             "schema_version": PLAN_SCHEMA_VERSION,
@@ -1264,6 +1398,155 @@ mod tests {
     }
 
     #[test]
+    fn plan_healthchecks_accepts_string_and_object_shapes() {
+        let plan = json!({
+            "healthcheck": " http://127.0.0.1:8080/health ",
+            "projects": [
+                {"healthcheck": {"type": "http", "url": "http://127.0.0.1:5000/"}},
+                {"healthcheck": {"command": "curl -fsS http://127.0.0.1:5001/health"}},
+                {"healthcheck": {"test": ["CMD", "curl", "-fsS", "http://127.0.0.1:5002/health"]}}
+            ]
+        });
+
+        assert_eq!(
+            plan_healthchecks(&plan),
+            vec![
+                "http://127.0.0.1:8080/health".to_string(),
+                "http://127.0.0.1:5000/".to_string(),
+                "curl -fsS http://127.0.0.1:5001/health".to_string(),
+                "CMD curl -fsS http://127.0.0.1:5002/health".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_healthchecks_ignores_empty_null_and_missing_object_fields() {
+        let plan = json!({
+            "healthcheck": null,
+            "projects": [
+                {"healthcheck": ""},
+                {"healthcheck": {}},
+                {"healthcheck": {"url": "  "}},
+                {"healthcheck": {"command": null}},
+                {"healthcheck": {"test": []}},
+                {"healthcheck": {"type": "http", "interval_seconds": 10}}
+            ]
+        });
+
+        assert!(plan_healthchecks(&plan).is_empty());
+    }
+
+    #[test]
+    fn web_plan_with_empty_object_healthcheck_is_blocked() {
+        let mut plan = web_plan_with_dockerfile("FROM alpine\n");
+        plan["projects"][0]["healthcheck"] = json!({});
+
+        let report = validate_plan(&plan, &web_detection("/tmp/lettrebox"), None);
+
+        assert_eq!(
+            report.get("status").and_then(Value::as_str),
+            Some("blocked")
+        );
+        assert!(validation_error_summary(&report).contains("must include at least one healthcheck"));
+    }
+
+    fn assert_all_findings_have_hints(report: &Value) {
+        let findings = validation_findings(report);
+        assert!(!findings.is_empty(), "expected validation findings");
+        for finding in findings {
+            assert!(
+                !finding.hint.trim().is_empty(),
+                "missing hint for {}: {}",
+                finding.path,
+                finding.reason
+            );
+            assert!(
+                validation_errors(report)
+                    .iter()
+                    .any(|error| !finding.blocking || error.contains(&finding.hint)),
+                "blocking hint must be included in validation_errors"
+            );
+        }
+    }
+
+    #[test]
+    fn blocking_validation_findings_include_actionable_hints() {
+        let schema_report = validate_plan(&json!({}), &web_detection("/tmp/lettrebox"), None);
+        assert_all_findings_have_hints(&schema_report);
+
+        let strategy_report =
+            validate_plan(&desktop_plan(), &web_detection("/tmp/lettrebox"), None);
+        assert_all_findings_have_hints(&strategy_report);
+        assert!(validation_error_summary(&strategy_report).contains("web_service"));
+
+        let mut project_plan = desktop_plan();
+        project_plan["projects"] = json!([{"project_id": 999}]);
+        let project_report = validate_plan(&project_plan, &desktop_detection(), None);
+        assert_all_findings_have_hints(&project_report);
+
+        let mut confidence_plan = desktop_plan();
+        confidence_plan["confidence"] = json!("low");
+        let confidence_report = validate_plan(&confidence_plan, &desktop_detection(), None);
+        assert_all_findings_have_hints(&confidence_report);
+
+        let desktop_target_report = validate_plan(
+            &desktop_plan(),
+            &desktop_detection(),
+            Some(&target_machine("ubuntu_deploy_vm", "linux_cloud")),
+        );
+        assert_all_findings_have_hints(&desktop_target_report);
+
+        let mut healthcheck_plan = web_plan_with_dockerfile("FROM alpine\n");
+        healthcheck_plan["projects"][0]["healthcheck"] = Value::Null;
+        let healthcheck_report =
+            validate_plan(&healthcheck_plan, &web_detection("/tmp/lettrebox"), None);
+        assert_all_findings_have_hints(&healthcheck_report);
+
+        let artifact_report = validate_plan(
+            &web_plan_with_dockerfile("FROM alpine\nRUN rm -rf /\nENV password=hunter2\n"),
+            &web_detection("/tmp/lettrebox"),
+            None,
+        );
+        assert_all_findings_have_hints(&artifact_report);
+
+        let artifact_schema_report = validate_plan(
+            &json!({
+                "schema_version": PLAN_SCHEMA_VERSION,
+                "strategy": "web_service",
+                "confidence": "high",
+                "projects": [{"project_id": 1, "healthcheck": "curl -fsS http://127.0.0.1:5000/"}],
+                "artifacts": {
+                    "compose": {"body": "services: {}"},
+                    "scripts": [{"path": "scripts/deploy.sh", "body": "echo ok"}]
+                }
+            }),
+            &web_detection("/tmp/lettrebox"),
+            None,
+        );
+        assert_all_findings_have_hints(&artifact_schema_report);
+
+        let script_report = validate_plan(
+            &json!({
+                "schema_version": PLAN_SCHEMA_VERSION,
+                "strategy": "web_service",
+                "confidence": "high",
+                "projects": [{"project_id": 1, "healthcheck": "curl -fsS http://127.0.0.1:5000/"}],
+                "artifacts": {
+                    "compose": null,
+                    "dockerfiles": [],
+                    "scripts": [
+                        {"path": "../deploy.sh", "body": ""},
+                        {"path": "scripts/unsafe.sh", "body": "password=hunter2\nrm -rf /"}
+                    ]
+                }
+            }),
+            &web_detection("/tmp/lettrebox"),
+            None,
+        );
+        assert_all_findings_have_hints(&script_report);
+    }
+
+    #[test]
     fn dangerous_command_detection_is_root_target_aware() {
         assert!(!contains_dangerous_command(
             "RUN apt-get update && rm -rf /var/lib/apt/lists/*"
@@ -1327,13 +1610,16 @@ mod tests {
         });
         assert_eq!(
             validation_errors(&validation),
-            vec!["projects/app/Dockerfile: artifact contains dangerous host command".to_string()]
+            vec![format!(
+                "projects/app/Dockerfile: artifact contains dangerous host command — {DANGEROUS_COMMAND_HINT}"
+            )]
         );
         assert_eq!(
             validation_findings(&validation),
             vec![DeployPlanFinding {
                 path: "projects/app/Dockerfile".to_string(),
                 reason: "artifact contains dangerous host command".to_string(),
+                hint: DANGEROUS_COMMAND_HINT.to_string(),
                 severity: "error".to_string(),
                 blocking: true,
             }]
@@ -1380,6 +1666,21 @@ CMD ["/usr/local/bin/lettrebox"]
         let plan = serde_json::from_str::<Value>(plan).expect("parse owner deploy plan");
         let report = validate_plan(&plan, &web_detection("/home/bruno/wks/letrebox"), None);
         assert_eq!(report.get("status").and_then(Value::as_str), Some("passed"));
+        assert!(!validation_blocks_package(&report));
+    }
+
+    #[test]
+    fn real_owner_lettrebox_object_healthcheck_fixture_validates_as_custom_compose() {
+        let plan = include_str!("../tests/fixtures/lettrebox-deploy-plan-object-healthcheck.json");
+        let plan = serde_json::from_str::<Value>(plan)
+            .expect("parse owner deploy plan with object healthcheck");
+        let report = validate_plan(
+            &plan,
+            &custom_compose_detection("/home/bruno/wks/letrebox"),
+            None,
+        );
+        assert_eq!(report.get("status").and_then(Value::as_str), Some("passed"));
+        assert_eq!(validation_findings(&report), Vec::new());
         assert!(!validation_blocks_package(&report));
     }
 
