@@ -1,0 +1,179 @@
+{
+  "artifacts": {
+    "compose": {
+      "body": "name: lettrebox-deploy\n\nservices:\n  postgres:\n    image: postgres:16-alpine\n    restart: unless-stopped\n    environment:\n      POSTGRES_USER: rwfw\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rwfw}\n      POSTGRES_DB: lettrebox\n    volumes:\n      - deploy-postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U rwfw -d lettrebox\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n      start_period: 5s\n\n  mailhog:\n    image: mailhog/mailhog:latest\n    restart: unless-stopped\n    ports:\n      - \"8025:8025\"\n    healthcheck:\n      test: [\"CMD\", \"wget\", \"--quiet\", \"--spider\", \"http://localhost:8025\"]\n      interval: 10s\n      timeout: 3s\n      retries: 5\n      start_period: 5s\n\n  stalwart:\n    image: stalwartlabs/stalwart:v0.16.12\n    restart: unless-stopped\n    environment:\n      STALWART_RECOVERY_ADMIN: admin:${STALWART_ADMIN_PASSWORD:-lettrebox-deploy-admin}\n    volumes:\n      - deploy-stalwart-data:/var/lib/stalwart\n      - ${LETTREBOX_SRC:-./projects/lettrebox/source}/config/stalwart/config.json:/etc/stalwart/config.json:ro\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -fsS http://localhost:8080/healthz/ready >/dev/null || wget --quiet --spider http://localhost:8080/healthz/ready\"]\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n\n  app:\n    build:\n      context: ${LETTREBOX_SRC:-./projects/lettrebox/source}\n      dockerfile: Dockerfile.prod\n    restart: unless-stopped\n    environment:\n      RWFW_ENV: production\n      RWFW__DATABASE__URL: postgres://rwfw:${POSTGRES_PASSWORD:-rwfw}@postgres:5432/lettrebox\n      STALWART_BASE_URL: http://stalwart:8080\n      STALWART_RECOVERY_ADMIN: admin:${STALWART_ADMIN_PASSWORD:-lettrebox-deploy-admin}\n      NFSE_CALLBACK_TOKEN: ${NFSE_CALLBACK_TOKEN:-lettrebox-deploy-nfse-callback-token-0001}\n      RWFW__ACCOUNTS__MAIL__HOST: ${RWFW__ACCOUNTS__MAIL__HOST:-mailhog}\n      RWFW__ACCOUNTS__MAIL__PORT: \"${RWFW__ACCOUNTS__MAIL__PORT:-1025}\"\n      RWFW__ACCOUNTS__MAIL__FROM: \"${RWFW__ACCOUNTS__MAIL__FROM:-Lettrebox <no-reply@lettrebox.local>}\"\n      RWFW__ACCOUNTS__MAIL__STARTTLS: \"${RWFW__ACCOUNTS__MAIL__STARTTLS:-false}\"\n      RWFW__ACCOUNTS__STALWART__BASE_URL: http://stalwart:8080\n      RWFW__ACCOUNTS__STALWART__USERNAME: admin\n      RWFW__ACCOUNTS__STALWART__PASSWORD: ${STALWART_ADMIN_PASSWORD:-lettrebox-deploy-admin}\n    depends_on:\n      postgres:\n        condition: service_healthy\n      mailhog:\n        condition: service_healthy\n      stalwart:\n        condition: service_healthy\n    ports:\n      - \"8080:8080\"\n    healthcheck:\n      test: [\"CMD\", \"curl\", \"-fsS\", \"http://127.0.0.1:8080/health\"]\n      interval: 10s\n      timeout: 5s\n      retries: 12\n      start_period: 20s\n\nvolumes:\n  deploy-postgres-data:\n  deploy-stalwart-data:\n",
+      "path": "docker-compose.yml"
+    },
+    "dockerfiles": [],
+    "scripts": [
+      {
+        "body": "#!/usr/bin/env bash\nset -euo pipefail\n\nPKG_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)\"\ncd \"$PKG_DIR\"\n\nSRC_DIR=\"${LETTREBOX_SRC:-./projects/lettrebox/source}\"\n\nlog() { printf '[preflight] %s\\n' \"$*\"; }\nfail() { printf '[preflight] FAIL: %s\\n' \"$*\" >&2; exit 1; }\n\ncommand -v docker >/dev/null 2>&1 || fail \"docker not found on PATH\"\ndocker compose version >/dev/null 2>&1 || fail \"docker compose plugin not available\"\n\n[ -f docker-compose.yml ] || fail \"docker-compose.yml missing in package\"\n[ -d \"$SRC_DIR\" ] || fail \"source dir not found: $SRC_DIR\"\n[ -f \"$SRC_DIR/Dockerfile.prod\" ] || fail \"$SRC_DIR/Dockerfile.prod missing\"\n[ -f \"$SRC_DIR/config/stalwart/config.json\" ] || fail \"$SRC_DIR/config/stalwart/config.json missing\"\n[ -f \"$SRC_DIR/Cargo.toml\" ] || fail \"$SRC_DIR/Cargo.toml missing\"\n\nfor port in 8080 8025; do\n  if (exec 3<>\"/dev/tcp/127.0.0.1/${port}\") 2>/dev/null; then\n    exec 3<&-; exec 3>&-\n    fail \"host port ${port} already in use\"\n  fi\ndone\n\ndocker compose -p lettrebox-deploy -f docker-compose.yml config >/dev/null || fail \"compose config invalid\"\n\nlog \"OK: docker/compose available, source tree present, ports 8080/8025 free\"\n",
+        "path": "scripts/preflight.sh",
+        "purpose": "validate docker toolchain, required files, and free host ports before build"
+      },
+      {
+        "body": "#!/usr/bin/env bash\nset -euo pipefail\n\nPKG_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)\"\ncd \"$PKG_DIR\"\n\nexport LETTREBOX_SRC=\"${LETTREBOX_SRC:-./projects/lettrebox/source}\"\n\n\"$PKG_DIR/scripts/preflight.sh\"\n\ndocker compose -p lettrebox-deploy -f docker-compose.yml build\ndocker compose -p lettrebox-deploy -f docker-compose.yml up -d\n\n\"$PKG_DIR/scripts/healthcheck.sh\"\n",
+        "path": "scripts/deploy.sh",
+        "purpose": "build and start the lettrebox compose stack"
+      },
+      {
+        "body": "#!/usr/bin/env bash\nset -euo pipefail\n\nURL=\"${HEALTH_URL:-http://127.0.0.1:8080/health}\"\nTIMEOUT=\"${HEALTH_TIMEOUT:-600}\"\nINTERVAL=\"${HEALTH_INTERVAL:-5}\"\n\ndeadline=$(( $(date +%s) + TIMEOUT ))\nattempt=0\nwhile [ \"$(date +%s)\" -lt \"$deadline\" ]; do\n  attempt=$((attempt + 1))\n  if curl -fsS \"$URL\" >/dev/null 2>&1; then\n    printf '[health] OK after %s attempt(s): %s\\n' \"$attempt\" \"$URL\"\n    exit 0\n  fi\n  sleep \"$INTERVAL\"\ndone\n\nprintf '[health] FAIL: %s did not become healthy in %ss\\n' \"$URL\" \"$TIMEOUT\" >&2\ndocker compose -p lettrebox-deploy -f docker-compose.yml ps >&2 || true\ndocker compose -p lettrebox-deploy -f docker-compose.yml logs --tail=200 app >&2 || true\nexit 1\n",
+        "path": "scripts/healthcheck.sh",
+        "purpose": "poll /health until the app is ready or timeout"
+      },
+      {
+        "body": "#!/usr/bin/env bash\nset -euo pipefail\n\nPKG_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)\"\ncd \"$PKG_DIR\"\n\ndocker compose -p lettrebox-deploy -f docker-compose.yml down\n",
+        "path": "scripts/teardown.sh",
+        "purpose": "stop and remove the lettrebox compose stack (keeps volumes)"
+      }
+    ]
+  },
+  "confidence": "high",
+  "env": {
+    "optional": [
+      "POSTGRES_PASSWORD",
+      "STALWART_ADMIN_PASSWORD",
+      "NFSE_CALLBACK_TOKEN",
+      "RWFW__ACCOUNTS__MAIL__HOST",
+      "RWFW__ACCOUNTS__MAIL__PORT",
+      "RWFW__ACCOUNTS__MAIL__FROM",
+      "RWFW__ACCOUNTS__MAIL__STARTTLS",
+      "STRIPE_SECRET_KEY",
+      "STRIPE_WEBHOOK_SECRET",
+      "FOCUS_NFE_TOKEN",
+      "BULWARK_APP_NAME",
+      "BULWARK_SESSION_SECRET",
+      "BULWARK_ADMIN_PASSWORD",
+      "LETTREBOX_SRC"
+    ],
+    "required": []
+  },
+  "planner": {
+    "agent": {
+      "context_mode": "auto_lean",
+      "model": "claude-opus-4-7",
+      "name": "Claude Code",
+      "profile_id": 1,
+      "provider": "claude",
+      "sandbox": "danger-full-access"
+    },
+    "agent_session_id": 3,
+    "mode": "agent_required",
+    "producer": "selected-agent"
+  },
+  "ports": [
+    {
+      "container": 8080,
+      "host": 8080,
+      "protocol": "tcp",
+      "purpose": "lettrebox portal http",
+      "service": "app"
+    },
+    {
+      "container": 8025,
+      "host": 8025,
+      "protocol": "tcp",
+      "purpose": "mailhog webmail ui",
+      "service": "mailhog"
+    }
+  ],
+  "projects": [
+    {
+      "healthcheck": {
+        "interval_seconds": 10,
+        "retries": 12,
+        "start_period_seconds": 20,
+        "timeout_seconds": 5,
+        "type": "http",
+        "url": "http://127.0.0.1:8080/health"
+      },
+      "install": [
+        "docker compose -p lettrebox-deploy -f docker-compose.yml build"
+      ],
+      "kind": "compose",
+      "name": "lettrebox",
+      "package_manager": "cargo",
+      "ports": [
+        {
+          "container": 8080,
+          "host": 8080,
+          "protocol": "tcp",
+          "purpose": "app http"
+        },
+        {
+          "container": 8025,
+          "host": 8025,
+          "protocol": "tcp",
+          "purpose": "mailhog ui"
+        }
+      ],
+      "project_id": 1,
+      "requires": {
+        "desktop_session": false,
+        "docker": true,
+        "system_packages": [
+          "docker.io",
+          "docker-compose-plugin",
+          "curl"
+        ]
+      },
+      "risks": [
+        "Rust release build inside container is slow on first run (cold cargo cache); expect several minutes before app becomes healthy.",
+        "Stalwart CORS + Bulwark webmail require a one-shot `restart stalwart` after first boot; only enabled if the `webmail` profile is activated (not by default).",
+        "Stripe/Focus NFS-e envs (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, FOCUS_NFE_TOKEN) are not set by defaults; billing/NFS-e flows stay inert until real keys are provided.",
+        "Compose publishes 8080 and 8025 on the host; VM must not have prior services bound to those ports."
+      ],
+      "run": "docker compose -p lettrebox-deploy -f docker-compose.yml up -d --build",
+      "runtime": "compose",
+      "verify": [
+        "docker compose -p lettrebox-deploy -f docker-compose.yml config >/dev/null",
+        "test -f projects/lettrebox/source/Dockerfile.prod",
+        "test -f projects/lettrebox/source/compose.deploy.yaml"
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "level": "medium",
+      "message": "First-run Rust release build inside the container downloads and compiles the full dependency graph; expect a multi-minute cold build before the app healthcheck flips to healthy."
+    },
+    {
+      "level": "medium",
+      "message": "Compose binds host ports 8080 (app) and 8025 (MailHog UI); collision with anything already listening on the VM will block the deploy — preflight will fail fast."
+    },
+    {
+      "level": "low",
+      "message": "Stalwart config is mounted read-only from ${LETTREBOX_SRC}/config/stalwart/config.json; if the copied source omits that file the stalwart service will not start."
+    },
+    {
+      "level": "low",
+      "message": "Billing (Stripe) and NFS-e (Focus) envs are optional and stay unset by default, so those flows are inert. Not a deploy blocker but must be configured before end-to-end product validation."
+    }
+  ],
+  "schema_version": "1.0",
+  "services": [
+    {
+      "image_or_build": "build:projects/lettrebox/source/Dockerfile.prod",
+      "kind": "web",
+      "name": "app",
+      "port": 8080
+    },
+    {
+      "image_or_build": "postgres:16-alpine",
+      "kind": "database",
+      "name": "postgres"
+    },
+    {
+      "image_or_build": "mailhog/mailhog:latest",
+      "kind": "smtp",
+      "name": "mailhog"
+    },
+    {
+      "image_or_build": "stalwartlabs/stalwart:v0.16.12",
+      "kind": "mail",
+      "name": "stalwart"
+    }
+  ],
+  "strategy": "custom_compose",
+  "summary": "lettrebox ships a package-ready compose.deploy.yaml + Dockerfile.prod. The plan reuses the project's own runtime contract (Rust/axum app on :8080 + Postgres 16 + MailHog + Stalwart) and copies the project source under projects/lettrebox/source so compose builds inside the ADE package via LETTREBOX_SRC."
+}
