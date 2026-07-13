@@ -25,11 +25,13 @@ import {
   deployEnvironmentValues,
   deployErrorMessage,
   deployFindingPathLabel,
+  deployPendingEnvironmentKeys,
   deployRepairInfo,
   deployReadiness,
   deployStepLabel,
   deployStatusLabel,
   deployStatusTone,
+  formatDeployPendingEnvironmentLabel,
   hasPassedPrepareRun,
   isAutomaticDeployTarget,
   isLegacyDeployPackage,
@@ -37,6 +39,7 @@ import {
   latestVersion,
   parseBlockingFindings,
   parseDeployFindings,
+  partitionDeployEnvironmentVariables,
   progressForDeploy,
   retryActionLabel,
   sortDeployStacks,
@@ -279,7 +282,24 @@ export default function DeployPackagesPanel({
     readiness.prepareReady &&
     canPrepareVersion(selectedVersion, selectedMachine, activeDeployEnvironment) &&
     agentReady;
-  const environmentSummary = deployEnvironmentSummary(activeDeployEnvironment);
+  const pendingEnvironmentKeys = useMemo(
+    () => deployPendingEnvironmentKeys(activeDeployEnvironment, environmentDraft),
+    [activeDeployEnvironment, environmentDraft],
+  );
+  const pendingEnvironmentKeySet = useMemo(
+    () => new Set(pendingEnvironmentKeys),
+    [pendingEnvironmentKeys],
+  );
+  const environmentPendingLabel = formatDeployPendingEnvironmentLabel(pendingEnvironmentKeys);
+  const environmentSummary =
+    environmentPendingLabel ?? deployEnvironmentSummary(activeDeployEnvironment);
+  const environmentGroups = useMemo(
+    () => partitionDeployEnvironmentVariables(activeDeployEnvironment),
+    [activeDeployEnvironment],
+  );
+  const environmentSaveLabel = pendingEnvironmentKeys.length
+    ? `Salvar ambiente — ${pendingEnvironmentKeys.length} pendentes`
+    : "Salvar ambiente";
   const prepareAlreadyPassed = selectedVersion
     ? hasPassedPrepareRun(runs, selectedVersion.id, selectedMachineId || null)
     : false;
@@ -320,8 +340,12 @@ export default function DeployPackagesPanel({
         ? {
             tone: "warning",
             title: "Preencha as variáveis do ambiente",
-            body: "Os valores ficam locais nesta máquina. Salve o ambiente antes de aprovar e preparar o target.",
-            label: "Salvar ambiente",
+            body: environmentPendingLabel
+              ? `Os valores ficam locais nesta máquina. Pendentes: ${pendingEnvironmentKeys.join(", ")}.`
+              : "Os valores ficam locais nesta máquina. Salve o ambiente antes de aprovar e preparar o target.",
+            label: environmentPendingLabel
+              ? `Salvar ambiente — ${pendingEnvironmentKeys.length} pendentes`
+              : "Salvar ambiente",
             action: "save-environment",
             disabled: environmentSaving || !selectedMachineId,
           }
@@ -1657,33 +1681,71 @@ export default function DeployPackagesPanel({
                 </summary>
                 {activeDeployEnvironment?.variables.length ? (
                   <div className="deploy-env-grid">
-                    {activeDeployEnvironment.variables.map((variable) => (
-                      <label key={variable.key}>
-                        <span>
-                          {variable.key}
-                          {variable.required ? <small>obrigatória</small> : null}
-                        </span>
-                        <input
-                          aria-label={`Valor de ${variable.key}`}
-                          type={variable.secret ? "password" : "text"}
-                          value={environmentDraft[variable.key] ?? ""}
-                          placeholder={variable.placeholder}
-                          onChange={(event) =>
-                            setEnvironmentDraft((current) => ({
-                              ...current,
-                              [variable.key]: event.target.value,
-                            }))
-                          }
-                        />
-                      </label>
-                    ))}
+                    {environmentGroups.required.length ? (
+                      <section className="deploy-env-section">
+                        <h4>Obrigatórias</h4>
+                        {environmentGroups.required.map((variable) => {
+                          const pending = pendingEnvironmentKeySet.has(variable.key);
+                          return (
+                            <label
+                              key={variable.key}
+                              className={pending ? "deploy-env-field pending" : "deploy-env-field"}
+                            >
+                              <span>
+                                {variable.key}
+                                <small>obrigatória</small>
+                                {pending ? <b>pendente</b> : null}
+                              </span>
+                              <input
+                                aria-invalid={pending}
+                                aria-label={`Valor de ${variable.key}`}
+                                type={variable.secret ? "password" : "text"}
+                                value={environmentDraft[variable.key] ?? ""}
+                                placeholder={variable.placeholder}
+                                onChange={(event) =>
+                                  setEnvironmentDraft((current) => ({
+                                    ...current,
+                                    [variable.key]: event.target.value,
+                                  }))
+                                }
+                              />
+                            </label>
+                          );
+                        })}
+                      </section>
+                    ) : null}
+                    {environmentGroups.optional.length ? (
+                      <section className="deploy-env-section">
+                        <h4>Opcionais</h4>
+                        {environmentGroups.optional.map((variable) => (
+                          <label key={variable.key} className="deploy-env-field">
+                            <span>
+                              {variable.key}
+                              <small>opcional</small>
+                            </span>
+                            <input
+                              aria-label={`Valor de ${variable.key}`}
+                              type={variable.secret ? "password" : "text"}
+                              value={environmentDraft[variable.key] ?? ""}
+                              placeholder={variable.placeholder}
+                              onChange={(event) =>
+                                setEnvironmentDraft((current) => ({
+                                  ...current,
+                                  [variable.key]: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                        ))}
+                      </section>
+                    ) : null}
                     <button
                       className="secondary-button"
                       type="button"
                       onClick={() => void saveEnvironment()}
                       disabled={environmentSaving || !selectedMachineId}
                     >
-                      <Check aria-hidden="true" size={15} /> Salvar ambiente
+                      <Check aria-hidden="true" size={15} /> {environmentSaveLabel}
                     </button>
                   </div>
                 ) : (

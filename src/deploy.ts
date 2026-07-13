@@ -288,14 +288,43 @@ export function deployEnvironmentValues(environment: DeployEnvironment | null) {
   );
 }
 
+export function deployPendingEnvironmentKeys(
+  environment: DeployEnvironment | null,
+  draft?: Record<string, string>,
+) {
+  if (!environment) return [];
+  if (!draft) return environment.missing_keys;
+  return environment.variables
+    .filter((variable) => variable.required && !(draft[variable.key] ?? variable.value).trim())
+    .map((variable) => variable.key);
+}
+
+export function partitionDeployEnvironmentVariables(environment: DeployEnvironment | null) {
+  const variables = environment?.variables ?? [];
+  return {
+    required: variables.filter((variable) => variable.required),
+    optional: variables.filter((variable) => !variable.required),
+  };
+}
+
+export function formatDeployPendingEnvironmentLabel(keys: string[], maxVisible = 4) {
+  if (!keys.length) return null;
+  const visible = keys.slice(0, maxVisible);
+  const suffix = keys.length > visible.length ? ` +${keys.length - visible.length}` : "";
+  const countLabel = keys.length === 1 ? "1 pendente" : `${keys.length} pendentes`;
+  return `${countLabel}: ${visible.join(", ")}${suffix}`;
+}
+
 export function deployEnvironmentSummary(environment: DeployEnvironment | null) {
   if (!environment) return "Ambiente não carregado";
   if (!environment.variables.length) return "Sem variáveis obrigatórias";
   if (environment.ready) {
     return `${environment.saved_count}/${environment.required_count} variáveis salvas`;
   }
-  if (environment.missing_keys.length === 1) return "1 variável pendente";
-  return `${environment.missing_keys.length} variáveis pendentes`;
+  return (
+    formatDeployPendingEnvironmentLabel(deployPendingEnvironmentKeys(environment)) ??
+    "Variáveis pendentes"
+  );
 }
 
 export function isLegacyDeployPackage(version: DeployVersion | null) {

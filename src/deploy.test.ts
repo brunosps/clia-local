@@ -8,16 +8,19 @@ import {
   deployErrorMessage,
   deployEnvironmentSummary,
   deployFindingPathLabel,
+  deployPendingEnvironmentKeys,
   deployRepairInfo,
   deployReadiness,
   deployRunsForContext,
   deployStatusLabel,
+  formatDeployPendingEnvironmentLabel,
   isLegacyDeployPackage,
   hasPassedPrepareRun,
   latestDeployRunForContext,
   latestVersion,
   parseBlockingFindings,
   parseDeployFindings,
+  partitionDeployEnvironmentVariables,
   progressForDeploy,
   retryActionLabel,
   sortDeployStacks,
@@ -227,7 +230,85 @@ describe("deploy helpers", () => {
         saved_count: 0,
         missing_keys: ["DATABASE_URL"],
       }),
-    ).toBe("1 variável pendente");
+    ).toBe("1 pendente: DATABASE_URL");
+  });
+
+  it("formats and groups pending deploy environment variables", () => {
+    const environment: DeployEnvironment = {
+      ...readyEnvironment,
+      ready: false,
+      required_count: 5,
+      saved_count: 0,
+      missing_keys: ["DATABASE_URL", "SMTP_URL"],
+      variables: [
+        ...readyEnvironment.variables,
+        {
+          key: "SMTP_URL",
+          value: "",
+          placeholder: "smtp://local",
+          required: true,
+          secret: true,
+          saved: false,
+        },
+        {
+          key: "API_KEY",
+          value: "",
+          placeholder: "",
+          required: true,
+          secret: true,
+          saved: false,
+        },
+        {
+          key: "REDIS_URL",
+          value: "",
+          placeholder: "redis://localhost:6379",
+          required: true,
+          secret: false,
+          saved: false,
+        },
+        {
+          key: "SENTRY_DSN",
+          value: "",
+          placeholder: "",
+          required: true,
+          secret: true,
+          saved: false,
+        },
+        {
+          key: "LOG_LEVEL",
+          value: "",
+          placeholder: "info",
+          required: false,
+          secret: false,
+          saved: false,
+        },
+      ],
+    };
+
+    expect(deployPendingEnvironmentKeys(environment)).toEqual(["DATABASE_URL", "SMTP_URL"]);
+    expect(
+      deployPendingEnvironmentKeys(environment, {
+        DATABASE_URL: "postgres://local",
+        SMTP_URL: "",
+        API_KEY: "",
+        REDIS_URL: "",
+        SENTRY_DSN: "",
+        LOG_LEVEL: "",
+      }),
+    ).toEqual(["SMTP_URL", "API_KEY", "REDIS_URL", "SENTRY_DSN"]);
+    expect(
+      formatDeployPendingEnvironmentLabel([
+        "DATABASE_URL",
+        "SMTP_URL",
+        "API_KEY",
+        "REDIS_URL",
+        "SENTRY_DSN",
+      ]),
+    ).toBe("5 pendentes: DATABASE_URL, SMTP_URL, API_KEY, REDIS_URL +1");
+    expect(partitionDeployEnvironmentVariables(environment)).toMatchObject({
+      required: expect.arrayContaining([expect.objectContaining({ key: "DATABASE_URL" })]),
+      optional: [expect.objectContaining({ key: "LOG_LEVEL" })],
+    });
   });
 
   it("parses deploy package findings with warning and legacy blocking semantics", () => {
