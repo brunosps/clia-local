@@ -6,6 +6,7 @@ mod deploy_executor;
 mod deploy_package;
 mod deploy_plan;
 mod deploy_repair;
+mod deploy_scan;
 mod docker;
 mod git;
 mod lsp;

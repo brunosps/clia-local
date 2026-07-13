@@ -1,5 +1,6 @@
 use crate::agent;
 use crate::deploy_detect::{self, DeployDetectionReport, DeployProjectDetection};
+use crate::deploy_scan;
 use crate::store;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -1087,13 +1088,7 @@ fn safe_package_artifact_path(path: &str) -> bool {
 }
 
 fn contains_secret_marker(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("bearer ") {
-        return true;
-    }
-    ["api_key=", "apikey=", "secret=", "password="]
-        .iter()
-        .any(|marker| has_blocking_secret_assignment(text, &lower, marker))
+    deploy_scan::contains_blocking_secret_marker(text)
 }
 
 fn contains_dangerous_command(text: &str) -> bool {
@@ -1103,52 +1098,6 @@ fn contains_dangerous_command(text: &str) -> bool {
         || lower.contains("/etc/shadow")
         || has_root_target_command(&lower, "rm -rf /")
         || has_root_target_command(&lower, "chmod -r 777 /")
-}
-
-fn has_blocking_secret_assignment(text: &str, lower: &str, marker: &str) -> bool {
-    let mut offset = 0;
-    while let Some(index) = lower[offset..].find(marker) {
-        let value_start = offset + index + marker.len();
-        if !secret_assignment_is_placeholder(&text[value_start..]) {
-            return true;
-        }
-        offset = value_start;
-    }
-    false
-}
-
-fn secret_assignment_is_placeholder(tail: &str) -> bool {
-    let line = tail
-        .split_once(['\n', '\r'])
-        .map(|(line, _)| line)
-        .unwrap_or(tail)
-        .trim_start();
-    if line.is_empty() || line.starts_with('#') {
-        return true;
-    }
-    let token = line
-        .split_once(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ';' | '&' | '|'))
-        .map(|(token, _)| token)
-        .unwrap_or(line)
-        .trim()
-        .trim_matches(',');
-    if token.is_empty() {
-        return true;
-    }
-    let token = token
-        .strip_prefix('"')
-        .and_then(|inner| inner.strip_suffix('"'))
-        .unwrap_or(token);
-    let lower = token.to_ascii_lowercase();
-    lower == "xxx"
-        || lower == "changeme"
-        || (token.starts_with("${") && token.contains('}'))
-        || (token.starts_with('$') && token[1..].chars().next().is_some_and(is_env_key_start))
-        || (token.starts_with('<') && token.contains('>'))
-}
-
-fn is_env_key_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
 }
 
 fn has_root_target_command(lower: &str, marker: &str) -> bool {
@@ -1590,7 +1539,7 @@ mod tests {
             "secret=real-value",
             "api_key=sk-live",
             "apikey=abc123",
-            "Authorization: Bearer token",
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9",
         ] {
             assert!(contains_secret_marker(content), "{content}");
         }

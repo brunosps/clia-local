@@ -1,6 +1,7 @@
 use crate::deploy_detect::{self, DeployProjectDetection};
 use crate::deploy_plan;
 use crate::deploy_repair;
+use crate::deploy_scan;
 use crate::store;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,8 @@ pub struct CreateDeployPackageInput {
 pub struct SecretFinding {
     pub path: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
     #[serde(default = "default_finding_severity")]
     pub severity: String,
     #[serde(default = "default_finding_blocking")]
@@ -168,6 +171,7 @@ pub fn create_package(
         &artifact_root.join(".env.example"),
         &detection.services,
         &plan_bundle.plan,
+        plan_has_compose_artifact(&plan_bundle.plan),
     )?;
     let package_strategy = package_deploy_strategy(&packaged_projects);
     std::fs::write(artifact_root.join(".dw-deploy-strategy"), &package_strategy)?;
@@ -178,6 +182,7 @@ pub fn create_package(
     )?;
     write_agent_plan_files(&artifact_root, &plan_bundle.plan)?;
     write_agent_plan_scripts(&artifact_root, &plan_bundle.plan, &package_strategy)?;
+    scan_package_review_files(&artifact_root, &mut findings);
     write_package_runbook(
         &artifact_root,
         &stack,
@@ -664,82 +669,18 @@ fn excluded_secret_reason(name: &str) -> Option<&'static str> {
     }
 }
 
-fn scan_secret_content(source_path: &Path, copied_path: &Path) -> Option<SecretFinding> {
+fn scan_secret_content(_source_path: &Path, copied_path: &Path) -> Option<SecretFinding> {
     let bytes = std::fs::read(copied_path).ok()?;
     if bytes.len() > 512 * 1024 || bytes.contains(&0) {
         return None;
     }
     let text = String::from_utf8(bytes).ok()?;
-    let lower = text.to_ascii_lowercase();
-    let non_runtime_context = is_non_runtime_path(source_path) || is_non_runtime_path(copied_path);
-    let mut warning = None;
-    let mut hits = ["api_key=", "apikey=", "secret=", "password=", "bearer "]
-        .iter()
-        .filter_map(|marker| lower.find(marker).map(|index| (index, *marker)))
-        .collect::<Vec<_>>();
-    hits.sort_by_key(|(index, _)| *index);
-    for (index, marker) in hits {
-        let reason = format!("secret-like content marker `{marker}`");
-        if non_runtime_context
-            || marker_value_is_placeholder(marker, &lower[index + marker.len()..])
-        {
-            warning.get_or_insert_with(|| {
-                SecretFinding::warning(copied_path.display().to_string(), reason)
-            });
-            continue;
-        }
-        return Some(SecretFinding::blocking(
+    deploy_scan::first_blocking_secret_marker(&text).map(|hit| {
+        SecretFinding::blocking(
             copied_path.display().to_string(),
-            reason,
-        ));
-    }
-    warning
-}
-
-fn is_non_runtime_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let Component::Normal(value) = component else {
-            return false;
-        };
-        matches!(
-            value.to_string_lossy().to_ascii_lowercase().as_str(),
-            "test" | "tests" | "__tests__" | "e2e" | "fixtures" | "docs"
+            format!("secret-like content marker `{}`", hit.marker),
         )
     })
-}
-
-fn marker_value_is_placeholder(marker: &str, rest: &str) -> bool {
-    if marker == "bearer " {
-        return rest.trim_start().starts_with('<')
-            || rest.trim_start().starts_with('{')
-            || rest.trim_start().starts_with("$")
-            || rest.trim_start().starts_with("test")
-            || rest.trim_start().starts_with("example");
-    }
-    let value = rest
-        .trim_start()
-        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`'))
-        .split(|ch: char| ch.is_whitespace() || matches!(ch, '&' | ';' | ',' | ')' | '}'))
-        .next()
-        .unwrap_or("")
-        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`'));
-    if value.is_empty() {
-        return true;
-    }
-    value.starts_with('<')
-        || value.starts_with('{')
-        || value.starts_with('$')
-        || matches!(
-            value,
-            "test"
-                | "example"
-                | "changeme"
-                | "change-me"
-                | "placeholder"
-                | "dummy"
-                | "local"
-                | "development"
-        )
 }
 
 fn default_finding_severity() -> String {
@@ -752,21 +693,39 @@ fn default_finding_blocking() -> bool {
 
 impl SecretFinding {
     fn warning(path: String, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
         Self {
             path,
-            reason: reason.into(),
+            hint: Some(review_finding_hint(&reason, false).to_string()),
+            reason,
             severity: "warning".to_string(),
             blocking: false,
         }
     }
 
     fn blocking(path: String, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
         Self {
             path,
-            reason: reason.into(),
+            hint: Some(review_finding_hint(&reason, true).to_string()),
+            reason,
             severity: "error".to_string(),
             blocking: true,
         }
+    }
+}
+
+fn review_finding_hint(reason: &str, blocking: bool) -> &'static str {
+    if reason == "environment file excluded from package" {
+        "Esperado: arquivos .env reais ficam fora do pacote; preencha os valores na UI de ambiente."
+    } else if reason == "secret-like filename excluded from package" {
+        "Esperado: chaves privadas e certificados ficam fora do pacote; configure o segredo no target ou na UI de ambiente."
+    } else if reason.contains("secret-like content marker") {
+        "Se for placeholder/codigo montando valor em runtime, ajuste o padrao; se for segredo real, remova do source e use env."
+    } else if blocking {
+        "Corrija o item indicado antes de aprovar o pacote de deploy."
+    } else {
+        "Revise o aviso antes de aprovar o pacote de deploy."
     }
 }
 
@@ -870,6 +829,7 @@ fn write_env_example(
     path: &Path,
     services: &[deploy_detect::DeployServiceSuggestion],
     plan: &serde_json::Value,
+    detector_keys_optional: bool,
 ) -> anyhow::Result<()> {
     let mut content =
         String::from("# Generated placeholder values. Do not paste real secrets here.\n");
@@ -889,18 +849,33 @@ fn write_env_example(
     for service in services {
         match service.name.as_str() {
             "postgres" => {
-                required.insert("DATABASE_URL".to_string());
+                insert_detected_env_key(
+                    &mut required,
+                    &mut optional,
+                    "DATABASE_URL",
+                    detector_keys_optional,
+                );
                 placeholders.insert(
                     "DATABASE_URL".to_string(),
                     "postgres://user:password@postgres:5432/app".to_string(),
                 );
             }
             "redis" => {
-                required.insert("REDIS_URL".to_string());
+                insert_detected_env_key(
+                    &mut required,
+                    &mut optional,
+                    "REDIS_URL",
+                    detector_keys_optional,
+                );
                 placeholders.insert("REDIS_URL".to_string(), "redis://redis:6379".to_string());
             }
             "smtp" => {
-                required.insert("SMTP_URL".to_string());
+                insert_detected_env_key(
+                    &mut required,
+                    &mut optional,
+                    "SMTP_URL",
+                    detector_keys_optional,
+                );
                 placeholders.insert("SMTP_URL".to_string(), "smtp://mailhog:1025".to_string());
             }
             _ => {}
@@ -922,6 +897,31 @@ fn write_env_example(
     }
     std::fs::write(path, content)?;
     Ok(())
+}
+
+fn insert_detected_env_key(
+    required: &mut BTreeSet<String>,
+    optional: &mut BTreeSet<String>,
+    key: &str,
+    detector_keys_optional: bool,
+) {
+    if detector_keys_optional {
+        if !required.contains(key) {
+            optional.insert(key.to_string());
+        }
+    } else {
+        optional.remove(key);
+        required.insert(key.to_string());
+    }
+}
+
+fn plan_has_compose_artifact(plan: &serde_json::Value) -> bool {
+    plan.get("artifacts")
+        .and_then(|artifacts| artifacts.get("compose"))
+        .and_then(|compose| compose.get("body"))
+        .and_then(|body| body.as_str())
+        .map(str::trim)
+        .is_some_and(|body| !body.is_empty())
 }
 
 fn select_custom_dockerfile(root: &Path) -> Option<String> {
@@ -1745,6 +1745,32 @@ fn write_agent_plan_files(root: &Path, plan: &serde_json::Value) -> anyhow::Resu
     Ok(())
 }
 
+fn scan_package_review_files(root: &Path, findings: &mut Vec<SecretFinding>) {
+    let paths = [
+        root.join(".env.example"),
+        root.join("docker-compose.yml"),
+        root.join("compose.yml"),
+    ];
+    for path in paths {
+        if path.is_file() {
+            if let Some(finding) = scan_secret_content(&path, &path) {
+                push_unique_finding(findings, finding);
+            }
+        }
+    }
+}
+
+fn push_unique_finding(findings: &mut Vec<SecretFinding>, finding: SecretFinding) {
+    if findings.iter().any(|existing| {
+        existing.path == finding.path
+            && existing.reason == finding.reason
+            && existing.blocking == finding.blocking
+    }) {
+        return;
+    }
+    findings.push(finding);
+}
+
 pub fn deploy_runbook_scripts() -> Vec<&'static str> {
     vec![
         "scripts/preflight.sh",
@@ -2004,6 +2030,14 @@ mod tests {
             finding.path.contains(".env") && finding.severity == "warning" && !finding.blocking
         }));
         assert!(findings.iter().any(|finding| {
+            finding.path.contains(".env")
+                && finding
+                    .hint
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("UI de ambiente")
+        }));
+        assert!(findings.iter().any(|finding| {
             finding.path.contains("config.txt") && finding.severity == "error" && finding.blocking
         }));
         std::fs::remove_dir_all(root).expect("cleanup");
@@ -2011,25 +2045,71 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_secret_markers_are_warnings() {
+    fn placeholder_secret_markers_do_not_create_findings() {
         let root = temp_root("placeholder-source");
         std::fs::create_dir_all(root.join("templates")).expect("templates");
         std::fs::write(root.join("package.json"), "{}").expect("package");
         std::fs::write(
             root.join("templates/install.rs"),
-            "PASSWORD={password}\nAPI_KEY=<api-key>\n",
+            "PASSWORD=\nAPI_KEY=<api-key>\nSECRET=${APP_SECRET}\n",
         )
         .expect("template");
         let dest = temp_root("placeholder-dest");
         let mut findings = Vec::new();
         copy_source_snapshot(&root, &dest, &mut findings).expect("copy");
         assert!(dest.join("templates/install.rs").exists());
-        assert!(findings.iter().all(|finding| !finding.blocking));
-        assert!(findings.iter().any(|finding| {
-            finding.path.contains("install.rs") && finding.reason.contains("password=")
+        assert!(findings.is_empty());
+        std::fs::remove_dir_all(root).expect("cleanup");
+        std::fs::remove_dir_all(dest).expect("cleanup");
+    }
+
+    #[test]
+    fn review_scanner_allows_real_lettrebox_false_positives_and_blocks_real_secrets() {
+        let root = temp_root("lettrebox-review-source");
+        std::fs::create_dir_all(root.join("crates/mail-driver/src/stalwart")).expect("src");
+        std::fs::write(root.join("package.json"), "{}").expect("package");
+        std::fs::write(
+            root.join("crates/mail-driver/src/stalwart/client.rs"),
+            r#"let header = format!("Bearer {token}");"#,
+        )
+        .expect("client");
+        std::fs::write(
+            root.join(".env.example"),
+            "SMTP_HOST=\nSMTP_USERNAME=\nSMTP_PASSWORD=\nSMTP_SECRET=${SMTP_SECRET}\n",
+        )
+        .expect("env example");
+        let dest = temp_root("lettrebox-review-dest");
+        let mut findings = Vec::new();
+        copy_source_snapshot(&root, &dest, &mut findings).expect("copy");
+        assert!(findings.is_empty(), "{findings:?}");
+
+        std::fs::write(root.join("config.txt"), "password=hunter2\n").expect("real password");
+        std::fs::write(
+            root.join("auth.txt"),
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9\n",
+        )
+        .expect("real bearer");
+        let blocked_dest = temp_root("lettrebox-review-blocked-dest");
+        let mut blocked_findings = Vec::new();
+        copy_source_snapshot(&root, &blocked_dest, &mut blocked_findings).expect("copy blocked");
+        assert!(blocked_findings.iter().any(|finding| {
+            finding.path.contains("config.txt")
+                && finding.blocking
+                && finding.reason.contains("password=")
+                && finding
+                    .hint
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("segredo real")
+        }));
+        assert!(blocked_findings.iter().any(|finding| {
+            finding.path.contains("auth.txt")
+                && finding.blocking
+                && finding.reason.contains("bearer ")
         }));
         std::fs::remove_dir_all(root).expect("cleanup");
         std::fs::remove_dir_all(dest).expect("cleanup");
+        std::fs::remove_dir_all(blocked_dest).expect("cleanup");
     }
 
     #[test]
@@ -2295,6 +2375,7 @@ mod tests {
                 },
             ],
             &plan,
+            false,
         )
         .expect("env example");
         let content = std::fs::read_to_string(root.join(".env.example")).expect("read env");
@@ -2305,6 +2386,48 @@ mod tests {
         assert_eq!(content.matches("APP_SECRET=").count(), 1);
         assert_eq!(content.matches("DATABASE_URL=").count(), 1);
         assert_eq!(content.matches("REDIS_URL=").count(), 1);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn env_example_marks_detector_keys_optional_with_agent_compose() {
+        let root = temp_root("env-example-compose");
+        let plan = serde_json::json!({
+            "env": {
+                "required": ["APP_SECRET"],
+                "optional": ["RUST_LOG"]
+            },
+            "artifacts": {
+                "compose": {
+                    "path": "docker-compose.yml",
+                    "body": "services:\n  app:\n    image: app\n"
+                }
+            }
+        });
+        assert!(plan_has_compose_artifact(&plan));
+        write_env_example(
+            &root.join(".env.example"),
+            &[
+                deploy_detect::DeployServiceSuggestion {
+                    name: "postgres".to_string(),
+                    reason: "detected pg".to_string(),
+                },
+                deploy_detect::DeployServiceSuggestion {
+                    name: "smtp".to_string(),
+                    reason: "detected smtp".to_string(),
+                },
+            ],
+            &plan,
+            true,
+        )
+        .expect("env example");
+        let content = std::fs::read_to_string(root.join(".env.example")).expect("read env");
+        assert!(content.contains("\nAPP_SECRET=\n"));
+        assert!(content.contains("\n#DATABASE_URL=\n"));
+        assert!(content.contains("\n#SMTP_URL=\n"));
+        assert!(content.contains("\n#RUST_LOG=\n"));
+        assert!(!content.contains("\nDATABASE_URL=postgres://"));
+        assert!(!content.contains("\nSMTP_URL=smtp://"));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -2537,11 +2660,19 @@ mod tests {
         let workspace_root = root.join("workspace");
         let project_root = workspace_root.join("web");
         std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::create_dir_all(project_root.join("crates/mail-driver/src/stalwart"))
+            .expect("mail driver root");
         std::fs::write(
             project_root.join("package.json"),
             r#"{"scripts":{"dev":"vite --host 0.0.0.0"},"dependencies":{"vite":"latest"}}"#,
         )
         .expect("package");
+        std::fs::write(
+            project_root.join("crates/mail-driver/src/stalwart/client.rs"),
+            r#"let auth = format!("Bearer {token}");"#,
+        )
+        .expect("client");
+        std::fs::write(project_root.join(".env.example"), "SMTP_PASSWORD=\n").expect("env example");
         let workspace = db
             .create_workspace("Workspace", &workspace_root.display().to_string())
             .expect("create workspace");
@@ -2590,6 +2721,13 @@ mod tests {
         assert!(version
             .manifest_json
             .contains("\"agent_name\": \"Codex Deploy\""));
+        let review_findings =
+            serde_json::from_str::<Vec<SecretFinding>>(&version.blocking_findings_json)
+                .expect("review findings");
+        assert!(
+            review_findings.iter().all(|finding| !finding.blocking),
+            "{review_findings:?}"
+        );
         let deploy_script =
             std::fs::read_to_string(artifact.join("scripts/deploy.sh")).expect("deploy script");
         assert!(deploy_script.contains("agent generated deploy"));
