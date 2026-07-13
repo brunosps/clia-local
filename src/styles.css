@@ -10479,16 +10479,71 @@ h2 {
 .deploy-env-section {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 10px;
+  gap: 8px;
 }
 
-.deploy-env-section h4 {
-  margin: 2px 0 0;
+.deploy-env-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  color: #f0f5fb;
+}
+
+.deploy-env-section-header h4 {
+  margin: 0;
   color: #f0f5fb;
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0;
   text-transform: uppercase;
+}
+
+.deploy-env-section-header small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid #2f3a49;
+  border-radius: 999px;
+  background: #111720;
+  color: #b8c4d4;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.deploy-env-section-header.toggle {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.deploy-env-section-header.toggle svg {
+  margin-left: auto;
+  color: #93a4b8;
+  transition: transform 140ms var(--ease);
+}
+
+.deploy-env-section-header.toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.deploy-env-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.deploy-env-empty {
+  margin: 0;
+  color: #93a4b8;
+  font-size: 12px;
 }
 
 .deploy-env-grid label {
@@ -10503,6 +10558,16 @@ h2 {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.deploy-env-field > span strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #d9e2ef;
+  font-size: 12px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .deploy-env-field > span small {
@@ -10520,6 +10585,12 @@ h2 {
   font-weight: 800;
   line-height: 1.2;
   text-transform: uppercase;
+}
+
+.deploy-env-field > span b.default {
+  border-color: #276f47;
+  background: #0d1f17;
+  color: #6ff39b;
 }
 
 .deploy-env-grid input {
@@ -11020,10 +11091,6 @@ h2 {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .deploy-env-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .deploy-env-helper,
   .deploy-env-save-result,
   .deploy-env-grid > .secondary-button {
@@ -11036,6 +11103,7 @@ h2 {
 }
 
 @media (max-width: 520px) {
+  .deploy-env-fields,
   .deploy-env-input-row {
     grid-template-columns: 1fr;
   }

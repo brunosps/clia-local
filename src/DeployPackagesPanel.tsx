@@ -53,6 +53,7 @@ import type {
   AgentProfile,
   DeployDetectionReport,
   DeployEnvironment,
+  DeployEnvironmentVariable,
   DeployPlanReport,
   DeployProgressEvent,
   DeployRun,
@@ -224,6 +225,7 @@ export default function DeployPackagesPanel({
   const [environmentDraft, setEnvironmentDraft] = useState<Record<string, string>>({});
   const [environmentSaveResult, setEnvironmentSaveResult] = useState<string | null>(null);
   const [environmentSaving, setEnvironmentSaving] = useState(false);
+  const [environmentOptionalOpen, setEnvironmentOptionalOpen] = useState(true);
   const [progress, setProgress] = useState<DeployProgressEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -326,6 +328,16 @@ export default function DeployPackagesPanel({
     () => partitionDeployEnvironmentVariables(activeDeployEnvironment),
     [activeDeployEnvironment],
   );
+  useEffect(() => {
+    if (!activeDeployEnvironment) return;
+    setEnvironmentOptionalOpen(
+      environmentGroups.required.length === 0 || environmentGroups.optional.length <= 8,
+    );
+  }, [
+    activeDeployEnvironment,
+    environmentGroups.optional.length,
+    environmentGroups.required.length,
+  ]);
   const environmentSaveLabel = pendingEnvironmentKeys.length
     ? `Salvar ambiente — ${pendingEnvironmentKeys.length} pendentes`
     : "Salvar ambiente";
@@ -861,6 +873,37 @@ export default function DeployPackagesPanel({
       setError(deployErrorMessage(result.error));
     }
     setEnvironmentSaving(false);
+  }
+
+  function renderEnvironmentField(variable: DeployEnvironmentVariable) {
+    const pending = pendingEnvironmentKeySet.has(variable.key);
+    const value = environmentDraft[variable.key] ?? "";
+    const defaulted =
+      !variable.saved && Boolean(variable.default_source) && variable.default_value.trim().length > 0;
+    return (
+      <label key={variable.key} className={pending ? "deploy-env-field pending" : "deploy-env-field"}>
+        <span>
+          <strong>{variable.key}</strong>
+          <small>{variable.required ? "obrigatória" : "opcional"}</small>
+          {defaulted ? <b className="default">default do projeto</b> : null}
+          {pending ? <b>pendente</b> : null}
+        </span>
+        <input
+          aria-invalid={pending}
+          aria-label={`Valor de ${variable.key}`}
+          type={variable.secret ? "password" : "text"}
+          value={value}
+          placeholder={variable.placeholder}
+          onChange={(event) => {
+            setEnvironmentSaveResult(null);
+            setEnvironmentDraft((current) => ({
+              ...current,
+              [variable.key]: event.target.value,
+            }));
+          }}
+        />
+      </label>
+    );
   }
 
   async function prepareTarget() {
@@ -1906,87 +1949,42 @@ export default function DeployPackagesPanel({
                 {activeDeployEnvironment?.variables.length ? (
                   <div className="deploy-env-grid">
                     <p className="deploy-env-helper">
-                      O texto cinza é exemplo. Digite o valor real ou use o exemplo quando ele for
-                      suficiente para este deploy.
+                      Defaults detectados no projeto já vêm preenchidos e podem ser editados antes
+                      do deploy.
                     </p>
                     {environmentSaveResult ? (
                       <p className="deploy-env-save-result">{environmentSaveResult}</p>
                     ) : null}
                     {environmentGroups.required.length ? (
                       <section className="deploy-env-section">
-                        <h4>Obrigatórias</h4>
-                        {environmentGroups.required.map((variable) => {
-                          const pending = pendingEnvironmentKeySet.has(variable.key);
-                          return (
-                            <label
-                              key={variable.key}
-                              className={pending ? "deploy-env-field pending" : "deploy-env-field"}
-                            >
-                              <span>
-                                {variable.key}
-                                <small>obrigatória</small>
-                                {pending ? <b>pendente</b> : null}
-                              </span>
-                              <div className="deploy-env-input-row">
-                                <input
-                                  aria-invalid={pending}
-                                  aria-label={`Valor de ${variable.key}`}
-                                  type={variable.secret ? "password" : "text"}
-                                  value={environmentDraft[variable.key] ?? ""}
-                                  placeholder={variable.placeholder}
-                                  onChange={(event) => {
-                                    setEnvironmentSaveResult(null);
-                                    setEnvironmentDraft((current) => ({
-                                      ...current,
-                                      [variable.key]: event.target.value,
-                                    }));
-                                  }}
-                                />
-                                {variable.placeholder ? (
-                                  <button
-                                    className="secondary-button deploy-env-example-button"
-                                    type="button"
-                                    onClick={() => {
-                                      setEnvironmentSaveResult(null);
-                                      setEnvironmentDraft((current) => ({
-                                        ...current,
-                                        [variable.key]: variable.placeholder,
-                                      }));
-                                    }}
-                                  >
-                                    Usar exemplo
-                                  </button>
-                                ) : null}
-                              </div>
-                            </label>
-                          );
-                        })}
+                        <div className="deploy-env-section-header">
+                          <h4>Obrigatórias</h4>
+                          <small>{environmentGroups.required.length}</small>
+                        </div>
+                        <div className="deploy-env-fields">
+                          {environmentGroups.required.map(renderEnvironmentField)}
+                        </div>
                       </section>
-                    ) : null}
+                    ) : (
+                      <p className="deploy-env-empty">Nenhuma variável obrigatória.</p>
+                    )}
                     {environmentGroups.optional.length ? (
                       <section className="deploy-env-section">
-                        <h4>Opcionais</h4>
-                        {environmentGroups.optional.map((variable) => (
-                          <label key={variable.key} className="deploy-env-field">
-                            <span>
-                              {variable.key}
-                              <small>opcional</small>
-                            </span>
-                            <input
-                              aria-label={`Valor de ${variable.key}`}
-                              type={variable.secret ? "password" : "text"}
-                              value={environmentDraft[variable.key] ?? ""}
-                              placeholder={variable.placeholder}
-                              onChange={(event) => {
-                                setEnvironmentSaveResult(null);
-                                setEnvironmentDraft((current) => ({
-                                  ...current,
-                                  [variable.key]: event.target.value,
-                                }));
-                              }}
-                            />
-                          </label>
-                        ))}
+                        <button
+                          className="deploy-env-section-header toggle"
+                          type="button"
+                          aria-expanded={environmentOptionalOpen}
+                          onClick={() => setEnvironmentOptionalOpen((open) => !open)}
+                        >
+                          <h4>Opcionais</h4>
+                          <small>{environmentGroups.optional.length}</small>
+                          <ChevronDown aria-hidden="true" size={15} />
+                        </button>
+                        {environmentOptionalOpen ? (
+                          <div className="deploy-env-fields">
+                            {environmentGroups.optional.map(renderEnvironmentField)}
+                          </div>
+                        ) : null}
                       </section>
                     ) : null}
                     <button
