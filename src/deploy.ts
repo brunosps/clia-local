@@ -475,6 +475,7 @@ export function deployErrorMessage(error: string) {
   }
   const code = error.match(/\b[a-z_]+(?:_[a-z_]+)+\b/)?.[0];
   if (!code) return error;
+  const detail = error.includes(":") ? error.slice(error.indexOf(":") + 1).trim() : "";
   const copy: Record<string, string> = {
     ssh_port_missing:
       "A VM ainda não expôs SSH. Rode o preparo do target ou confira o profile no WinBox.",
@@ -523,6 +524,9 @@ export function deployErrorMessage(error: string) {
     deploy_repair_not_pending:
       "Esse run não tem correção pendente do agente. Execute o deploy novamente ou abra os logs do Deploy Doctor.",
   };
+  if (code === "deploy_plan_validation_failed" && detail) {
+    return `${copy[code]} Motivos: ${detail}`;
+  }
   return copy[code] ?? error;
 }
 

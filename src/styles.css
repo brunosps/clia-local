@@ -10597,6 +10597,35 @@ h2 {
   color: #f2d48a !important;
 }
 
+.deploy-plan-findings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.deploy-plan-findings li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: center;
+}
+
+.deploy-plan-findings code {
+  min-width: 0;
+  color: #d8e1ef;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deploy-plan-findings small {
+  grid-column: 2;
+  color: #aebbd0;
+}
+
 .deploy-section-details > summary,
 .deploy-review-details > summary,
 .deploy-technical-details > summary {

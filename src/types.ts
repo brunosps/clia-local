@@ -176,8 +176,16 @@ export type DeployPlanReport = {
   project_context_json: string;
   deploy_plan_json: string;
   validation_report_json: string;
+  validation_findings: DeployPlanFinding[];
   validation_errors: string[];
   warnings: string[];
+};
+
+export type DeployPlanFinding = {
+  path: string;
+  reason: string;
+  severity: string;
+  blocking: boolean;
 };
 
 export type DeployStack = {

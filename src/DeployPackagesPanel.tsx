@@ -655,7 +655,12 @@ export default function DeployPackagesPanel({
         // The plan report is still usable without detector preview.
       }
       if (result.value.status !== "passed") {
-        setError(deployErrorMessage("deploy_plan_validation_failed"));
+        const reasons = (result.value.validation_errors ?? []).slice(0, 3);
+        const suffix =
+          reasons.length > 0
+            ? `: ${reasons.join("; ")}${result.value.validation_errors.length > reasons.length ? "; ..." : ""}`
+            : "";
+        setError(deployErrorMessage(`deploy_plan_validation_failed${suffix}`));
       }
     } else {
       setError(deployErrorMessage(result.error));
@@ -1024,11 +1029,31 @@ export default function DeployPackagesPanel({
             </strong>
             <p>{planReport.summary}</p>
             {planReport.agent_session_id ? <p>Sessão do agente #{planReport.agent_session_id}</p> : null}
-            {planReport.validation_errors.map((validationError) => (
-              <p key={validationError} className="deploy-warning">
-                {validationError}
-              </p>
-            ))}
+            {planReport.validation_findings?.length ? (
+              <ul className="deploy-plan-findings">
+                {planReport.validation_findings.map((finding, index) => (
+                  <li key={`${finding.path}-${finding.reason}-${index}`}>
+                    <span
+                      className={
+                        finding.blocking || finding.severity === "error"
+                          ? "deploy-finding-severity blocked"
+                          : "deploy-finding-severity warning"
+                      }
+                    >
+                      {finding.severity || (finding.blocking ? "error" : "warning")}
+                    </span>
+                    <code title={finding.path}>{finding.path}</code>
+                    <small>{finding.reason}</small>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              planReport.validation_errors.map((validationError) => (
+                <p key={validationError} className="deploy-warning">
+                  {validationError}
+                </p>
+              ))
+            )}
             {planReport.warnings.map((warning) => (
               <p key={warning} className="deploy-warning">
                 {warning}

@@ -325,6 +325,11 @@ describe("deploy helpers", () => {
     expect(deployErrorMessage("deploy_plan_validation_failed: blocked")).toContain(
       "plano do agente",
     );
+    expect(
+      deployErrorMessage(
+        "deploy_plan_validation_failed: projects/app/Dockerfile: artifact contains dangerous host command",
+      ),
+    ).toContain("projects/app/Dockerfile");
     expect(deployErrorMessage("deploy_agent_target_scope: server")).toContain("Ubuntu Server");
     expect(deployErrorMessage("windows_runbook_manual_required: no ps1")).toContain(
       "runbook PowerShell",

@@ -4,6 +4,7 @@ use crate::store;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::path::{Component, Path};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -41,8 +42,17 @@ pub struct DeployPlanReport {
     pub project_context_json: String,
     pub deploy_plan_json: String,
     pub validation_report_json: String,
+    pub validation_findings: Vec<DeployPlanFinding>,
     pub validation_errors: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeployPlanFinding {
+    pub path: String,
+    pub reason: String,
+    pub severity: String,
+    pub blocking: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -170,7 +180,7 @@ pub fn report_from_bundle(
         .and_then(Value::as_str)
         .unwrap_or("Deploy plan generated from selected project context")
         .to_string();
-    let mut warnings = bundle
+    let warnings = bundle
         .validation
         .get("warnings")
         .and_then(Value::as_array)
@@ -182,14 +192,7 @@ pub fn report_from_bundle(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if let Some(findings) = bundle.validation.get("findings").and_then(Value::as_array) {
-        warnings.extend(findings.iter().filter_map(|finding| {
-            finding
-                .get("reason")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        }));
-    }
+    let validation_findings = validation_findings(&bundle.validation);
     Ok(DeployPlanReport {
         workspace_id: bundle.input.workspace_id,
         project_ids: bundle
@@ -218,6 +221,7 @@ pub fn report_from_bundle(
         project_context_json: serde_json::to_string_pretty(&bundle.context)?,
         deploy_plan_json: serde_json::to_string_pretty(&bundle.plan)?,
         validation_report_json: serde_json::to_string_pretty(&bundle.validation)?,
+        validation_findings,
         validation_errors: validation_errors(&bundle.validation),
         warnings,
     })
@@ -469,20 +473,45 @@ fn attach_agent_metadata(plan: &mut Value, agent: &store::AgentProfile, session_
 }
 
 fn validation_errors(validation: &Value) -> Vec<String> {
+    validation_findings(validation)
+        .into_iter()
+        .filter(|finding| finding.blocking)
+        .map(|finding| format!("{}: {}", finding.path, finding.reason))
+        .collect()
+}
+
+fn validation_findings(validation: &Value) -> Vec<DeployPlanFinding> {
     validation
         .get("findings")
         .and_then(Value::as_array)
         .map(|items| {
             items
                 .iter()
-                .filter(|finding| {
-                    finding
-                        .get("blocking")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true)
+                .filter_map(|finding| {
+                    let path = finding
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or("analysis/deploy-plan.json")
+                        .trim();
+                    let reason = finding.get("reason").and_then(Value::as_str)?.trim();
+                    Some(DeployPlanFinding {
+                        path: if path.is_empty() {
+                            "analysis/deploy-plan.json".to_string()
+                        } else {
+                            path.to_string()
+                        },
+                        reason: reason.to_string(),
+                        severity: finding
+                            .get("severity")
+                            .and_then(Value::as_str)
+                            .unwrap_or("error")
+                            .to_string(),
+                        blocking: finding
+                            .get("blocking")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                    })
                 })
-                .filter_map(|finding| finding.get("reason").and_then(Value::as_str))
-                .map(ToOwned::to_owned)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
@@ -702,28 +731,20 @@ fn validate_plan(
 
 fn safe_project_files(root: &Path) -> Vec<Value> {
     let mut out = Vec::new();
-    for relative in [
-        "package.json",
-        "pnpm-lock.yaml",
-        "package-lock.json",
-        "yarn.lock",
-        "Cargo.toml",
-        "src-tauri/Cargo.toml",
-        "pyproject.toml",
-        "requirements.txt",
-        "Dockerfile",
-        "Dockerfile.dev",
-        "docker-compose.yml",
-        "compose.yml",
-        ".dockerignore",
-        "README.md",
-    ] {
+    let mut seen = BTreeSet::new();
+    for relative in key_project_files()
+        .into_iter()
+        .chain(root_deploy_contract_files(root))
+    {
         if out.len() >= MAX_CONTEXT_FILES {
             break;
         }
-        let path = root.join(relative);
+        if !seen.insert(relative.clone()) {
+            continue;
+        }
+        let path = root.join(&relative);
         if path.is_file() {
-            out.push(context_file(root, &path, relative));
+            out.push(context_file(root, &path, &relative));
         }
     }
     for dir in ["scripts", ".github/workflows"] {
@@ -733,6 +754,52 @@ fn safe_project_files(root: &Path) -> Vec<Value> {
         collect_context_dir(root, &root.join(dir), &mut out);
     }
     out
+}
+
+fn key_project_files() -> Vec<String> {
+    [
+        "package.json",
+        "pnpm-lock.yaml",
+        "package-lock.json",
+        "yarn.lock",
+        "Cargo.toml",
+        "src-tauri/Cargo.toml",
+        "pyproject.toml",
+        "requirements.txt",
+        ".dockerignore",
+        "README.md",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+fn root_deploy_contract_files(root: &Path) -> Vec<String> {
+    let mut files = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name == "Dockerfile"
+            || name.starts_with("Dockerfile.")
+            || is_root_compose_file_name(name)
+        {
+            files.insert(name.to_string());
+        }
+    }
+    files.into_iter().collect()
+}
+
+fn is_root_compose_file_name(name: &str) -> bool {
+    (name.starts_with("compose.") || name.starts_with("docker-compose."))
+        && (name.ends_with(".yml") || name.ends_with(".yaml"))
 }
 
 fn collect_context_dir(root: &Path, dir: &Path, out: &mut Vec<Value>) {
@@ -895,22 +962,81 @@ fn safe_package_artifact_path(path: &str) -> bool {
 
 fn contains_secret_marker(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    ["api_key=", "apikey=", "secret=", "password=", "bearer "]
+    if lower.contains("bearer ") {
+        return true;
+    }
+    ["api_key=", "apikey=", "secret=", "password="]
         .iter()
-        .any(|marker| lower.contains(marker))
+        .any(|marker| has_blocking_secret_assignment(text, &lower, marker))
 }
 
 fn contains_dangerous_command(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    [
-        "rm -rf /",
-        "mkfs.",
-        "dd if=",
-        "/etc/shadow",
-        "chmod -r 777 /",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    lower.contains("mkfs.")
+        || lower.contains("dd if=")
+        || lower.contains("/etc/shadow")
+        || has_root_target_command(&lower, "rm -rf /")
+        || has_root_target_command(&lower, "chmod -r 777 /")
+}
+
+fn has_blocking_secret_assignment(text: &str, lower: &str, marker: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find(marker) {
+        let value_start = offset + index + marker.len();
+        if !secret_assignment_is_placeholder(&text[value_start..]) {
+            return true;
+        }
+        offset = value_start;
+    }
+    false
+}
+
+fn secret_assignment_is_placeholder(tail: &str) -> bool {
+    let line = tail
+        .split_once(['\n', '\r'])
+        .map(|(line, _)| line)
+        .unwrap_or(tail)
+        .trim_start();
+    if line.is_empty() || line.starts_with('#') {
+        return true;
+    }
+    let token = line
+        .split_once(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ';' | '&' | '|'))
+        .map(|(token, _)| token)
+        .unwrap_or(line)
+        .trim()
+        .trim_matches(',')
+        .trim_matches('"')
+        .trim_matches('\'');
+    if token.is_empty() {
+        return true;
+    }
+    let lower = token.to_ascii_lowercase();
+    lower == "xxx"
+        || lower == "changeme"
+        || (token.starts_with("${") && token.contains('}'))
+        || (token.starts_with('$') && token[1..].chars().next().is_some_and(is_env_key_start))
+        || (token.starts_with('<') && token.contains('>'))
+}
+
+fn is_env_key_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn has_root_target_command(lower: &str, marker: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find(marker) {
+        let after = offset + index + marker.len();
+        let Some(next) = lower[after..].chars().next() else {
+            return true;
+        };
+        if next == '*' || next.is_ascii_whitespace() || matches!(next, '"' | '\'' | ';' | '&' | '|')
+        {
+            return true;
+        }
+        offset = after;
+    }
+    false
 }
 
 fn redact_text(text: &str) -> String {
@@ -977,6 +1103,62 @@ mod tests {
                     {"path": "scripts/build-dev.sh", "body": "echo build"},
                     {"path": "scripts/verify-dev.sh", "body": "echo verify"},
                     {"path": "scripts/run-dev.sh", "body": "echo run"}
+                ]
+            }
+        })
+    }
+
+    fn web_detection(root: &str) -> DeployDetectionReport {
+        DeployDetectionReport {
+            workspace_id: 1,
+            projects: vec![DeployProjectDetection {
+                project_id: 1,
+                name: "lettrebox".to_string(),
+                path: root.to_string(),
+                language: "rust".to_string(),
+                framework: None,
+                package_manager: Some("cargo".to_string()),
+                has_dockerfile: false,
+                has_compose: false,
+                services: vec![],
+                ports: vec![],
+                healthcheck: Some("http://127.0.0.1:5000/".to_string()),
+                deploy_strategy: "web_service".to_string(),
+                strategy_reason: "Rust project detected".to_string(),
+                runtime_commands: vec![],
+                requires_desktop_session: false,
+                warnings: vec![],
+            }],
+            services: vec![],
+            ports: vec![],
+            warnings: vec![],
+        }
+    }
+
+    fn web_plan_with_dockerfile(body: &str) -> Value {
+        json!({
+            "schema_version": PLAN_SCHEMA_VERSION,
+            "strategy": "web_service",
+            "confidence": "high",
+            "summary": "test web plan",
+            "projects": [{
+                "project_id": 1,
+                "healthcheck": "curl -fsS http://127.0.0.1:5000/"
+            }],
+            "artifacts": {
+                "compose": {
+                    "path": "docker-compose.yml",
+                    "body": "services:\n  app:\n    build:\n      context: ./projects/lettrebox\n      dockerfile: Dockerfile\n"
+                },
+                "dockerfiles": [{
+                    "project_id": 1,
+                    "path": "projects/lettrebox/Dockerfile",
+                    "body": body
+                }],
+                "scripts": [
+                    {"path": "scripts/preflight.sh", "body": "echo preflight"},
+                    {"path": "scripts/deploy.sh", "body": "echo deploy"},
+                    {"path": "scripts/healthcheck.sh", "body": "echo health"}
                 ]
             }
         })
@@ -1074,6 +1256,143 @@ mod tests {
             Some("blocked")
         );
         assert!(validation_blocks_package(&report));
+    }
+
+    #[test]
+    fn dangerous_command_detection_is_root_target_aware() {
+        assert!(!contains_dangerous_command(
+            "RUN apt-get update && rm -rf /var/lib/apt/lists/*"
+        ));
+        assert!(!contains_dangerous_command("rm -rf /tmp/build"));
+        assert!(contains_dangerous_command("rm -rf /"));
+        assert!(contains_dangerous_command("rm -rf /*"));
+        assert!(contains_dangerous_command("rm -rf / "));
+        assert!(!contains_dangerous_command("chmod -R 777 /var/cache/app"));
+        assert!(contains_dangerous_command("chmod -R 777 /"));
+        assert!(contains_dangerous_command("chmod -r 777 /*"));
+        assert!(contains_dangerous_command("mkfs.ext4 /dev/sda"));
+        assert!(contains_dangerous_command("dd if=/dev/zero of=/dev/sda"));
+        assert!(contains_dangerous_command("cat /etc/shadow"));
+    }
+
+    #[test]
+    fn secret_marker_detection_allows_explicit_placeholders_only() {
+        for content in [
+            "PASSWORD=",
+            "password=   \n",
+            "secret=${APP_SECRET}",
+            "api_key=$API_KEY",
+            "apikey=<placeholder>",
+            "password=xxx",
+            "secret=ChangeMe",
+        ] {
+            assert!(!contains_secret_marker(content), "{content}");
+        }
+        for content in [
+            "password=hunter2",
+            "secret=real-value",
+            "api_key=sk-live",
+            "apikey=abc123",
+            "Authorization: Bearer token",
+        ] {
+            assert!(contains_secret_marker(content), "{content}");
+        }
+    }
+
+    #[test]
+    fn validation_errors_include_paths_and_report_findings_are_typed() {
+        let validation = json!({
+            "status": "blocked",
+            "findings": [{
+                "path": "projects/app/Dockerfile",
+                "reason": "artifact contains dangerous host command",
+                "severity": "error",
+                "blocking": true
+            }],
+            "warnings": []
+        });
+        assert_eq!(
+            validation_errors(&validation),
+            vec!["projects/app/Dockerfile: artifact contains dangerous host command".to_string()]
+        );
+        assert_eq!(
+            validation_findings(&validation),
+            vec![DeployPlanFinding {
+                path: "projects/app/Dockerfile".to_string(),
+                reason: "artifact contains dangerous host command".to_string(),
+                severity: "error".to_string(),
+                blocking: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn real_lettrebox_blocked_dockerfile_now_validates() {
+        let dockerfile = r#"# syntax=docker/dockerfile:1.7
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+ENV CARGO_TERM_COLOR=always
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked --bin lettrebox && \
+    cp /src/target/release/lettrebox /usr/local/bin/lettrebox
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3 curl && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /usr/local/bin/lettrebox /usr/local/bin/lettrebox
+COPY config /app/config
+ENV RUST_LOG=info
+EXPOSE 5000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=5 \
+  CMD curl -fsS http://127.0.0.1:5000/ || exit 1
+CMD ["/usr/local/bin/lettrebox"]
+"#;
+        let report = validate_plan(
+            &web_plan_with_dockerfile(dockerfile),
+            &web_detection("/tmp/lettrebox"),
+            None,
+        );
+        assert_eq!(report.get("status").and_then(Value::as_str), Some("passed"));
+        assert!(!validation_blocks_package(&report));
+    }
+
+    #[test]
+    fn real_owner_lettrebox_deploy_plan_fixture_validates_when_available() {
+        let path = Path::new(
+            "/home/bruno/wks/letrebox/.dw/deploy-plans/plan-1783900982742714445/analysis/deploy-plan.json",
+        );
+        if !path.exists() {
+            return;
+        }
+        let plan = std::fs::read_to_string(path).expect("read owner deploy plan");
+        let plan = serde_json::from_str::<Value>(&plan).expect("parse owner deploy plan");
+        let report = validate_plan(&plan, &web_detection("/home/bruno/wks/letrebox"), None);
+        assert_eq!(report.get("status").and_then(Value::as_str), Some("passed"));
+        assert!(!validation_blocks_package(&report));
+    }
+
+    #[test]
+    fn project_context_includes_extended_docker_contract_files() {
+        let root = std::env::temp_dir().join(format!(
+            "dw-deploy-plan-evidence-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(root.join("Dockerfile.prod"), "FROM alpine\n").expect("dockerfile");
+        std::fs::write(root.join("compose.deploy.yaml"), "services: {}\n").expect("compose");
+
+        let files = safe_project_files(&root);
+        let paths = files
+            .iter()
+            .filter_map(|file| file.get("path").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"Dockerfile.prod"));
+        assert!(paths.contains(&"compose.deploy.yaml"));
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
