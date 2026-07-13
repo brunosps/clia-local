@@ -12,6 +12,17 @@ pub fn first_blocking_secret_marker(text: &str) -> Option<SecretMarkerOccurrence
     next_secret_marker(text, &lower, 0)
 }
 
+pub fn blocking_secret_markers(text: &str) -> Vec<SecretMarkerOccurrence> {
+    let lower = text.to_ascii_lowercase();
+    let mut offset = 0;
+    let mut hits = Vec::new();
+    while let Some(hit) = next_secret_marker(text, &lower, offset) {
+        offset = (hit.index + hit.marker.len()).max(offset + 1);
+        hits.push(hit);
+    }
+    hits
+}
+
 fn next_secret_marker(text: &str, lower: &str, offset: usize) -> Option<SecretMarkerOccurrence> {
     ASSIGNMENT_MARKERS
         .iter()

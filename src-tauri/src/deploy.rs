@@ -28,6 +28,8 @@ pub struct ReviewFindingOverrideInput {
     pub version_id: String,
     pub path: String,
     pub reason: String,
+    pub marker: Option<String>,
+    pub line_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,6 +37,8 @@ pub struct DismissReviewFindingInput {
     pub version_id: String,
     pub path: String,
     pub reason: String,
+    pub marker: Option<String>,
+    pub line_sha256: Option<String>,
     pub justification: String,
 }
 
@@ -144,6 +148,8 @@ pub fn dismiss_review_finding(
         &input.version_id,
         &input.path,
         &input.reason,
+        input.marker.as_deref(),
+        input.line_sha256.as_deref(),
         &input.justification,
     )
 }
@@ -152,7 +158,14 @@ pub fn restore_review_finding(
     db: &store::Database,
     input: ReviewFindingOverrideInput,
 ) -> anyhow::Result<store::DeployVersion> {
-    deploy_package::restore_review_finding(db, &input.version_id, &input.path, &input.reason)
+    deploy_package::restore_review_finding(
+        db,
+        &input.version_id,
+        &input.path,
+        &input.reason,
+        input.marker.as_deref(),
+        input.line_sha256.as_deref(),
+    )
 }
 
 pub fn get_environment(

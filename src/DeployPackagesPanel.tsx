@@ -772,6 +772,8 @@ export default function DeployPackagesPanel({
       pendingDismissFinding.path,
       pendingDismissFinding.reason,
       dismissJustification,
+      pendingDismissFinding.marker,
+      pendingDismissFinding.line_sha256,
     );
     if (result.ok) {
       setPendingDismissFinding(null);
@@ -787,7 +789,13 @@ export default function DeployPackagesPanel({
     if (!selectedVersion) return;
     setBusy(true);
     setError("");
-    const result = await api.restoreReviewFinding(selectedVersion.id, finding.path, finding.reason);
+    const result = await api.restoreReviewFinding(
+      selectedVersion.id,
+      finding.path,
+      finding.reason,
+      finding.marker,
+      finding.line_sha256,
+    );
     if (result.ok) {
       await loadDetail(result.value.stack_id);
     } else {
@@ -1723,6 +1731,14 @@ export default function DeployPackagesPanel({
                           {deployFindingPathLabel(finding, selectedVersion.artifact_path)}
                         </code>
                         <small>{finding.reason}</small>
+                        {finding.line_number || finding.line_sha256 ? (
+                          <small className="deploy-finding-hint">
+                            {finding.line_number ? `Linha ${finding.line_number}` : "Linha"}
+                            {finding.line_sha256
+                              ? ` · sha256 ${finding.line_sha256.slice(0, 12)}`
+                              : ""}
+                          </small>
+                        ) : null}
                         {finding.hint ? (
                           <small className="deploy-finding-hint">{finding.hint}</small>
                         ) : null}
@@ -1732,6 +1748,18 @@ export default function DeployPackagesPanel({
                               ? `Herdado de ${finding.dismissed.inherited_from_label}: `
                               : ""}
                             {finding.dismissed.justification}
+                          </small>
+                        ) : null}
+                        {finding.audit?.length ? (
+                          <small className="deploy-finding-dismissal">
+                            Histórico:{" "}
+                            {finding.audit
+                              .map((event) =>
+                                event.action === "dismiss"
+                                  ? `dismiss ${event.timestamp}`
+                                  : `restore ${event.timestamp}`,
+                              )
+                              .join(" · ")}
                           </small>
                         ) : null}
                         {finding.blocking ? (

@@ -6,6 +6,7 @@ use crate::store;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -28,6 +29,12 @@ pub struct SecretFinding {
     pub path: String,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_number: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     #[serde(default = "default_finding_severity")]
     pub severity: String,
@@ -39,12 +46,36 @@ pub struct SecretFinding {
 pub struct DismissedReviewFinding {
     pub path: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_number: Option<usize>,
     pub justification: String,
     pub dismissed_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_from_version_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_from_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ReviewFindingIdentity {
+    path: String,
+    reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    line_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ReviewAuditEvent {
+    action: String,
+    identity: ReviewFindingIdentity,
+    justification: String,
+    timestamp: String,
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +170,12 @@ pub fn create_package(
         let source_dir = artifact_root.join(&relative_source);
         std::fs::create_dir_all(&source_dir)
             .with_context(|| format!("failed to create {}", source_dir.display()))?;
-        copy_source_snapshot(Path::new(&project.path), &source_dir, &mut findings)?;
+        copy_source_snapshot_for_package(
+            Path::new(&project.path),
+            &source_dir,
+            &artifact_root,
+            &mut findings,
+        )?;
         write_generated_dockerfile(&artifact_root.join(&relative_dockerfile), project_detection)?;
         write_generated_dockerignore(
             &artifact_root.join(format!("projects/{project_slug}/.dockerignore")),
@@ -393,36 +429,44 @@ pub fn dismiss_review_finding(
     version_id: &str,
     path: &str,
     reason: &str,
+    marker: Option<&str>,
+    line_sha256: Option<&str>,
     justification: &str,
 ) -> anyhow::Result<store::DeployVersion> {
     let justification = justification.trim();
     if justification.chars().count() < 10 {
         anyhow::bail!("review finding dismissal requires a justification with at least 10 chars");
     }
-    let version = db.get_deploy_version(version_id)?;
-    let findings = parse_review_findings(&version.blocking_findings_json)?;
-    let Some(finding) = findings
-        .iter()
-        .find(|finding| finding.blocking && finding_matches(finding, path, reason))
-    else {
-        anyhow::bail!("blocking review finding not found for this deploy version");
-    };
-    let mut dismissed = parse_dismissed_findings_lossy(&version.dismissed_findings_json);
-    dismissed.retain(|item| !dismissed_matches(item, path, reason));
-    dismissed.push(DismissedReviewFinding {
-        path: finding.path.clone(),
-        reason: finding.reason.clone(),
-        justification: justification.to_string(),
-        dismissed_at: chrono::Utc::now().to_rfc3339(),
-        inherited_from_version_id: None,
-        inherited_from_label: None,
-    });
-    let dismissed_json = serde_json::to_string(&dismissed)?;
-    eprintln!(
-        "deploy_review_finding_dismissed version={} path={} reason={}",
-        version.id, finding.path, finding.reason
-    );
-    db.update_deploy_version_dismissed_findings(&version.id, &dismissed_json)
+    db.update_deploy_version_review_json(version_id, |version| {
+        ensure_review_dismissible(version)?;
+        let findings = parse_review_findings(&version.blocking_findings_json)?;
+        let finding = select_blocking_finding(&findings, path, reason, marker, line_sha256)?;
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let mut dismissed = parse_dismissed_findings_lossy(&version.dismissed_findings_json);
+        dismissed.retain(|item| !dismissed_matches_finding(item, &finding));
+        dismissed.push(DismissedReviewFinding {
+            path: finding.path.clone(),
+            reason: finding.reason.clone(),
+            marker: finding.marker.clone(),
+            line_sha256: finding.line_sha256.clone(),
+            line_number: finding.line_number,
+            justification: justification.to_string(),
+            dismissed_at: timestamp.clone(),
+            inherited_from_version_id: None,
+            inherited_from_label: None,
+        });
+        let mut audit = parse_review_audit_events_lossy(&version.review_audit_json);
+        audit.push(ReviewAuditEvent {
+            action: "dismiss".to_string(),
+            identity: review_identity_for_finding(&finding),
+            justification: justification.to_string(),
+            timestamp,
+        });
+        Ok((
+            serde_json::to_string(&dismissed)?,
+            serde_json::to_string(&audit)?,
+        ))
+    })
 }
 
 pub fn restore_review_finding(
@@ -430,20 +474,30 @@ pub fn restore_review_finding(
     version_id: &str,
     path: &str,
     reason: &str,
+    marker: Option<&str>,
+    line_sha256: Option<&str>,
 ) -> anyhow::Result<store::DeployVersion> {
-    let version = db.get_deploy_version(version_id)?;
-    let mut dismissed = parse_dismissed_findings_lossy(&version.dismissed_findings_json);
-    let original_len = dismissed.len();
-    dismissed.retain(|item| !dismissed_matches(item, path, reason));
-    if dismissed.len() == original_len {
-        return Ok(version);
-    }
-    let dismissed_json = serde_json::to_string(&dismissed)?;
-    eprintln!(
-        "deploy_review_finding_restored version={} path={} reason={}",
-        version.id, path, reason
-    );
-    db.update_deploy_version_dismissed_findings(&version.id, &dismissed_json)
+    db.update_deploy_version_review_json(version_id, |version| {
+        let findings = parse_review_findings(&version.blocking_findings_json)?;
+        let finding = select_blocking_finding(&findings, path, reason, marker, line_sha256)?;
+        let mut dismissed = parse_dismissed_findings_lossy(&version.dismissed_findings_json);
+        let original_len = dismissed.len();
+        dismissed.retain(|item| !dismissed_matches_finding(item, &finding));
+        if dismissed.len() == original_len {
+            anyhow::bail!("review finding is not dismissed for this deploy version");
+        }
+        let mut audit = parse_review_audit_events_lossy(&version.review_audit_json);
+        audit.push(ReviewAuditEvent {
+            action: "restore".to_string(),
+            identity: review_identity_for_finding(&finding),
+            justification: String::new(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
+        Ok((
+            serde_json::to_string(&dismissed)?,
+            serde_json::to_string(&audit)?,
+        ))
+    })
 }
 
 fn inherited_dismissed_findings(
@@ -458,19 +512,35 @@ fn inherited_dismissed_findings(
             .iter()
             .filter(|previous| previous.id != version.id)
         {
+            if latest_review_audit_action_matches(&previous.review_audit_json, finding).as_deref()
+                == Some("restore")
+            {
+                break;
+            }
             let previous_dismissed =
                 parse_dismissed_findings_lossy(&previous.dismissed_findings_json);
             if let Some(match_) = previous_dismissed
                 .iter()
-                .find(|item| dismissed_matches(item, &finding.path, &finding.reason))
+                .find(|item| dismissed_matches_finding(item, finding))
             {
+                let origin_version_id = match_
+                    .inherited_from_version_id
+                    .clone()
+                    .unwrap_or_else(|| previous.id.clone());
+                let origin_label = match_
+                    .inherited_from_label
+                    .clone()
+                    .unwrap_or_else(|| previous.label.clone());
                 inherited.push(DismissedReviewFinding {
                     path: finding.path.clone(),
                     reason: finding.reason.clone(),
+                    marker: finding.marker.clone(),
+                    line_sha256: finding.line_sha256.clone(),
+                    line_number: finding.line_number,
                     justification: match_.justification.clone(),
                     dismissed_at: match_.dismissed_at.clone(),
-                    inherited_from_version_id: Some(previous.id.clone()),
-                    inherited_from_label: Some(previous.label.clone()),
+                    inherited_from_version_id: Some(origin_version_id),
+                    inherited_from_label: Some(origin_label),
                 });
                 break;
             }
@@ -488,18 +558,154 @@ fn parse_dismissed_findings_lossy(payload: &str) -> Vec<DismissedReviewFinding> 
     serde_json::from_str::<Vec<DismissedReviewFinding>>(payload).unwrap_or_default()
 }
 
+fn parse_review_audit_events_lossy(payload: &str) -> Vec<ReviewAuditEvent> {
+    serde_json::from_str::<Vec<ReviewAuditEvent>>(payload).unwrap_or_default()
+}
+
 fn finding_is_dismissed(finding: &SecretFinding, dismissed: &[DismissedReviewFinding]) -> bool {
     dismissed
         .iter()
-        .any(|item| dismissed_matches(item, &finding.path, &finding.reason))
+        .any(|item| dismissed_matches_finding(item, finding))
 }
 
-fn finding_matches(finding: &SecretFinding, path: &str, reason: &str) -> bool {
-    finding.path == path && finding.reason == reason
+fn ensure_review_dismissible(version: &store::DeployVersion) -> anyhow::Result<()> {
+    let status = version.status.as_str();
+    if matches!(status, "review_required" | "pending") && version.review_status == "pending" {
+        return Ok(());
+    }
+    anyhow::bail!("deploy_review_not_pending: only pending review versions can dismiss findings")
 }
 
-fn dismissed_matches(item: &DismissedReviewFinding, path: &str, reason: &str) -> bool {
-    item.path == path && item.reason == reason
+fn select_blocking_finding(
+    findings: &[SecretFinding],
+    path: &str,
+    reason: &str,
+    marker: Option<&str>,
+    line_sha256: Option<&str>,
+) -> anyhow::Result<SecretFinding> {
+    let matches = findings
+        .iter()
+        .filter(|finding| {
+            finding.blocking && finding_matches_input(finding, path, reason, marker, line_sha256)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => anyhow::bail!("blocking review finding not found for this deploy version"),
+        [finding] => Ok((*finding).clone()),
+        _ => anyhow::bail!(
+            "review finding identity is ambiguous; refresh the package and retry the action"
+        ),
+    }
+}
+
+fn finding_matches_input(
+    finding: &SecretFinding,
+    path: &str,
+    reason: &str,
+    marker: Option<&str>,
+    line_sha256: Option<&str>,
+) -> bool {
+    review_identity_matches_input(
+        &review_identity_for_finding(finding),
+        path,
+        reason,
+        marker,
+        line_sha256,
+    )
+}
+
+fn dismissed_matches_finding(item: &DismissedReviewFinding, finding: &SecretFinding) -> bool {
+    review_identities_match(
+        &review_identity_for_dismissal(item),
+        &review_identity_for_finding(finding),
+    )
+}
+
+fn latest_review_audit_action_matches(payload: &str, finding: &SecretFinding) -> Option<String> {
+    let finding_identity = review_identity_for_finding(finding);
+    parse_review_audit_events_lossy(payload)
+        .into_iter()
+        .rev()
+        .find(|event| review_identities_match(&event.identity, &finding_identity))
+        .map(|event| event.action)
+}
+
+fn review_identity_for_finding(finding: &SecretFinding) -> ReviewFindingIdentity {
+    ReviewFindingIdentity {
+        path: finding.path.trim().to_string(),
+        reason: finding.reason.trim().to_string(),
+        marker: finding
+            .marker
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        line_sha256: finding
+            .line_sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    }
+}
+
+fn review_identity_for_dismissal(item: &DismissedReviewFinding) -> ReviewFindingIdentity {
+    ReviewFindingIdentity {
+        path: item.path.trim().to_string(),
+        reason: item.reason.trim().to_string(),
+        marker: item
+            .marker
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        line_sha256: item
+            .line_sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    }
+}
+
+fn review_identity_matches_input(
+    identity: &ReviewFindingIdentity,
+    path: &str,
+    reason: &str,
+    marker: Option<&str>,
+    line_sha256: Option<&str>,
+) -> bool {
+    let path = path.trim();
+    let reason = reason.trim();
+    let marker = marker.map(str::trim).filter(|value| !value.is_empty());
+    let line_sha256 = line_sha256.map(str::trim).filter(|value| !value.is_empty());
+    match (
+        marker,
+        line_sha256,
+        identity.marker.as_deref(),
+        identity.line_sha256.as_deref(),
+    ) {
+        (Some(marker), Some(line_sha256), Some(identity_marker), Some(identity_line_sha256)) => {
+            identity.path == path
+                && identity_marker == marker
+                && identity_line_sha256 == line_sha256
+        }
+        _ => identity.path == path && identity.reason == reason,
+    }
+}
+
+fn review_identities_match(left: &ReviewFindingIdentity, right: &ReviewFindingIdentity) -> bool {
+    match (
+        left.marker.as_deref(),
+        left.line_sha256.as_deref(),
+        right.marker.as_deref(),
+        right.line_sha256.as_deref(),
+    ) {
+        (Some(left_marker), Some(left_line), Some(right_marker), Some(right_line)) => {
+            left.path == right.path && left_marker == right_marker && left_line == right_line
+        }
+        _ => left.path == right.path && left.reason == right.reason,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -702,12 +908,22 @@ O agente pode corrigir scripts e este runbook no pacote. Ele nao pode alterar o 
     Ok(())
 }
 
+#[cfg(test)]
 fn copy_source_snapshot(
     source: &Path,
     destination: &Path,
     findings: &mut Vec<SecretFinding>,
 ) -> anyhow::Result<()> {
     copy_source_snapshot_inner(source, destination, source, destination, findings)
+}
+
+fn copy_source_snapshot_for_package(
+    source: &Path,
+    destination: &Path,
+    package_root: &Path,
+    findings: &mut Vec<SecretFinding>,
+) -> anyhow::Result<()> {
+    copy_source_snapshot_inner(source, destination, source, package_root, findings)
 }
 
 fn copy_source_snapshot_inner(
@@ -723,14 +939,17 @@ fn copy_source_snapshot_inner(
         let entry = entry?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
+        let target = destination.join(&name);
         if let Some(reason) = excluded_secret_reason(&name) {
-            findings.push(SecretFinding::warning(path.display().to_string(), reason));
+            findings.push(SecretFinding::warning(
+                review_path_for(&target, destination_root),
+                reason,
+            ));
             continue;
         }
         if should_exclude_name(&name) {
             continue;
         }
-        let target = destination.join(&name);
         if path.is_dir() {
             std::fs::create_dir_all(&target)
                 .with_context(|| format!("failed to create {}", target.display()))?;
@@ -738,7 +957,7 @@ fn copy_source_snapshot_inner(
         } else if path.is_file() {
             if is_secret_file_name(&name) {
                 findings.push(SecretFinding::warning(
-                    path.display().to_string(),
+                    review_path_for(&target, destination_root),
                     "secret-like filename excluded from package",
                 ));
                 continue;
@@ -746,11 +965,12 @@ fn copy_source_snapshot_inner(
             std::fs::copy(&path, &target).with_context(|| {
                 format!("failed to copy {} to {}", path.display(), target.display())
             })?;
-            if let Some(finding) =
-                scan_secret_content(&path, &target, source_root, destination_root)
-            {
-                findings.push(finding);
-            }
+            findings.extend(scan_secret_content(
+                &path,
+                &target,
+                source_root,
+                destination_root,
+            ));
         }
     }
     Ok(())
@@ -833,30 +1053,51 @@ fn scan_secret_content(
     copied_path: &Path,
     source_root: &Path,
     copied_root: &Path,
-) -> Option<SecretFinding> {
-    let bytes = std::fs::read(copied_path).ok()?;
+) -> Vec<SecretFinding> {
+    let Ok(bytes) = std::fs::read(copied_path) else {
+        return Vec::new();
+    };
     if bytes.len() > 512 * 1024 || bytes.contains(&0) {
-        return None;
+        return Vec::new();
     }
-    let text = String::from_utf8(bytes).ok()?;
-    let hit = deploy_scan::first_blocking_secret_marker(&text)?;
-    let reason = format!("secret-like content marker `{}`", hit.marker);
-    let path = copied_path.display().to_string();
-    Some(
-        if source_path
-            .strip_prefix(source_root)
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Vec::new();
+    };
+    let path = review_path_for(copied_path, copied_root);
+    let warning = source_path
+        .strip_prefix(source_root)
+        .ok()
+        .is_some_and(is_non_runtime_path)
+        || copied_path
+            .strip_prefix(copied_root)
             .ok()
-            .is_some_and(is_non_runtime_path)
-            || copied_path
-                .strip_prefix(copied_root)
-                .ok()
-                .is_some_and(is_non_runtime_path)
-        {
-            SecretFinding::warning(path, reason)
-        } else {
-            SecretFinding::blocking(path, reason)
-        },
-    )
+            .is_some_and(is_non_runtime_review_path);
+    deploy_scan::blocking_secret_markers(&text)
+        .into_iter()
+        .map(|hit| {
+            let normalized_line = normalized_line_for_index(&text, hit.index);
+            let reason = format!("secret-like content marker `{}`", hit.marker);
+            let line_number = line_number_for_index(&text, hit.index);
+            let line_sha256 = sha256_hex(normalized_line.as_bytes());
+            if warning {
+                SecretFinding::secret_content_warning(
+                    path.clone(),
+                    reason,
+                    hit.marker,
+                    line_sha256,
+                    line_number,
+                )
+            } else {
+                SecretFinding::secret_content_blocking(
+                    path.clone(),
+                    reason,
+                    hit.marker,
+                    line_sha256,
+                    line_number,
+                )
+            }
+        })
+        .collect()
 }
 
 fn is_non_runtime_path(path: &Path) -> bool {
@@ -872,6 +1113,65 @@ fn is_non_runtime_path(path: &Path) -> bool {
     })
 }
 
+fn is_non_runtime_review_path(path: &Path) -> bool {
+    if let Some(source_relative) = package_source_relative_path(path) {
+        return is_non_runtime_path(&source_relative);
+    }
+    is_non_runtime_path(path)
+}
+
+fn package_source_relative_path(path: &Path) -> Option<PathBuf> {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if components.len() >= 3 && components[0] == "projects" && components[2] == "source" {
+        let mut source_relative = PathBuf::new();
+        for component in &components[3..] {
+            source_relative.push(component);
+        }
+        return Some(source_relative);
+    }
+    None
+}
+
+fn review_path_for(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn normalized_line_for_index(text: &str, index: usize) -> String {
+    let bytes = text.as_bytes();
+    let mut start = index.min(bytes.len());
+    while start > 0 && !matches!(bytes[start - 1], b'\n' | b'\r') {
+        start -= 1;
+    }
+    let mut end = index.min(bytes.len());
+    while end < bytes.len() && !matches!(bytes[end], b'\n' | b'\r') {
+        end += 1;
+    }
+    text[start..end].trim().to_string()
+}
+
+fn line_number_for_index(text: &str, index: usize) -> usize {
+    text.as_bytes()
+        .iter()
+        .take(index.min(text.len()))
+        .filter(|byte| **byte == b'\n')
+        .count()
+        + 1
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn default_finding_severity() -> String {
     "error".to_string()
 }
@@ -883,10 +1183,14 @@ fn default_finding_blocking() -> bool {
 impl SecretFinding {
     fn warning(path: String, reason: impl Into<String>) -> Self {
         let reason = reason.into();
+        let hint = Some(review_finding_hint(&reason, false).to_string());
         Self {
             path,
-            hint: Some(review_finding_hint(&reason, false).to_string()),
             reason,
+            marker: None,
+            line_sha256: None,
+            line_number: None,
+            hint,
             severity: "warning".to_string(),
             blocking: false,
         }
@@ -894,10 +1198,56 @@ impl SecretFinding {
 
     fn blocking(path: String, reason: impl Into<String>) -> Self {
         let reason = reason.into();
+        let hint = Some(review_finding_hint(&reason, true).to_string());
         Self {
             path,
-            hint: Some(review_finding_hint(&reason, true).to_string()),
             reason,
+            marker: None,
+            line_sha256: None,
+            line_number: None,
+            hint,
+            severity: "error".to_string(),
+            blocking: true,
+        }
+    }
+
+    fn secret_content_warning(
+        path: String,
+        reason: impl Into<String>,
+        marker: &str,
+        line_sha256: String,
+        line_number: usize,
+    ) -> Self {
+        let reason = reason.into();
+        let hint = Some(review_finding_hint(&reason, false).to_string());
+        Self {
+            path,
+            reason,
+            marker: Some(marker.to_string()),
+            line_sha256: Some(line_sha256),
+            line_number: Some(line_number),
+            hint,
+            severity: "warning".to_string(),
+            blocking: false,
+        }
+    }
+
+    fn secret_content_blocking(
+        path: String,
+        reason: impl Into<String>,
+        marker: &str,
+        line_sha256: String,
+        line_number: usize,
+    ) -> Self {
+        let reason = reason.into();
+        let hint = Some(review_finding_hint(&reason, true).to_string());
+        Self {
+            path,
+            reason,
+            marker: Some(marker.to_string()),
+            line_sha256: Some(line_sha256),
+            line_number: Some(line_number),
+            hint,
             severity: "error".to_string(),
             blocking: true,
         }
@@ -1942,7 +2292,7 @@ fn scan_package_review_files(root: &Path, findings: &mut Vec<SecretFinding>) {
     ];
     for path in paths {
         if path.is_file() {
-            if let Some(finding) = scan_secret_content(&path, &path, root, root) {
+            for finding in scan_secret_content(&path, &path, root, root) {
                 push_unique_finding(findings, finding);
             }
         }
@@ -1953,6 +2303,8 @@ fn push_unique_finding(findings: &mut Vec<SecretFinding>, finding: SecretFinding
     if findings.iter().any(|existing| {
         existing.path == finding.path
             && existing.reason == finding.reason
+            && existing.marker == finding.marker
+            && existing.line_sha256 == finding.line_sha256
             && existing.blocking == finding.blocking
     }) {
         return;
@@ -2423,6 +2775,7 @@ mod tests {
             reviewed_at: None,
             blocking_findings_json: r#"[{"path":".env","reason":"legacy"}]"#.to_string(),
             dismissed_findings_json: "[]".to_string(),
+            review_audit_json: "[]".to_string(),
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
@@ -2435,10 +2788,15 @@ mod tests {
 
     #[test]
     fn dismissed_review_finding_allows_approval() {
-        let (root, db, version, finding) = review_finding_version("dismiss-allows-approval", None);
+        let fixture = review_flow_fixture(
+            "dismiss-allows-approval",
+            "const fake = \"Bearer fake-token-0000\";\n",
+        );
+        let version = create_review_flow_package(&fixture);
+        let finding = only_active_blocking_finding(&version);
 
         assert!(crate::deploy::approve_version(
-            &db,
+            &fixture.db,
             crate::deploy::ApproveDeployVersionInput {
                 version_id: version.id.clone(),
             },
@@ -2446,91 +2804,225 @@ mod tests {
         .is_err());
 
         let dismissed = dismiss_review_finding(
-            &db,
+            &fixture.db,
             &version.id,
             &finding.path,
             &finding.reason,
+            finding.marker.as_deref(),
+            finding.line_sha256.as_deref(),
             "owner accepted fake test token",
         )
         .expect("dismiss finding");
         assert!(!has_blocking_findings(&dismissed));
+        assert_eq!(
+            parse_review_audit_events_lossy(&dismissed.review_audit_json).len(),
+            1
+        );
 
         let approved = crate::deploy::approve_version(
-            &db,
+            &fixture.db,
             crate::deploy::ApproveDeployVersionInput {
                 version_id: version.id,
             },
         )
         .expect("approve dismissed version");
         assert_eq!(approved.review_status, "approved");
-        std::fs::remove_dir_all(root).expect("cleanup");
-    }
-
-    #[test]
-    fn dismissed_review_finding_is_inherited_by_content() {
-        let (root, db, first, finding) = review_finding_version("dismiss-inherit", None);
-        let first = dismiss_review_finding(
-            &db,
-            &first.id,
+        let blocked_after_approval = dismiss_review_finding(
+            &fixture.db,
+            &approved.id,
             &finding.path,
             &finding.reason,
-            "owner accepted fake test token",
+            finding.marker.as_deref(),
+            finding.line_sha256.as_deref(),
+            "owner accepted fake test token again",
         )
-        .expect("dismiss first finding");
-        let stack = db.get_deploy_stack(&first.stack_id).expect("stack");
-        let second = db
-            .create_deploy_version(store::DeployVersionCreate {
-                stack_id: &stack.id,
-                workspace_id: first.workspace_id,
-                label: "deploy-002",
-                target_machine_id: None,
-                artifact_path: "/tmp/package-2",
-                manifest_path: "/tmp/package-2/manifest.json",
-                manifest_json: "{}",
-                blocking_findings_json: &serde_json::to_string(&vec![finding.clone()])
-                    .expect("findings"),
-                dismissed_findings_json: "[]",
-            })
-            .expect("second version");
-
-        let inherited = inherited_dismissed_findings(&db, &second, std::slice::from_ref(&finding))
-            .expect("inherit dismissed finding");
-
-        assert_eq!(inherited.len(), 1);
-        assert_eq!(inherited[0].path, finding.path);
-        assert_eq!(inherited[0].reason, finding.reason);
-        assert_eq!(
-            inherited[0].inherited_from_label.as_deref(),
-            Some("deploy-001")
-        );
-        std::fs::remove_dir_all(root).expect("cleanup");
+        .expect_err("approved versions cannot dismiss");
+        assert!(blocked_after_approval
+            .to_string()
+            .contains("deploy_review_not_pending"));
+        std::fs::remove_dir_all(fixture.root).expect("cleanup");
     }
 
     #[test]
-    fn restored_review_finding_blocks_again() {
-        let (root, db, version, finding) = review_finding_version("dismiss-restore", None);
-        let dismissed = dismiss_review_finding(
-            &db,
+    fn dismissed_review_finding_is_inherited_by_content_and_blocks_new_occurrences() {
+        let fixture = review_flow_fixture(
+            "dismiss-inherit",
+            "const fake = \"Bearer fake-token-0000\";\n",
+        );
+        let first = create_review_flow_package(&fixture);
+        let first_finding = only_active_blocking_finding(&first);
+        dismiss_generated_finding(&fixture.db, &first, &first_finding);
+
+        let second = create_review_flow_package(&fixture);
+        assert!(!has_blocking_findings(&second));
+        let second_dismissed = parse_dismissed_findings_lossy(&second.dismissed_findings_json);
+        assert_eq!(second_dismissed.len(), 1);
+        assert_eq!(second_dismissed[0].path, first_finding.path);
+        assert_eq!(second_dismissed[0].line_sha256, first_finding.line_sha256);
+        assert_eq!(
+            second_dismissed[0].inherited_from_label.as_deref(),
+            Some("deploy-001")
+        );
+
+        std::fs::write(
+            fixture.secret_path(),
+            "const fake = \"Bearer fake-token-0000\";\nconst real = \"Bearer live-token-123456\";\n",
+        )
+        .expect("add real token");
+        let third = create_review_flow_package(&fixture);
+        let third_findings =
+            parse_review_findings(&third.blocking_findings_json).expect("third findings");
+        assert_eq!(
+            third_findings
+                .iter()
+                .filter(|finding| finding.blocking)
+                .count(),
+            2
+        );
+        let third_active = active_blocking_findings(&third).expect("third active findings");
+        assert_eq!(third_active.len(), 1, "{third_active:?}");
+        assert_eq!(third_active[0].line_number, Some(2));
+        assert_ne!(third_active[0].line_sha256, first_finding.line_sha256);
+        let third_dismissed = parse_dismissed_findings_lossy(&third.dismissed_findings_json);
+        assert_eq!(third_dismissed.len(), 1);
+        assert_eq!(third_dismissed[0].line_sha256, first_finding.line_sha256);
+        std::fs::remove_dir_all(fixture.root).expect("cleanup");
+    }
+
+    #[test]
+    fn dismissed_review_finding_is_not_inherited_when_path_or_line_changes() {
+        let changed_line = review_flow_fixture(
+            "dismiss-changed-line",
+            "const fake = \"Bearer fake-token-0000\";\n",
+        );
+        let first = create_review_flow_package(&changed_line);
+        let first_finding = only_active_blocking_finding(&first);
+        dismiss_generated_finding(&changed_line.db, &first, &first_finding);
+        std::fs::write(
+            changed_line.secret_path(),
+            "const fake = \"Bearer changed-token-9999\";\n",
+        )
+        .expect("change dismissed line");
+        let second = create_review_flow_package(&changed_line);
+        assert!(has_blocking_findings(&second));
+        assert!(parse_dismissed_findings_lossy(&second.dismissed_findings_json).is_empty());
+        std::fs::remove_dir_all(changed_line.root).expect("cleanup");
+
+        let renamed = review_flow_fixture(
+            "dismiss-renamed-path",
+            "const fake = \"Bearer fake-token-0000\";\n",
+        );
+        let first = create_review_flow_package(&renamed);
+        let first_finding = only_active_blocking_finding(&first);
+        dismiss_generated_finding(&renamed.db, &first, &first_finding);
+        let renamed_path = renamed.project_root.join("src/renamed.txt");
+        std::fs::rename(renamed.secret_path(), &renamed_path).expect("rename dismissed file");
+        let second = create_review_flow_package(&renamed);
+        let active = active_blocking_findings(&second).expect("renamed active");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].path, "projects/app/source/src/renamed.txt");
+        assert!(parse_dismissed_findings_lossy(&second.dismissed_findings_json).is_empty());
+        std::fs::remove_dir_all(renamed.root).expect("cleanup");
+    }
+
+    #[test]
+    fn restored_review_finding_tombstone_blocks_future_inheritance() {
+        let fixture = review_flow_fixture(
+            "dismiss-restore",
+            "const fake = \"Bearer fake-token-0000\";\n",
+        );
+        let first = create_review_flow_package(&fixture);
+        let first_finding = only_active_blocking_finding(&first);
+        dismiss_generated_finding(&fixture.db, &first, &first_finding);
+
+        let second = create_review_flow_package(&fixture);
+        assert!(!has_blocking_findings(&second));
+        let third = create_review_flow_package(&fixture);
+        let third_dismissed = parse_dismissed_findings_lossy(&third.dismissed_findings_json);
+        assert_eq!(
+            third_dismissed[0].inherited_from_label.as_deref(),
+            Some("deploy-001")
+        );
+        let restored = restore_review_finding(
+            &fixture.db,
+            &third.id,
+            &first_finding.path,
+            &first_finding.reason,
+            first_finding.marker.as_deref(),
+            first_finding.line_sha256.as_deref(),
+        )
+        .expect("restore finding");
+
+        assert!(has_blocking_findings(&restored));
+        assert!(restore_review_finding(
+            &fixture.db,
+            &third.id,
+            &first_finding.path,
+            &first_finding.reason,
+            first_finding.marker.as_deref(),
+            first_finding.line_sha256.as_deref(),
+        )
+        .is_err());
+        let audit = parse_review_audit_events_lossy(&restored.review_audit_json);
+        assert_eq!(
+            audit.last().map(|event| event.action.as_str()),
+            Some("restore")
+        );
+
+        let fourth = create_review_flow_package(&fixture);
+        assert!(has_blocking_findings(&fourth));
+        assert!(parse_dismissed_findings_lossy(&fourth.dismissed_findings_json).is_empty());
+        std::fs::remove_dir_all(fixture.root).expect("cleanup");
+    }
+
+    #[test]
+    fn review_finding_audit_is_append_only() {
+        let fixture = review_flow_fixture(
+            "dismiss-audit",
+            "const fake = \"Bearer fake-token-0000\";\n",
+        );
+        let version = create_review_flow_package(&fixture);
+        let finding = only_active_blocking_finding(&version);
+        let first = dismiss_generated_finding(&fixture.db, &version, &finding);
+        let second = dismiss_review_finding(
+            &fixture.db,
             &version.id,
             &finding.path,
             &finding.reason,
-            "owner accepted fake test token",
+            finding.marker.as_deref(),
+            finding.line_sha256.as_deref(),
+            "owner accepted fake test token twice",
         )
-        .expect("dismiss finding");
-        assert!(!has_blocking_findings(&dismissed));
+        .expect("dismiss duplicate");
+        assert_eq!(
+            parse_review_audit_events_lossy(&first.review_audit_json).len(),
+            1
+        );
+        let audit = parse_review_audit_events_lossy(&second.review_audit_json);
+        assert_eq!(audit.len(), 2);
+        assert!(audit.iter().all(|event| event.action == "dismiss"));
+        assert_eq!(
+            parse_dismissed_findings_lossy(&second.dismissed_findings_json).len(),
+            1
+        );
 
-        let restored = restore_review_finding(&db, &version.id, &finding.path, &finding.reason)
-            .expect("restore finding");
-
-        assert!(has_blocking_findings(&restored));
-        assert!(crate::deploy::approve_version(
-            &db,
-            crate::deploy::ApproveDeployVersionInput {
-                version_id: version.id,
-            },
+        let restored = restore_review_finding(
+            &fixture.db,
+            &version.id,
+            &finding.path,
+            &finding.reason,
+            finding.marker.as_deref(),
+            finding.line_sha256.as_deref(),
         )
-        .is_err());
-        std::fs::remove_dir_all(root).expect("cleanup");
+        .expect("restore");
+        let audit = parse_review_audit_events_lossy(&restored.review_audit_json);
+        assert_eq!(audit.len(), 3);
+        assert_eq!(
+            audit.last().map(|event| event.action.as_str()),
+            Some("restore")
+        );
+        assert!(parse_dismissed_findings_lossy(&restored.dismissed_findings_json).is_empty());
+        std::fs::remove_dir_all(fixture.root).expect("cleanup");
     }
 
     #[test]
@@ -2551,6 +3043,7 @@ mod tests {
             reviewed_at: None,
             blocking_findings_json: "[]".to_string(),
             dismissed_findings_json: "[]".to_string(),
+            review_audit_json: "[]".to_string(),
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         };
@@ -3190,6 +3683,114 @@ mod tests {
         (root, version, findings)
     }
 
+    struct ReviewFlowFixture {
+        root: PathBuf,
+        db: store::Database,
+        workspace_root: PathBuf,
+        project_root: PathBuf,
+        workspace_id: i64,
+        project_id: i64,
+        agent_id: i64,
+        stack_name: String,
+    }
+
+    impl ReviewFlowFixture {
+        fn secret_path(&self) -> PathBuf {
+            self.project_root.join("src/config.txt")
+        }
+    }
+
+    fn review_flow_fixture(label: &str, secret_source: &str) -> ReviewFlowFixture {
+        let root = temp_root(label);
+        let db = store::Database::open(&root).expect("open db");
+        let workspace_root = root.join("workspace");
+        let project_root = workspace_root.join("app");
+        std::fs::create_dir_all(project_root.join("src")).expect("project src");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"dev":"vite --host 0.0.0.0"},"dependencies":{"vite":"latest"}}"#,
+        )
+        .expect("package");
+        std::fs::write(project_root.join("src/config.txt"), secret_source).expect("secret source");
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("create workspace");
+        let project = db
+            .add_project(
+                workspace.id,
+                "App",
+                &project_root.display().to_string(),
+                None,
+            )
+            .expect("add project");
+        let agent = db
+            .create_agent_profile(store::AgentProfileCreate {
+                workspace_id: workspace.id,
+                project_id: None,
+                name: "Codex Deploy",
+                provider: "codex",
+                model: Some("gpt-5"),
+                reasoning_effort: None,
+                sandbox: "danger-full-access",
+                context_mode: "auto_lean",
+                rtk_enabled: false,
+            })
+            .expect("create agent");
+        ReviewFlowFixture {
+            root,
+            db,
+            workspace_root,
+            project_root,
+            workspace_id: workspace.id,
+            project_id: project.id,
+            agent_id: agent.id,
+            stack_name: "App deploy".to_string(),
+        }
+    }
+
+    fn create_review_flow_package(fixture: &ReviewFlowFixture) -> store::DeployVersion {
+        create_package(
+            &fixture.db,
+            CreateDeployPackageInput {
+                workspace_id: fixture.workspace_id,
+                stack_name: fixture.stack_name.clone(),
+                project_ids: vec![fixture.project_id],
+                target_machine_id: None,
+                agent_profile_id: fixture.agent_id,
+                deploy_plan_path: Some(write_test_plan(
+                    &fixture.workspace_root,
+                    fixture.project_id,
+                    "web_service",
+                )),
+                include_dirty: true,
+            },
+        )
+        .expect("create package")
+    }
+
+    fn only_active_blocking_finding(version: &store::DeployVersion) -> SecretFinding {
+        let active = active_blocking_findings(version).expect("active findings");
+        assert_eq!(active.len(), 1, "{active:?}");
+        active.into_iter().next().expect("active finding")
+    }
+
+    fn dismiss_generated_finding(
+        db: &store::Database,
+        version: &store::DeployVersion,
+        finding: &SecretFinding,
+    ) -> store::DeployVersion {
+        dismiss_review_finding(
+            db,
+            &version.id,
+            &finding.path,
+            &finding.reason,
+            finding.marker.as_deref(),
+            finding.line_sha256.as_deref(),
+            "owner accepted fake test token",
+        )
+        .expect("dismiss generated finding")
+    }
+
     fn write_test_plan(workspace_root: &Path, project_id: i64, strategy: &str) -> String {
         let analysis_dir = workspace_root
             .join(".dw")
@@ -3259,48 +3860,5 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).expect("mkdir");
         root
-    }
-
-    fn review_finding_version(
-        label: &str,
-        dismissed_findings_json: Option<&str>,
-    ) -> (
-        PathBuf,
-        store::Database,
-        store::DeployVersion,
-        SecretFinding,
-    ) {
-        let root = temp_root(label);
-        let db = store::Database::open(&root).expect("open db");
-        let workspace_root = root.join("workspace");
-        let workspace = db
-            .create_workspace("Workspace", &workspace_root.display().to_string())
-            .expect("workspace");
-        let stack = db
-            .create_deploy_stack(store::DeployStackCreate {
-                workspace_id: workspace.id,
-                name: "App deploy",
-                slug: "app-deploy",
-            })
-            .expect("stack");
-        let finding = SecretFinding::blocking(
-            "projects/app/source/src/lib.rs".to_string(),
-            "secret-like content marker `bearer `".to_string(),
-        );
-        let findings_json = serde_json::to_string(&vec![finding.clone()]).expect("findings");
-        let version = db
-            .create_deploy_version(store::DeployVersionCreate {
-                stack_id: &stack.id,
-                workspace_id: workspace.id,
-                label: "deploy-001",
-                target_machine_id: None,
-                artifact_path: "/tmp/package",
-                manifest_path: "/tmp/package/manifest.json",
-                manifest_json: "{}",
-                blocking_findings_json: &findings_json,
-                dismissed_findings_json: dismissed_findings_json.unwrap_or("[]"),
-            })
-            .expect("version");
-        (root, db, version, finding)
     }
 }

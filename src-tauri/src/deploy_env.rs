@@ -520,6 +520,7 @@ mod tests {
             reviewed_at: None,
             blocking_findings_json: "[]".to_string(),
             dismissed_findings_json: "[]".to_string(),
+            review_audit_json: "[]".to_string(),
             created_at: "now".to_string(),
             updated_at: "now".to_string(),
         }

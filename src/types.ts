@@ -215,6 +215,7 @@ export type DeployVersion = {
   reviewed_at?: string | null;
   blocking_findings_json: string;
   dismissed_findings_json: string;
+  review_audit_json: string;
   created_at: string;
   updated_at: string;
 };

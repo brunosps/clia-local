@@ -1,6 +1,6 @@
 use anyhow::Context;
 use chrono::Utc;
-use rusqlite::{params, types::ValueRef, Connection, OptionalExtension};
+use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -328,6 +328,7 @@ pub struct DeployVersion {
     pub reviewed_at: Option<String>,
     pub blocking_findings_json: String,
     pub dismissed_findings_json: String,
+    pub review_audit_json: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -718,7 +719,7 @@ impl Database {
     ) -> anyhow::Result<WorkspaceDeployReset> {
         let workspace = self.get_workspace(workspace_id)?;
         let mut conn = self.workspace_connect(&workspace)?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let deploy_run_steps = tx.execute(
             "delete from deploy_run_steps
              where run_id in (
@@ -891,7 +892,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "select id, stack_id, workspace_id, label, status, target_machine_id, artifact_path,
                     manifest_path, manifest_json, review_status, reviewed_at,
-                    blocking_findings_json, dismissed_findings_json, created_at, updated_at
+                    blocking_findings_json, dismissed_findings_json, review_audit_json,
+                    created_at, updated_at
              from deploy_versions
              where stack_id = ?1
              order by created_at desc",
@@ -1013,21 +1015,30 @@ impl Database {
         self.get_deploy_version(version_id)
     }
 
-    pub fn update_deploy_version_dismissed_findings(
+    pub fn update_deploy_version_review_json<F>(
         &self,
         version_id: &str,
-        dismissed_findings_json: &str,
-    ) -> anyhow::Result<DeployVersion> {
+        mutate: F,
+    ) -> anyhow::Result<DeployVersion>
+    where
+        F: FnOnce(&DeployVersion) -> anyhow::Result<(String, String)>,
+    {
         let version = self.get_deploy_version(version_id)?;
-        let conn = self.workspace_connect_by_id(version.workspace_id)?;
+        let mut conn = self.workspace_connect_by_id(version.workspace_id)?;
+        let tx = conn.transaction()?;
+        let current = find_deploy_version_with_conn(&tx, version_id)?
+            .ok_or_else(|| anyhow::anyhow!("deploy version not found: {version_id}"))?;
+        let (dismissed_findings_json, review_audit_json) = mutate(&current)?;
         let now = Utc::now().to_rfc3339();
-        conn.execute(
+        tx.execute(
             "update deploy_versions
              set dismissed_findings_json = ?1,
-                 updated_at = ?2
-             where id = ?3",
-            params![dismissed_findings_json, now, version_id],
+                 review_audit_json = ?2,
+                 updated_at = ?3
+             where id = ?4",
+            params![dismissed_findings_json, review_audit_json, now, version_id],
         )?;
+        tx.commit()?;
         self.get_deploy_version(version_id)
     }
 
@@ -3552,6 +3563,7 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
               reviewed_at text,
               blocking_findings_json text not null default '[]',
               dismissed_findings_json text not null default '[]',
+              review_audit_json text not null default '[]',
               created_at text not null,
               updated_at text not null,
               unique(stack_id, label)
@@ -3898,6 +3910,12 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
         conn,
         "deploy_versions",
         "dismissed_findings_json",
+        "text not null default '[]'",
+    )?;
+    ensure_column(
+        conn,
+        "deploy_versions",
+        "review_audit_json",
         "text not null default '[]'",
     )?;
     ensure_column(
@@ -5315,8 +5333,9 @@ fn deploy_version_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeployVe
         reviewed_at: row.get(10)?,
         blocking_findings_json: row_text_lossy(row, 11)?,
         dismissed_findings_json: row_text_lossy(row, 12)?,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        review_audit_json: row_text_lossy(row, 13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
@@ -5402,7 +5421,8 @@ fn find_deploy_version_with_conn(
     conn.query_row(
         "select id, stack_id, workspace_id, label, status, target_machine_id, artifact_path,
                 manifest_path, manifest_json, review_status, reviewed_at,
-                blocking_findings_json, dismissed_findings_json, created_at, updated_at
+                blocking_findings_json, dismissed_findings_json, review_audit_json,
+                created_at, updated_at
          from deploy_versions
          where id = ?1
          limit 1",

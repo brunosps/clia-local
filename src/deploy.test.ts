@@ -60,6 +60,7 @@ const baseVersion: DeployVersion = {
   reviewed_at: null,
   blocking_findings_json: "[]",
   dismissed_findings_json: "[]",
+  review_audit_json: "[]",
   created_at: "2026-05-29T00:00:00Z",
   updated_at: "2026-05-29T00:00:00Z",
 };

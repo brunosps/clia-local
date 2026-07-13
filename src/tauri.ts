@@ -234,14 +234,35 @@ export const api = {
     path: string,
     reason: string,
     justification: string,
+    marker?: string,
+    lineSha256?: string,
   ) {
     return invokeSafe<DeployVersion>("dismiss_review_finding", {
-      input: { version_id: versionId, path, reason, justification },
+      input: {
+        version_id: versionId,
+        path,
+        reason,
+        marker: marker ?? null,
+        line_sha256: lineSha256 ?? null,
+        justification,
+      },
     });
   },
-  restoreReviewFinding(versionId: string, path: string, reason: string) {
+  restoreReviewFinding(
+    versionId: string,
+    path: string,
+    reason: string,
+    marker?: string,
+    lineSha256?: string,
+  ) {
     return invokeSafe<DeployVersion>("restore_review_finding", {
-      input: { version_id: versionId, path, reason },
+      input: {
+        version_id: versionId,
+        path,
+        reason,
+        marker: marker ?? null,
+        line_sha256: lineSha256 ?? null,
+      },
     });
   },
   createDeployRepairVersion(runId: string) {

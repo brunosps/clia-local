@@ -22,19 +22,36 @@ export type DeployProgressEntry = {
 export type DeployPackageFinding = {
   path: string;
   reason: string;
+  marker?: string;
+  line_sha256?: string;
+  line_number?: number;
   hint?: string;
   severity: string;
   blocking: boolean;
   dismissed?: DeployFindingDismissal;
+  audit?: DeployReviewAuditEvent[];
 };
 
-export type DeployFindingDismissal = {
+export type DeployFindingIdentity = {
   path: string;
   reason: string;
+  marker?: string;
+  line_sha256?: string;
+};
+
+export type DeployFindingDismissal = DeployFindingIdentity & {
   justification: string;
   dismissed_at: string;
+  line_number?: number;
   inherited_from_version_id?: string | null;
   inherited_from_label?: string | null;
+};
+
+export type DeployReviewAuditEvent = {
+  action: "dismiss" | "restore";
+  identity: DeployFindingIdentity;
+  justification: string;
+  timestamp: string;
 };
 
 export type DeployReadiness = {
@@ -203,13 +220,21 @@ export function deployStepLabel(stepKey: string) {
 export function parseDeployFindings(version: DeployVersion | null): DeployPackageFinding[] {
   if (!version?.blocking_findings_json) return [];
   const dismissed = parseDismissedReviewFindings(version);
+  const audit = parseDeployReviewAudit(version);
   try {
     const parsed = JSON.parse(version.blocking_findings_json);
     if (!Array.isArray(parsed)) return [];
     return parsed.map((finding) => {
       const normalized = normalizeDeployFinding(finding);
       const dismissal = dismissed.find((item) => reviewFindingKeyMatches(item, normalized));
-      return dismissal ? { ...normalized, dismissed: dismissal } : normalized;
+      const findingAudit = audit.filter((item) =>
+        reviewFindingKeyMatches(item.identity, normalized),
+      );
+      return {
+        ...normalized,
+        ...(dismissal ? { dismissed: dismissal } : {}),
+        ...(findingAudit.length ? { audit: findingAudit } : {}),
+      };
     });
   } catch {
     return [
@@ -220,6 +245,17 @@ export function parseDeployFindings(version: DeployVersion | null): DeployPackag
         blocking: true,
       },
     ];
+  }
+}
+
+export function parseDeployReviewAudit(version: DeployVersion | null): DeployReviewAuditEvent[] {
+  if (!version?.review_audit_json) return [];
+  try {
+    const parsed = JSON.parse(version.review_audit_json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap(normalizeDeployReviewAuditEvent);
+  } catch {
+    return [];
   }
 }
 
@@ -624,12 +660,20 @@ function normalizeDeployFinding(value: unknown): DeployPackageFinding {
       : blocking
         ? "error"
         : "warning";
+  const marker = typeof record.marker === "string" ? record.marker.trim() : "";
+  const lineSha256 = typeof record.line_sha256 === "string" ? record.line_sha256.trim() : "";
   return {
     path: typeof record.path === "string" && record.path.trim() ? record.path : "unknown path",
     reason:
       typeof record.reason === "string" && record.reason.trim()
         ? record.reason
         : "unknown deploy package finding",
+    marker: marker || undefined,
+    line_sha256: lineSha256 || undefined,
+    line_number:
+      typeof record.line_number === "number" && Number.isFinite(record.line_number)
+        ? record.line_number
+        : undefined,
     hint: typeof record.hint === "string" && record.hint.trim() ? record.hint : undefined,
     severity,
     blocking,
@@ -641,6 +685,8 @@ function normalizeDeployFindingDismissal(value: unknown): DeployFindingDismissal
   const record = value as Record<string, unknown>;
   const path = typeof record.path === "string" ? record.path.trim() : "";
   const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+  const marker = typeof record.marker === "string" ? record.marker.trim() : "";
+  const lineSha256 = typeof record.line_sha256 === "string" ? record.line_sha256.trim() : "";
   const justification =
     typeof record.justification === "string" ? record.justification.trim() : "";
   const dismissedAt = typeof record.dismissed_at === "string" ? record.dismissed_at.trim() : "";
@@ -649,6 +695,11 @@ function normalizeDeployFindingDismissal(value: unknown): DeployFindingDismissal
     {
       path,
       reason,
+      ...(marker ? { marker } : {}),
+      ...(lineSha256 ? { line_sha256: lineSha256 } : {}),
+      ...(typeof record.line_number === "number" && Number.isFinite(record.line_number)
+        ? { line_number: record.line_number }
+        : {}),
       justification,
       dismissed_at: dismissedAt,
       inherited_from_version_id:
@@ -661,9 +712,54 @@ function normalizeDeployFindingDismissal(value: unknown): DeployFindingDismissal
   ];
 }
 
+function normalizeDeployReviewAuditEvent(value: unknown): DeployReviewAuditEvent[] {
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const action = record.action === "dismiss" || record.action === "restore" ? record.action : null;
+  const timestamp = typeof record.timestamp === "string" ? record.timestamp.trim() : "";
+  const identity = normalizeDeployFindingIdentity(record.identity);
+  if (!action || !timestamp || !identity) return [];
+  return [
+    {
+      action,
+      identity,
+      justification: typeof record.justification === "string" ? record.justification.trim() : "",
+      timestamp,
+    },
+  ];
+}
+
+function normalizeDeployFindingIdentity(value: unknown): DeployFindingIdentity | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const path = typeof record.path === "string" ? record.path.trim() : "";
+  const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+  const marker = typeof record.marker === "string" ? record.marker.trim() : "";
+  const lineSha256 = typeof record.line_sha256 === "string" ? record.line_sha256.trim() : "";
+  if (!path || !reason) return null;
+  return {
+    path,
+    reason,
+    ...(marker ? { marker } : {}),
+    ...(lineSha256 ? { line_sha256: lineSha256 } : {}),
+  };
+}
+
 function reviewFindingKeyMatches(
-  dismissal: DeployFindingDismissal,
+  dismissal: DeployFindingIdentity,
   finding: DeployPackageFinding,
 ) {
+  if (
+    dismissal.marker &&
+    dismissal.line_sha256 &&
+    finding.marker &&
+    finding.line_sha256
+  ) {
+    return (
+      dismissal.path === finding.path &&
+      dismissal.marker === finding.marker &&
+      dismissal.line_sha256 === finding.line_sha256
+    );
+  }
   return dismissal.path === finding.path && dismissal.reason === finding.reason;
 }
