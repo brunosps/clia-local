@@ -1739,6 +1739,14 @@ export default function DeployPackagesPanel({
                               : ""}
                           </small>
                         ) : null}
+                        {finding.occurrence_count && finding.occurrence_count > 1 ? (
+                          <small className="deploy-finding-hint">
+                            {finding.occurrence_count} ocorrências
+                            {finding.occurrence_index
+                              ? ` · ocorrência ${finding.occurrence_index}/${finding.occurrence_count}`
+                              : ""}
+                          </small>
+                        ) : null}
                         {finding.hint ? (
                           <small className="deploy-finding-hint">{finding.hint}</small>
                         ) : null}

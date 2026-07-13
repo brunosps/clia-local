@@ -221,6 +221,8 @@ describe("deploy helpers", () => {
         {
           path: "projects/app/source/src/lib.rs",
           reason: "secret-like content marker `bearer `",
+          marker: "bearer ",
+          line_sha256: "abc123",
           severity: "error",
           blocking: true,
         },
@@ -229,6 +231,8 @@ describe("deploy helpers", () => {
         {
           path: "projects/app/source/src/lib.rs",
           reason: "secret-like content marker `bearer `",
+          marker: "bearer ",
+          line_sha256: "abc123",
           justification: "owner accepted fake test token",
           dismissed_at: "2026-07-13T12:00:00Z",
           inherited_from_label: "deploy-001",
@@ -242,6 +246,58 @@ describe("deploy helpers", () => {
     );
     expect(parseBlockingFindings(version)).toHaveLength(0);
     expect(canApproveVersion(version)).toBe(true);
+  });
+
+  it("does not apply legacy path-reason dismissals to secret-content findings without a hash", () => {
+    const version = {
+      ...baseVersion,
+      blocking_findings_json: JSON.stringify([
+        {
+          path: "projects/app/source/src/lib.rs",
+          reason: "secret-like content marker `bearer `",
+          marker: "bearer ",
+          line_sha256: "abc123",
+          severity: "error",
+          blocking: true,
+        },
+      ]),
+      dismissed_findings_json: JSON.stringify([
+        {
+          path: "projects/app/source/src/lib.rs",
+          reason: "secret-like content marker `bearer `",
+          justification: "legacy accepted fake test token",
+          dismissed_at: "2026-07-13T12:00:00Z",
+        },
+      ]),
+    };
+
+    expect(parseDeployFindings(version)[0].dismissed).toBeUndefined();
+    expect(parseBlockingFindings(version)).toHaveLength(1);
+    expect(canApproveVersion(version)).toBe(false);
+  });
+
+  it("parses duplicate occurrence metadata for review findings", () => {
+    const version = {
+      ...baseVersion,
+      blocking_findings_json: JSON.stringify([
+        {
+          path: "projects/app/source/src/lib.rs",
+          reason: "secret-like content marker `bearer `",
+          marker: "bearer ",
+          line_sha256: "abc123",
+          line_number: 3,
+          occurrence_index: 1,
+          occurrence_count: 2,
+          severity: "error",
+          blocking: true,
+        },
+      ]),
+    };
+
+    expect(parseDeployFindings(version)[0]).toMatchObject({
+      occurrence_index: 1,
+      occurrence_count: 2,
+    });
   });
 
   it("derives guided deploy readiness from package, environment, approval, and target", () => {

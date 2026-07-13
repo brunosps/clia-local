@@ -35,6 +35,10 @@ pub struct SecretFinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_number: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrence_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrence_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     #[serde(default = "default_finding_severity")]
     pub severity: String,
@@ -203,7 +207,7 @@ pub fn create_package(
         })?;
         if project_detection.deploy_strategy == "unsupported" {
             findings.push(SecretFinding::blocking(
-                project.path.clone(),
+                packaged.package_path.clone(),
                 format!(
                     "unsupported deploy strategy: {}",
                     project_detection.strategy_reason
@@ -232,6 +236,7 @@ pub fn create_package(
     write_agent_plan_files(&artifact_root, &plan_bundle.plan)?;
     write_agent_plan_scripts(&artifact_root, &plan_bundle.plan, &package_strategy)?;
     scan_package_review_files(&artifact_root, &mut findings);
+    annotate_finding_occurrences(&mut findings);
     write_package_runbook(
         &artifact_root,
         &stack,
@@ -478,6 +483,7 @@ pub fn restore_review_finding(
     line_sha256: Option<&str>,
 ) -> anyhow::Result<store::DeployVersion> {
     db.update_deploy_version_review_json(version_id, |version| {
+        ensure_review_dismissible(version)?;
         let findings = parse_review_findings(&version.blocking_findings_json)?;
         let finding = select_blocking_finding(&findings, path, reason, marker, line_sha256)?;
         let mut dismissed = parse_dismissed_findings_lossy(&version.dismissed_findings_json);
@@ -507,46 +513,157 @@ fn inherited_dismissed_findings(
 ) -> anyhow::Result<Vec<DismissedReviewFinding>> {
     let previous_versions = db.list_deploy_versions(&version.stack_id)?;
     let mut inherited = Vec::new();
+    let mut inherited_identities = Vec::<ReviewFindingIdentity>::new();
     for finding in findings.iter().filter(|finding| finding.blocking) {
-        for previous in previous_versions
+        let finding_identity = review_identity_for_finding(finding);
+        if inherited_identities
             .iter()
-            .filter(|previous| previous.id != version.id)
+            .any(|identity| review_identities_match(identity, &finding_identity))
         {
-            if latest_review_audit_action_matches(&previous.review_audit_json, finding).as_deref()
-                == Some("restore")
-            {
-                break;
-            }
-            let previous_dismissed =
-                parse_dismissed_findings_lossy(&previous.dismissed_findings_json);
-            if let Some(match_) = previous_dismissed
-                .iter()
-                .find(|item| dismissed_matches_finding(item, finding))
-            {
-                let origin_version_id = match_
-                    .inherited_from_version_id
-                    .clone()
-                    .unwrap_or_else(|| previous.id.clone());
-                let origin_label = match_
-                    .inherited_from_label
-                    .clone()
-                    .unwrap_or_else(|| previous.label.clone());
-                inherited.push(DismissedReviewFinding {
-                    path: finding.path.clone(),
-                    reason: finding.reason.clone(),
-                    marker: finding.marker.clone(),
-                    line_sha256: finding.line_sha256.clone(),
-                    line_number: finding.line_number,
-                    justification: match_.justification.clone(),
-                    dismissed_at: match_.dismissed_at.clone(),
-                    inherited_from_version_id: Some(origin_version_id),
-                    inherited_from_label: Some(origin_label),
-                });
-                break;
+            continue;
+        }
+        if latest_review_audit_action_across_stack(&previous_versions, version, finding).as_deref()
+            != Some("dismiss")
+        {
+            continue;
+        }
+        let Some(match_) =
+            latest_dismissed_finding_across_stack(&previous_versions, version, finding)
+        else {
+            continue;
+        };
+        let origin_version_id = match_
+            .item
+            .inherited_from_version_id
+            .clone()
+            .unwrap_or_else(|| match_.version_id.clone());
+        let origin_label = match_
+            .item
+            .inherited_from_label
+            .clone()
+            .unwrap_or_else(|| match_.version_label.clone());
+        inherited.push(DismissedReviewFinding {
+            path: finding.path.clone(),
+            reason: finding.reason.clone(),
+            marker: finding.marker.clone(),
+            line_sha256: finding.line_sha256.clone(),
+            line_number: finding.line_number,
+            justification: match_.item.justification.clone(),
+            dismissed_at: match_.item.dismissed_at.clone(),
+            inherited_from_version_id: Some(origin_version_id),
+            inherited_from_label: Some(origin_label),
+        });
+        inherited_identities.push(finding_identity);
+    }
+    Ok(inherited)
+}
+
+#[derive(Debug, Clone)]
+struct MatchedDismissedReviewFinding {
+    item: DismissedReviewFinding,
+    version_id: String,
+    version_label: String,
+    sequence: usize,
+}
+
+fn latest_dismissed_finding_across_stack(
+    versions: &[store::DeployVersion],
+    current: &store::DeployVersion,
+    finding: &SecretFinding,
+) -> Option<MatchedDismissedReviewFinding> {
+    let mut latest = None::<MatchedDismissedReviewFinding>;
+    let mut sequence = 0;
+    for previous in versions
+        .iter()
+        .rev()
+        .filter(|previous| previous.id != current.id)
+    {
+        for item in parse_dismissed_findings_lossy(&previous.dismissed_findings_json)
+            .into_iter()
+            .filter(|item| dismissed_matches_finding(item, finding))
+        {
+            sequence += 1;
+            let candidate = MatchedDismissedReviewFinding {
+                item,
+                version_id: previous.id.clone(),
+                version_label: previous.label.clone(),
+                sequence,
+            };
+            if latest.as_ref().is_none_or(|current| {
+                timestamp_is_after(
+                    &candidate.item.dismissed_at,
+                    candidate.sequence,
+                    &current.item.dismissed_at,
+                    current.sequence,
+                )
+            }) {
+                latest = Some(candidate);
             }
         }
     }
-    Ok(inherited)
+    latest
+}
+
+#[derive(Debug, Clone)]
+struct MatchedReviewAuditEvent {
+    action: String,
+    timestamp: String,
+    sequence: usize,
+}
+
+fn latest_review_audit_action_across_stack(
+    versions: &[store::DeployVersion],
+    current: &store::DeployVersion,
+    finding: &SecretFinding,
+) -> Option<String> {
+    let finding_identity = review_identity_for_finding(finding);
+    let mut latest = None::<MatchedReviewAuditEvent>;
+    let mut sequence = 0;
+    for previous in versions
+        .iter()
+        .rev()
+        .filter(|previous| previous.id != current.id)
+    {
+        for event in parse_review_audit_events_lossy(&previous.review_audit_json) {
+            sequence += 1;
+            if !matches!(event.action.as_str(), "dismiss" | "restore")
+                || !review_identities_match(&event.identity, &finding_identity)
+            {
+                continue;
+            }
+            let candidate = MatchedReviewAuditEvent {
+                action: event.action,
+                timestamp: event.timestamp,
+                sequence,
+            };
+            if latest.as_ref().is_none_or(|current| {
+                timestamp_is_after(
+                    &candidate.timestamp,
+                    candidate.sequence,
+                    &current.timestamp,
+                    current.sequence,
+                )
+            }) {
+                latest = Some(candidate);
+            }
+        }
+    }
+    latest.map(|event| event.action)
+}
+
+fn timestamp_is_after(
+    left: &str,
+    left_sequence: usize,
+    right: &str,
+    right_sequence: usize,
+) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(left),
+        chrono::DateTime::parse_from_rfc3339(right),
+    ) {
+        (Ok(left), Ok(right)) => left > right || (left == right && left_sequence > right_sequence),
+        _ => left > right || (left == right && left_sequence > right_sequence),
+    }
 }
 
 fn parse_review_findings(payload: &str) -> anyhow::Result<Vec<SecretFinding>> {
@@ -589,13 +706,18 @@ fn select_blocking_finding(
             finding.blocking && finding_matches_input(finding, path, reason, marker, line_sha256)
         })
         .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [] => anyhow::bail!("blocking review finding not found for this deploy version"),
-        [finding] => Ok((*finding).clone()),
-        _ => anyhow::bail!(
+    let Some(first) = matches.first() else {
+        anyhow::bail!("blocking review finding not found for this deploy version");
+    };
+    let first_identity = review_identity_for_finding(first);
+    if matches.iter().any(|finding| {
+        !review_identities_match(&first_identity, &review_identity_for_finding(finding))
+    }) {
+        anyhow::bail!(
             "review finding identity is ambiguous; refresh the package and retry the action"
-        ),
+        );
     }
+    Ok((*first).clone())
 }
 
 fn finding_matches_input(
@@ -619,15 +741,6 @@ fn dismissed_matches_finding(item: &DismissedReviewFinding, finding: &SecretFind
         &review_identity_for_dismissal(item),
         &review_identity_for_finding(finding),
     )
-}
-
-fn latest_review_audit_action_matches(payload: &str, finding: &SecretFinding) -> Option<String> {
-    let finding_identity = review_identity_for_finding(finding);
-    parse_review_audit_events_lossy(payload)
-        .into_iter()
-        .rev()
-        .find(|event| review_identities_match(&event.identity, &finding_identity))
-        .map(|event| event.action)
 }
 
 fn review_identity_for_finding(finding: &SecretFinding) -> ReviewFindingIdentity {
@@ -690,7 +803,10 @@ fn review_identity_matches_input(
                 && identity_marker == marker
                 && identity_line_sha256 == line_sha256
         }
-        _ => identity.path == path && identity.reason == reason,
+        _ if !review_identity_is_content(identity) => {
+            identity.path == path && identity.reason == reason
+        }
+        _ => false,
     }
 }
 
@@ -704,8 +820,15 @@ fn review_identities_match(left: &ReviewFindingIdentity, right: &ReviewFindingId
         (Some(left_marker), Some(left_line), Some(right_marker), Some(right_line)) => {
             left.path == right.path && left_marker == right_marker && left_line == right_line
         }
-        _ => left.path == right.path && left.reason == right.reason,
+        _ if !review_identity_is_content(left) && !review_identity_is_content(right) => {
+            left.path == right.path && left.reason == right.reason
+        }
+        _ => false,
     }
+}
+
+fn review_identity_is_content(identity: &ReviewFindingIdentity) -> bool {
+    identity.marker.is_some() || identity.reason.contains("secret-like content marker")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1190,6 +1313,8 @@ impl SecretFinding {
             marker: None,
             line_sha256: None,
             line_number: None,
+            occurrence_index: None,
+            occurrence_count: None,
             hint,
             severity: "warning".to_string(),
             blocking: false,
@@ -1205,6 +1330,8 @@ impl SecretFinding {
             marker: None,
             line_sha256: None,
             line_number: None,
+            occurrence_index: None,
+            occurrence_count: None,
             hint,
             severity: "error".to_string(),
             blocking: true,
@@ -1226,6 +1353,8 @@ impl SecretFinding {
             marker: Some(marker.to_string()),
             line_sha256: Some(line_sha256),
             line_number: Some(line_number),
+            occurrence_index: None,
+            occurrence_count: None,
             hint,
             severity: "warning".to_string(),
             blocking: false,
@@ -1247,11 +1376,46 @@ impl SecretFinding {
             marker: Some(marker.to_string()),
             line_sha256: Some(line_sha256),
             line_number: Some(line_number),
+            occurrence_index: None,
+            occurrence_count: None,
             hint,
             severity: "error".to_string(),
             blocking: true,
         }
     }
+}
+
+fn annotate_finding_occurrences(findings: &mut [SecretFinding]) {
+    // UI-only occurrence metadata: review identity intentionally ignores these fields so one
+    // dismissal/restoration applies to every identical content occurrence in the same file.
+    let mut groups = BTreeMap::<String, Vec<usize>>::new();
+    for (index, finding) in findings.iter().enumerate() {
+        groups
+            .entry(review_occurrence_group_key(finding))
+            .or_default()
+            .push(index);
+    }
+    for indexes in groups.values() {
+        if indexes.len() < 2 {
+            continue;
+        }
+        for (offset, index) in indexes.iter().enumerate() {
+            if let Some(finding) = findings.get_mut(*index) {
+                finding.occurrence_index = Some(offset + 1);
+                finding.occurrence_count = Some(indexes.len());
+            }
+        }
+    }
+}
+
+fn review_occurrence_group_key(finding: &SecretFinding) -> String {
+    let identity = review_identity_for_finding(finding);
+    serde_json::to_string(&identity).unwrap_or_else(|_| {
+        format!(
+            "{}\u{1f}{}\u{1f}{:?}\u{1f}{:?}",
+            identity.path, identity.reason, identity.marker, identity.line_sha256
+        )
+    })
 }
 
 fn review_finding_hint(reason: &str, blocking: bool) -> &'static str {
@@ -2840,6 +3004,18 @@ mod tests {
         assert!(blocked_after_approval
             .to_string()
             .contains("deploy_review_not_pending"));
+        let restore_after_approval = restore_review_finding(
+            &fixture.db,
+            &approved.id,
+            &finding.path,
+            &finding.reason,
+            finding.marker.as_deref(),
+            finding.line_sha256.as_deref(),
+        )
+        .expect_err("approved versions cannot restore");
+        assert!(restore_after_approval
+            .to_string()
+            .contains("deploy_review_not_pending"));
         std::fs::remove_dir_all(fixture.root).expect("cleanup");
     }
 
@@ -2973,6 +3149,204 @@ mod tests {
         assert!(has_blocking_findings(&fourth));
         assert!(parse_dismissed_findings_lossy(&fourth.dismissed_findings_json).is_empty());
         std::fs::remove_dir_all(fixture.root).expect("cleanup");
+    }
+
+    #[test]
+    fn restored_older_version_tombstone_wins_over_newer_inherited_carriers() {
+        let fixture = review_flow_fixture(
+            "dismiss-restore-old-version",
+            "const fake = \"Bearer fake-token-0000\";\n",
+        );
+        let first = create_review_flow_package(&fixture);
+        let first_finding = only_active_blocking_finding(&first);
+        dismiss_generated_finding(&fixture.db, &first, &first_finding);
+
+        let second = create_review_flow_package(&fixture);
+        assert!(!has_blocking_findings(&second));
+
+        let restored_first = restore_review_finding(
+            &fixture.db,
+            &first.id,
+            &first_finding.path,
+            &first_finding.reason,
+            first_finding.marker.as_deref(),
+            first_finding.line_sha256.as_deref(),
+        )
+        .expect("restore original finding");
+        assert!(has_blocking_findings(&restored_first));
+
+        let third = create_review_flow_package(&fixture);
+        assert!(has_blocking_findings(&third));
+        assert!(parse_dismissed_findings_lossy(&third.dismissed_findings_json).is_empty());
+
+        let third_finding = only_active_blocking_finding(&third);
+        dismiss_generated_finding(&fixture.db, &third, &third_finding);
+        let fourth = create_review_flow_package(&fixture);
+        assert!(!has_blocking_findings(&fourth));
+        let fourth_dismissed = parse_dismissed_findings_lossy(&fourth.dismissed_findings_json);
+        assert_eq!(
+            fourth_dismissed[0].inherited_from_label.as_deref(),
+            Some("deploy-003")
+        );
+        std::fs::remove_dir_all(fixture.root).expect("cleanup");
+    }
+
+    #[test]
+    fn identical_duplicate_content_findings_are_dismissed_and_restored_as_a_batch() {
+        let fixture = review_flow_fixture(
+            "dismiss-duplicate-lines",
+            "const token = \"Bearer fake-token-0000\";\nconst token = \"Bearer fake-token-0000\";\n",
+        );
+        let version = create_review_flow_package(&fixture);
+        let active = active_blocking_findings(&version).expect("active duplicate findings");
+        assert_eq!(active.len(), 2, "{active:?}");
+        assert_eq!(active[0].line_sha256, active[1].line_sha256);
+        assert_eq!(active[0].occurrence_count, Some(2));
+        assert_eq!(active[1].occurrence_count, Some(2));
+        assert_eq!(active[0].occurrence_index, Some(1));
+        assert_eq!(active[1].occurrence_index, Some(2));
+
+        let dismissed = dismiss_review_finding(
+            &fixture.db,
+            &version.id,
+            &active[0].path,
+            &active[0].reason,
+            active[0].marker.as_deref(),
+            active[0].line_sha256.as_deref(),
+            "owner accepted duplicate fake tokens",
+        )
+        .expect("dismiss duplicate findings");
+        assert!(!has_blocking_findings(&dismissed));
+        assert_eq!(
+            parse_dismissed_findings_lossy(&dismissed.dismissed_findings_json).len(),
+            1
+        );
+
+        let restored = restore_review_finding(
+            &fixture.db,
+            &version.id,
+            &active[1].path,
+            &active[1].reason,
+            active[1].marker.as_deref(),
+            active[1].line_sha256.as_deref(),
+        )
+        .expect("restore duplicate findings");
+        let restored_active = active_blocking_findings(&restored).expect("restored active");
+        assert_eq!(restored_active.len(), 2, "{restored_active:?}");
+        std::fs::remove_dir_all(fixture.root).expect("cleanup");
+    }
+
+    #[test]
+    fn secret_content_identity_without_hash_does_not_fall_back_to_path_reason() {
+        let finding = SecretFinding::secret_content_blocking(
+            "projects/app/source/src/config.txt".to_string(),
+            "secret-like content marker `Bearer `",
+            "Bearer ",
+            sha256_hex(b"const fake = \"Bearer fake-token-0000\";"),
+            1,
+        );
+        let legacy_secret_dismissal = DismissedReviewFinding {
+            path: finding.path.clone(),
+            reason: finding.reason.clone(),
+            marker: None,
+            line_sha256: None,
+            line_number: None,
+            justification: "legacy accepted fake token".to_string(),
+            dismissed_at: "2026-07-13T12:00:00Z".to_string(),
+            inherited_from_version_id: None,
+            inherited_from_label: None,
+        };
+        assert!(select_blocking_finding(
+            std::slice::from_ref(&finding),
+            &finding.path,
+            &finding.reason,
+            None,
+            None
+        )
+        .is_err());
+        assert!(!finding_is_dismissed(&finding, &[legacy_secret_dismissal]));
+
+        let strategy = SecretFinding::blocking(
+            "projects/app/source".to_string(),
+            "unsupported deploy strategy: unknown project shape",
+        );
+        let strategy_dismissal = DismissedReviewFinding {
+            path: strategy.path.clone(),
+            reason: strategy.reason.clone(),
+            marker: None,
+            line_sha256: None,
+            line_number: None,
+            justification: "owner accepts unsupported strategy".to_string(),
+            dismissed_at: "2026-07-13T12:00:00Z".to_string(),
+            inherited_from_version_id: None,
+            inherited_from_label: None,
+        };
+        assert!(select_blocking_finding(
+            std::slice::from_ref(&strategy),
+            &strategy.path,
+            &strategy.reason,
+            None,
+            None
+        )
+        .is_ok());
+        assert!(finding_is_dismissed(&strategy, &[strategy_dismissal]));
+    }
+
+    #[test]
+    fn unsupported_strategy_review_finding_uses_package_relative_path() {
+        let root = temp_root("unsupported-strategy-path");
+        let db = store::Database::open(&root).expect("open db");
+        let workspace_root = root.join("workspace");
+        let project_root = workspace_root.join("mystery");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(project_root.join("notes.txt"), "no deploy runtime here\n")
+            .expect("project note");
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("create workspace");
+        let project = db
+            .add_project(
+                workspace.id,
+                "Mystery",
+                &project_root.display().to_string(),
+                None,
+            )
+            .expect("add project");
+        let agent = db
+            .create_agent_profile(store::AgentProfileCreate {
+                workspace_id: workspace.id,
+                project_id: None,
+                name: "Codex Deploy",
+                provider: "codex",
+                model: Some("gpt-5"),
+                reasoning_effort: None,
+                sandbox: "danger-full-access",
+                context_mode: "auto_lean",
+                rtk_enabled: false,
+            })
+            .expect("create agent");
+        let version = create_package(
+            &db,
+            CreateDeployPackageInput {
+                workspace_id: workspace.id,
+                stack_name: "Mystery deploy".to_string(),
+                project_ids: vec![project.id],
+                target_machine_id: None,
+                agent_profile_id: agent.id,
+                deploy_plan_path: Some(write_test_plan(&workspace_root, project.id, "unsupported")),
+                include_dirty: true,
+            },
+        )
+        .expect("create unsupported package");
+        let findings = parse_review_findings(&version.blocking_findings_json).expect("findings");
+        let finding = findings
+            .iter()
+            .find(|finding| finding.reason.starts_with("unsupported deploy strategy:"))
+            .expect("unsupported finding");
+
+        assert_eq!(finding.path, "projects/mystery/source");
+        assert!(!Path::new(&finding.path).is_absolute());
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const SQLITE_BUSY_TIMEOUT_MS: i64 = 5_000;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Workspace {
     pub id: i64,
@@ -1025,7 +1027,8 @@ impl Database {
     {
         let version = self.get_deploy_version(version_id)?;
         let mut conn = self.workspace_connect_by_id(version.workspace_id)?;
-        let tx = conn.transaction()?;
+        conn.pragma_update(None, "busy_timeout", SQLITE_BUSY_TIMEOUT_MS)?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = find_deploy_version_with_conn(&tx, version_id)?
             .ok_or_else(|| anyhow::anyhow!("deploy version not found: {version_id}"))?;
         let (dismissed_findings_json, review_audit_json) = mutate(&current)?;
@@ -3053,6 +3056,7 @@ impl Database {
             .with_context(|| format!("failed to create {}", parent.display()))?;
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open {}", db_path.display()))?;
+        configure_sqlite_connection(&conn)?;
         migrate_connection(&conn)?;
         reconcile_workspace_identity(&conn, workspace)?;
         conn.execute(
@@ -3470,9 +3474,16 @@ impl Database {
     }
 
     fn connect(&self) -> anyhow::Result<Connection> {
-        Connection::open(&self.path)
-            .with_context(|| format!("failed to open {}", self.path.display()))
+        let conn = Connection::open(&self.path)
+            .with_context(|| format!("failed to open {}", self.path.display()))?;
+        configure_sqlite_connection(&conn)?;
+        Ok(conn)
     }
+}
+
+fn configure_sqlite_connection(conn: &Connection) -> anyhow::Result<()> {
+    conn.pragma_update(None, "busy_timeout", SQLITE_BUSY_TIMEOUT_MS)?;
+    Ok(())
 }
 
 fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
@@ -5598,6 +5609,24 @@ mod tests {
         let root = std::env::temp_dir().join(format!("dw-gui-store-test-{unique}"));
         std::fs::create_dir_all(&root).expect("create db dir");
         (Database::open(&root).expect("open db"), root)
+    }
+
+    #[test]
+    fn workspace_connections_set_busy_timeout() {
+        let (db, root) = temp_db();
+        let workspace_root = root.join("workspace");
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("create workspace");
+        let conn = db
+            .workspace_connect_by_id(workspace.id)
+            .expect("workspace connection");
+        let timeout: i64 = conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .expect("read busy timeout");
+
+        assert_eq!(timeout, SQLITE_BUSY_TIMEOUT_MS);
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

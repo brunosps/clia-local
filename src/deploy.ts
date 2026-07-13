@@ -25,6 +25,8 @@ export type DeployPackageFinding = {
   marker?: string;
   line_sha256?: string;
   line_number?: number;
+  occurrence_index?: number;
+  occurrence_count?: number;
   hint?: string;
   severity: string;
   blocking: boolean;
@@ -674,6 +676,14 @@ function normalizeDeployFinding(value: unknown): DeployPackageFinding {
       typeof record.line_number === "number" && Number.isFinite(record.line_number)
         ? record.line_number
         : undefined,
+    occurrence_index:
+      typeof record.occurrence_index === "number" && Number.isFinite(record.occurrence_index)
+        ? record.occurrence_index
+        : undefined,
+    occurrence_count:
+      typeof record.occurrence_count === "number" && Number.isFinite(record.occurrence_count)
+        ? record.occurrence_count
+        : undefined,
     hint: typeof record.hint === "string" && record.hint.trim() ? record.hint : undefined,
     severity,
     blocking,
@@ -761,5 +771,14 @@ function reviewFindingKeyMatches(
       dismissal.line_sha256 === finding.line_sha256
     );
   }
+  if (deployFindingIdentityIsContent(dismissal) || deployFindingIsContent(finding)) return false;
   return dismissal.path === finding.path && dismissal.reason === finding.reason;
+}
+
+function deployFindingIdentityIsContent(identity: DeployFindingIdentity) {
+  return Boolean(identity.marker) || identity.reason.includes("secret-like content marker");
+}
+
+function deployFindingIsContent(finding: DeployPackageFinding) {
+  return Boolean(finding.marker) || finding.reason.includes("secret-like content marker");
 }
