@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "clia-local"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

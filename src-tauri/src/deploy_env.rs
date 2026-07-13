@@ -576,6 +576,7 @@ mod tests {
                 manifest_path: &artifact.join("manifest.json").display().to_string(),
                 manifest_json: "{}",
                 blocking_findings_json: "[]",
+                dismissed_findings_json: "[]",
             })
             .expect("version");
 
