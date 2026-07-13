@@ -2908,10 +2908,9 @@ impl Database {
                  where session_id = ?1 and raw_json is not null
                  order by id desc",
             )?;
-            let rows = stmt
-                .query_map([session_id], |row| {
-                    Ok(row.get::<_, Option<String>>(0)?.unwrap_or_default())
-                })?;
+            let rows = stmt.query_map([session_id], |row| {
+                Ok(row.get::<_, Option<String>>(0)?.unwrap_or_default())
+            })?;
             let values: Vec<String> = collect_rows(rows)?;
             return Ok(values.join("\n\n"));
         }
@@ -3806,7 +3805,12 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
     ensure_column(conn, "requirement_cards", "archived_at", "text")?;
     ensure_column(conn, "requirement_cards", "flow_id", "text")?;
     ensure_column(conn, "projects", "parent_project_id", "integer")?;
-    ensure_column(conn, "projects", "is_submodule", "integer not null default 0")?;
+    ensure_column(
+        conn,
+        "projects",
+        "is_submodule",
+        "integer not null default 0",
+    )?;
     ensure_column(conn, "projects", "submodule_path", "text")?;
     ensure_column(
         conn,
@@ -4942,7 +4946,10 @@ fn parse_gitmodules(gitmodules_path: &Path) -> Vec<GitmoduleEntry> {
         if line.starts_with('[') {
             if in_submodule {
                 if let Some(p) = path.take() {
-                    entries.push(GitmoduleEntry { path: p, url: url.clone() });
+                    entries.push(GitmoduleEntry {
+                        path: p,
+                        url: url.clone(),
+                    });
                 }
             }
             path = None;
@@ -4968,7 +4975,10 @@ fn parse_gitmodules(gitmodules_path: &Path) -> Vec<GitmoduleEntry> {
             entries.push(GitmoduleEntry { path: p, url });
         }
     }
-    entries.into_iter().filter(|entry| !entry.path.is_empty()).collect()
+    entries
+        .into_iter()
+        .filter(|entry| !entry.path.is_empty())
+        .collect()
 }
 
 fn discover_workspace_git_projects(root_path: &str) -> anyhow::Result<Vec<PathBuf>> {
@@ -5555,7 +5565,10 @@ mod tests {
         let entries = parse_gitmodules(&gitmodules);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, "vendor/lib");
-        assert_eq!(entries[0].url.as_deref(), Some("https://example.com/lib.git"));
+        assert_eq!(
+            entries[0].url.as_deref(),
+            Some("https://example.com/lib.git")
+        );
         assert_eq!(entries[1].path, "tools");
         assert_eq!(entries[1].url.as_deref(), Some("../tools.git"));
         std::fs::remove_dir_all(&root).ok();

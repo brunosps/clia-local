@@ -140,7 +140,8 @@ pub fn list_images() -> anyhow::Result<Vec<DockerImage>> {
 }
 
 pub fn list_networks() -> anyhow::Result<Vec<DockerNetwork>> {
-    let format = "{{.ID}}\t{{.Name}}\t{{.Driver}}\t{{.Scope}}\t{{.Label \"com.docker.compose.project\"}}";
+    let format =
+        "{{.ID}}\t{{.Name}}\t{{.Driver}}\t{{.Scope}}\t{{.Label \"com.docker.compose.project\"}}";
     let out = docker(&["network", "ls", "--format", format])?;
     Ok(out
         .lines()

@@ -1500,8 +1500,11 @@ pub fn list_submodules(repo: &Path) -> anyhow::Result<Vec<Submodule>> {
         if sub.status == "uninitialized" {
             continue;
         }
-        let head = git(&repo.join(&sub.path), &["rev-parse", "--abbrev-ref", "HEAD"])
-            .unwrap_or_default();
+        let head = git(
+            &repo.join(&sub.path),
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+        )
+        .unwrap_or_default();
         let head = head.trim();
         if head.is_empty() || head == "HEAD" {
             sub.detached = true;
@@ -1545,7 +1548,15 @@ pub fn update_submodule_remote(repo: &Path, path: &str) -> anyhow::Result<String
     validate_git_path(path)?;
     git(
         repo,
-        &["submodule", "update", "--remote", "--init", "--recursive", "--", path],
+        &[
+            "submodule",
+            "update",
+            "--remote",
+            "--init",
+            "--recursive",
+            "--",
+            path,
+        ],
     )
 }
 

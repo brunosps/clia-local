@@ -667,7 +667,8 @@ fn clone_git_project_streamed(
             )
             .into());
         }
-        let project = db.add_project(workspace.id, &name, &destination_string, Some(&remote_url))?;
+        let project =
+            db.add_project(workspace.id, &name, &destination_string, Some(&remote_url))?;
         let _ = db.reconcile_workspace_projects(workspace.id);
         return Ok(project);
     }
@@ -797,8 +798,14 @@ fn cancel_clone(clone_id: String) {
         #[cfg(unix)]
         {
             // Kill the whole process group (clone spawns submodule fetches).
-            let _ = Command::new("kill").arg("-TERM").arg(format!("-{pid}")).status();
-            let _ = Command::new("kill").arg("-KILL").arg(format!("-{pid}")).status();
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(format!("-{pid}"))
+                .status();
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{pid}"))
+                .status();
         }
         #[cfg(not(unix))]
         {
@@ -974,9 +981,15 @@ fn create_requirement_card(
     if let Some(priority) = input.priority.as_deref() {
         let priority = normalize_card_priority(priority);
         if priority != "medium" {
-            return Ok(
-                db.update_requirement_card(card.id, None, None, Some(&priority), None, None, None)?,
-            );
+            return Ok(db.update_requirement_card(
+                card.id,
+                None,
+                None,
+                Some(&priority),
+                None,
+                None,
+                None,
+            )?);
         }
     }
     Ok(card)
@@ -1157,7 +1170,11 @@ fn save_requirement_attachment(
         .decode(input.data_base64.as_bytes())
         .map_err(anyhow::Error::from)?;
     let trimmed = input.file_name.trim();
-    let name = if trimmed.is_empty() { "attachment" } else { trimmed };
+    let name = if trimmed.is_empty() {
+        "attachment"
+    } else {
+        trimmed
+    };
     let db = store::Database::open(&app_data_dir(&app)?)?;
     Ok(db.save_requirement_attachment_bytes(input.card_id, name, &bytes)?)
 }
@@ -2908,7 +2925,9 @@ fn read_windows_clipboard_image(project_path: String) -> AppResult<Option<String
     if !win_path_out.status.success() {
         return Ok(None);
     }
-    let win_path = String::from_utf8_lossy(&win_path_out.stdout).trim().to_string();
+    let win_path = String::from_utf8_lossy(&win_path_out.stdout)
+        .trim()
+        .to_string();
     if win_path.is_empty() {
         return Ok(None);
     }
@@ -4537,7 +4556,17 @@ fn is_advpl_source(path: &Path) -> bool {
         .is_some_and(|extension| {
             matches!(
                 extension.as_str(),
-                "prw" | "prx" | "prg" | "ppx" | "ppp" | "tlpp" | "ch" | "th" | "ahu" | "apl" | "apw"
+                "prw"
+                    | "prx"
+                    | "prg"
+                    | "ppx"
+                    | "ppp"
+                    | "tlpp"
+                    | "ch"
+                    | "th"
+                    | "ahu"
+                    | "apl"
+                    | "apw"
             )
         })
 }
