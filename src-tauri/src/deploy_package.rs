@@ -560,6 +560,16 @@ fn copy_source_snapshot(
     destination: &Path,
     findings: &mut Vec<SecretFinding>,
 ) -> anyhow::Result<()> {
+    copy_source_snapshot_inner(source, destination, source, destination, findings)
+}
+
+fn copy_source_snapshot_inner(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+    findings: &mut Vec<SecretFinding>,
+) -> anyhow::Result<()> {
     for entry in
         std::fs::read_dir(source).with_context(|| format!("failed to read {}", source.display()))?
     {
@@ -577,7 +587,7 @@ fn copy_source_snapshot(
         if path.is_dir() {
             std::fs::create_dir_all(&target)
                 .with_context(|| format!("failed to create {}", target.display()))?;
-            copy_source_snapshot(&path, &target, findings)?;
+            copy_source_snapshot_inner(&path, &target, source_root, destination_root, findings)?;
         } else if path.is_file() {
             if is_secret_file_name(&name) {
                 findings.push(SecretFinding::warning(
@@ -589,7 +599,9 @@ fn copy_source_snapshot(
             std::fs::copy(&path, &target).with_context(|| {
                 format!("failed to copy {} to {}", path.display(), target.display())
             })?;
-            if let Some(finding) = scan_secret_content(&path, &target) {
+            if let Some(finding) =
+                scan_secret_content(&path, &target, source_root, destination_root)
+            {
                 findings.push(finding);
             }
         }
@@ -669,7 +681,12 @@ fn excluded_secret_reason(name: &str) -> Option<&'static str> {
     }
 }
 
-fn scan_secret_content(source_path: &Path, copied_path: &Path) -> Option<SecretFinding> {
+fn scan_secret_content(
+    source_path: &Path,
+    copied_path: &Path,
+    source_root: &Path,
+    copied_root: &Path,
+) -> Option<SecretFinding> {
     let bytes = std::fs::read(copied_path).ok()?;
     if bytes.len() > 512 * 1024 || bytes.contains(&0) {
         return None;
@@ -679,7 +696,15 @@ fn scan_secret_content(source_path: &Path, copied_path: &Path) -> Option<SecretF
     let reason = format!("secret-like content marker `{}`", hit.marker);
     let path = copied_path.display().to_string();
     Some(
-        if is_non_runtime_path(source_path) || is_non_runtime_path(copied_path) {
+        if source_path
+            .strip_prefix(source_root)
+            .ok()
+            .is_some_and(is_non_runtime_path)
+            || copied_path
+                .strip_prefix(copied_root)
+                .ok()
+                .is_some_and(is_non_runtime_path)
+        {
             SecretFinding::warning(path, reason)
         } else {
             SecretFinding::blocking(path, reason)
@@ -688,6 +713,7 @@ fn scan_secret_content(source_path: &Path, copied_path: &Path) -> Option<SecretF
 }
 
 fn is_non_runtime_path(path: &Path) -> bool {
+    // Exact lowercase dirs are excluded before copy; this downgrade is for case variants that remain.
     path.components().any(|component| {
         let Component::Normal(value) = component else {
             return false;
@@ -1769,7 +1795,7 @@ fn scan_package_review_files(root: &Path, findings: &mut Vec<SecretFinding>) {
     ];
     for path in paths {
         if path.is_file() {
-            if let Some(finding) = scan_secret_content(&path, &path) {
+            if let Some(finding) = scan_secret_content(&path, &path, root, root) {
                 push_unique_finding(findings, finding);
             }
         }
@@ -2178,25 +2204,59 @@ mod tests {
     }
 
     #[test]
-    fn package_scanner_downgrades_non_runtime_secret_content_to_warning() {
-        let root = temp_root("non-runtime-secret-source");
-        let non_runtime_path = root.join("test/tests/__tests__/e2e/fixtures/docs/seed.sh");
-        std::fs::create_dir_all(non_runtime_path.parent().expect("parent")).expect("dirs");
-        std::fs::write(&non_runtime_path, "password=hunter2\n").expect("fixture");
-        let finding =
-            scan_secret_content(&non_runtime_path, &non_runtime_path).expect("warning finding");
-        assert_eq!(finding.severity, "warning");
-        assert!(!finding.blocking);
-        assert!(finding.reason.contains("password="));
+    fn create_package_blocks_runtime_secret_when_stack_slug_is_non_runtime_name() {
+        let (root, version, findings) =
+            create_secret_scan_package("stackslug", "Test", "Web", |project_root| {
+                let runtime_path = project_root.join("src/config.txt");
+                std::fs::create_dir_all(runtime_path.parent().expect("parent")).expect("src");
+                std::fs::write(runtime_path, "password=hunter2\n").expect("runtime config");
+            });
 
-        let runtime_path = root.join("src/config.txt");
-        std::fs::create_dir_all(runtime_path.parent().expect("parent")).expect("src");
-        std::fs::write(&runtime_path, "password=hunter2\n").expect("runtime config");
-        let runtime_finding =
-            scan_secret_content(&runtime_path, &runtime_path).expect("blocking finding");
-        assert_eq!(runtime_finding.severity, "error");
-        assert!(runtime_finding.blocking);
-        assert!(runtime_finding.reason.contains("password="));
+        assert!(has_blocking_findings(&version), "{findings:?}");
+        assert!(findings.iter().any(|finding| {
+            finding.path.contains("projects/web/source/src/config.txt")
+                && finding.severity == "error"
+                && finding.blocking
+                && finding.reason.contains("password=")
+        }));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn create_package_downgrades_mixed_case_tests_secret_to_warning() {
+        let (root, version, findings) =
+            create_secret_scan_package("mixedcase", "Web deploy", "Web", |project_root| {
+                let fixture_path = project_root.join("Tests/seed.sh");
+                std::fs::create_dir_all(fixture_path.parent().expect("parent")).expect("fixtures");
+                std::fs::write(fixture_path, "password=hunter2\n").expect("fixture");
+            });
+
+        assert!(!has_blocking_findings(&version), "{findings:?}");
+        assert!(findings.iter().any(|finding| {
+            finding.path.contains("projects/web/source/Tests/seed.sh")
+                && finding.severity == "warning"
+                && !finding.blocking
+                && finding.reason.contains("password=")
+        }));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn create_package_blocks_runtime_secret_when_project_slug_is_non_runtime_name() {
+        let (root, version, findings) =
+            create_secret_scan_package("projectslug", "Web deploy", "Docs", |project_root| {
+                let runtime_path = project_root.join("src/config.txt");
+                std::fs::create_dir_all(runtime_path.parent().expect("parent")).expect("src");
+                std::fs::write(runtime_path, "password=hunter2\n").expect("runtime config");
+            });
+
+        assert!(has_blocking_findings(&version), "{findings:?}");
+        assert!(findings.iter().any(|finding| {
+            finding.path.contains("projects/docs/source/src/config.txt")
+                && finding.severity == "error"
+                && finding.blocking
+                && finding.reason.contains("password=")
+        }));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -2817,6 +2877,68 @@ mod tests {
             std::fs::read_to_string(artifact.join("docker-compose.yml")).expect("compose");
         assert!(compose.contains("image: nginx:alpine"));
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    fn create_secret_scan_package<F>(
+        label: &str,
+        stack_name: &str,
+        project_name: &str,
+        populate_project: F,
+    ) -> (PathBuf, store::DeployVersion, Vec<SecretFinding>)
+    where
+        F: FnOnce(&Path),
+    {
+        let root = temp_root(label);
+        let db = store::Database::open(&root).expect("open db");
+        let workspace_root = root.join("workspace");
+        let project_root = workspace_root.join(slugify(project_name));
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"scripts":{"dev":"vite --host 0.0.0.0"},"dependencies":{"vite":"latest"}}"#,
+        )
+        .expect("package");
+        populate_project(&project_root);
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("create workspace");
+        let project = db
+            .add_project(
+                workspace.id,
+                project_name,
+                &project_root.display().to_string(),
+                None,
+            )
+            .expect("add project");
+        let agent = db
+            .create_agent_profile(store::AgentProfileCreate {
+                workspace_id: workspace.id,
+                project_id: None,
+                name: "Codex Deploy",
+                provider: "codex",
+                model: Some("gpt-5"),
+                reasoning_effort: None,
+                sandbox: "danger-full-access",
+                context_mode: "auto_lean",
+                rtk_enabled: false,
+            })
+            .expect("create agent");
+        let version = create_package(
+            &db,
+            CreateDeployPackageInput {
+                workspace_id: workspace.id,
+                stack_name: stack_name.to_string(),
+                project_ids: vec![project.id],
+                target_machine_id: None,
+                agent_profile_id: agent.id,
+                deploy_plan_path: Some(write_test_plan(&workspace_root, project.id, "web_service")),
+                include_dirty: true,
+            },
+        )
+        .expect("create package");
+        let findings = serde_json::from_str::<Vec<SecretFinding>>(&version.blocking_findings_json)
+            .expect("review findings");
+        (root, version, findings)
     }
 
     fn write_test_plan(workspace_root: &Path, project_id: i64, strategy: &str) -> String {
