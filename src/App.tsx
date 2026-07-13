@@ -1,6 +1,7 @@
 import { json } from "@codemirror/lang-json";
 import { markdown } from "@codemirror/lang-markdown";
 import CodeMirror from "@uiw/react-codemirror";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -475,6 +476,7 @@ export function App() {
   const { locale, setLocale, t } = useI18n();
   const [themeMode, setThemeModeState] = useState<ThemeMode>("clia");
   const [activeTab, setActiveTab] = useState<Tab>("queue");
+  const [appVersion, setAppVersion] = useState(APP_VERSION);
   const [flowRegistry, setFlowRegistry] = useState<FlowRegistry>(() =>
     singleFlowRegistry(DEFAULT_WORKBENCH_SCHEMA),
   );
@@ -904,6 +906,20 @@ export function App() {
       cancelled = true;
     };
   }, [activeWorkspace?.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getVersion()
+      .then((version) => {
+        if (!cancelled) setAppVersion(version);
+      })
+      .catch(() => {
+        if (!cancelled) setAppVersion(APP_VERSION);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -4177,7 +4193,7 @@ export function App() {
               locale={locale}
               onClose={() => setAboutOpen(false)}
               t={t}
-              version={APP_VERSION}
+              version={appVersion}
             />
           ) : null}
 
