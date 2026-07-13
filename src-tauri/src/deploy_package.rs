@@ -94,6 +94,39 @@ struct PackagedProject {
     dockerfile_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PackageComposeMode {
+    Generated { path: String },
+    AgentArtifact { path: String },
+    SourcePassthrough { path: String },
+}
+
+impl PackageComposeMode {
+    fn file_path(&self) -> &str {
+        match self {
+            Self::Generated { path }
+            | Self::AgentArtifact { path }
+            | Self::SourcePassthrough { path } => path,
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Generated { .. } => "generated",
+            Self::AgentArtifact { .. } => "agent_artifact",
+            Self::SourcePassthrough { .. } => "source_passthrough",
+        }
+    }
+
+    fn uses_source_passthrough(&self) -> bool {
+        matches!(self, Self::SourcePassthrough { .. })
+    }
+
+    fn writes_generated_compose(&self) -> bool {
+        matches!(self, Self::Generated { .. })
+    }
+}
+
 pub fn create_package(
     db: &store::Database,
     input: CreateDeployPackageInput,
@@ -216,25 +249,35 @@ pub fn create_package(
         }
         packaged_projects.push(packaged);
     }
-    write_compose(
-        &artifact_root.join("docker-compose.yml"),
-        &packaged_projects,
-    )?;
+    let package_strategy = package_deploy_strategy(&packaged_projects);
+    let compose_mode =
+        package_compose_mode(&package_strategy, &packaged_projects, &plan_bundle.plan);
+    if compose_mode.writes_generated_compose() {
+        write_compose(
+            &artifact_root.join(compose_mode.file_path()),
+            &packaged_projects,
+        )?;
+    }
     write_env_example(
         &artifact_root.join(".env.example"),
         &detection.services,
         &plan_bundle.plan,
-        plan_has_compose_artifact(&plan_bundle.plan),
+        plan_has_compose_artifact(&plan_bundle.plan) || compose_mode.uses_source_passthrough(),
     )?;
-    let package_strategy = package_deploy_strategy(&packaged_projects);
     std::fs::write(artifact_root.join(".dw-deploy-strategy"), &package_strategy)?;
     write_scripts(
         &artifact_root.join("scripts"),
         &package_strategy,
         &packaged_projects,
+        &compose_mode,
     )?;
     write_agent_plan_files(&artifact_root, &plan_bundle.plan)?;
-    write_agent_plan_scripts(&artifact_root, &plan_bundle.plan, &package_strategy)?;
+    write_agent_plan_scripts(
+        &artifact_root,
+        &plan_bundle.plan,
+        &package_strategy,
+        &compose_mode,
+    )?;
     scan_package_review_files(&artifact_root, &mut findings);
     annotate_finding_occurrences(&mut findings);
     write_package_runbook(
@@ -257,6 +300,7 @@ pub fn create_package(
         &plan_bundle,
         &findings,
         &dismissed_findings,
+        &compose_mode,
     )?;
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     std::fs::write(&manifest_path, &manifest_json)
@@ -842,6 +886,7 @@ fn build_manifest(
     plan_bundle: &deploy_plan::DeployPlanBundle,
     findings: &[SecretFinding],
     dismissed_findings: &[DismissedReviewFinding],
+    compose_mode: &PackageComposeMode,
 ) -> anyhow::Result<serde_json::Value> {
     Ok(json!({
         "schema_version": "1.0",
@@ -855,6 +900,10 @@ fn build_manifest(
         "target_machine_id": input.target_machine_id,
         "compose_project_name": compose_project_name(&stack.slug, &version.label),
         "deploy_strategy": package_deploy_strategy(projects),
+        "compose": {
+            "mode": compose_mode.kind(),
+            "path": compose_mode.file_path(),
+        },
         "analysis": {
             "mode": "agent_planned",
             "agent_profile_id": plan_bundle.agent.id,
@@ -881,6 +930,7 @@ fn build_manifest(
             "git_status_short": project.git_status_short,
             "package_path": project.package_path,
             "dockerfile_path": project.dockerfile_path,
+            "compose_path": project.detection.compose_path,
             "language": project.detection.language,
             "framework": project.detection.framework,
             "deploy_strategy": project.detection.deploy_strategy.clone(),
@@ -1446,6 +1496,62 @@ fn package_deploy_strategy(projects: &[PackagedProject]) -> String {
     }
 }
 
+fn package_compose_mode(
+    package_strategy: &str,
+    projects: &[PackagedProject],
+    plan: &serde_json::Value,
+) -> PackageComposeMode {
+    if let Some(path) = compose_artifact_path(plan) {
+        return PackageComposeMode::AgentArtifact { path };
+    }
+    if package_strategy == "custom_compose" {
+        if let Some(path) = projects.iter().find_map(source_passthrough_compose_path) {
+            return PackageComposeMode::SourcePassthrough { path };
+        }
+    }
+    PackageComposeMode::Generated {
+        path: "docker-compose.yml".to_string(),
+    }
+}
+
+fn compose_artifact_path(plan: &serde_json::Value) -> Option<String> {
+    let compose = plan.get("artifacts")?.get("compose")?;
+    let body = compose.get("body")?.as_str()?.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let path = compose
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or("docker-compose.yml");
+    Some(path.to_string())
+}
+
+fn source_passthrough_compose_path(project: &PackagedProject) -> Option<String> {
+    if project.detection.deploy_strategy != "custom_compose" {
+        return None;
+    }
+    let compose_path = project.detection.compose_path.as_deref()?.trim();
+    let path = Path::new(compose_path);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(format!(
+        "{}/{}",
+        project.package_path,
+        compose_path.replace('\\', "/")
+    ))
+}
+
 fn write_generated_dockerfile(
     path: &Path,
     detection: &DeployProjectDetection,
@@ -1619,12 +1725,7 @@ fn insert_detected_env_key(
 }
 
 fn plan_has_compose_artifact(plan: &serde_json::Value) -> bool {
-    plan.get("artifacts")
-        .and_then(|artifacts| artifacts.get("compose"))
-        .and_then(|compose| compose.get("body"))
-        .and_then(|body| body.as_str())
-        .map(str::trim)
-        .is_some_and(|body| !body.is_empty())
+    compose_artifact_path(plan).is_some()
 }
 
 fn select_custom_dockerfile(root: &Path) -> Option<String> {
@@ -1674,7 +1775,12 @@ fn is_valid_env_key(value: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn write_scripts(dir: &Path, strategy: &str, projects: &[PackagedProject]) -> anyhow::Result<()> {
+fn write_scripts(
+    dir: &Path,
+    strategy: &str,
+    projects: &[PackagedProject],
+    compose_mode: &PackageComposeMode,
+) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     if let Some(root) = dir.parent() {
         let mut desktop_projects = projects
@@ -1688,6 +1794,7 @@ fn write_scripts(dir: &Path, strategy: &str, projects: &[PackagedProject]) -> an
         }
         std::fs::write(root.join(".dw-deploy-strategy"), strategy)?;
         std::fs::write(root.join(".dw-desktop-projects"), desktop_projects)?;
+        std::fs::write(root.join(".dw-compose-file"), compose_mode.file_path())?;
     }
     std::fs::write(
         dir.join("preflight.sh"),
@@ -1695,18 +1802,22 @@ fn write_scripts(dir: &Path, strategy: &str, projects: &[PackagedProject]) -> an
 set -eu
 project="${DW_COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '-' '_')}"
 strategy="$(cat .dw-deploy-strategy 2>/dev/null || echo web_service)"
+compose_file="$(cat .dw-compose-file 2>/dev/null || echo docker-compose.yml)"
+compose_env_args=""
+if [ -f ./.env ]; then
+  compose_env_args="--env-file ./.env"
+fi
 echo "[dw] preflight project=$project"
-test -f docker-compose.yml
-test -f .env
 test -f manifest.json
 if [ "$strategy" = "desktop_dev" ]; then
   test -s .dw-desktop-projects
   command -v sh >/dev/null
 else
+  test -f "$compose_file"
   command -v docker >/dev/null
   docker --version
   docker compose version
-  docker compose --project-name "$project" config >/dev/null
+  docker compose $compose_env_args -f "$compose_file" -p "$project" config >/dev/null
 fi
 echo "[dw] preflight ok"
 "#,
@@ -1717,13 +1828,19 @@ echo "[dw] preflight ok"
 set -eu
 project="${DW_COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '-' '_')}"
 strategy="$(cat .dw-deploy-strategy 2>/dev/null || echo web_service)"
+compose_file="$(cat .dw-compose-file 2>/dev/null || echo docker-compose.yml)"
+compose_env_args=""
+if [ -f ./.env ]; then
+  compose_env_args="--env-file ./.env"
+fi
 if [ "$strategy" = "desktop_dev" ]; then
   chmod +x scripts/prepare-dev-vm.sh scripts/build-dev.sh
   ./scripts/prepare-dev-vm.sh
   ./scripts/build-dev.sh
 else
-  docker compose --project-name "$project" up -d --build
-  docker compose --project-name "$project" ps
+  test -f "$compose_file"
+  docker compose $compose_env_args -f "$compose_file" -p "$project" up -d --build
+  docker compose $compose_env_args -f "$compose_file" -p "$project" ps
 fi
 "#,
     )?;
@@ -1733,10 +1850,16 @@ fi
 set -eu
 project="${DW_COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '-' '_')}"
 strategy="$(cat .dw-deploy-strategy 2>/dev/null || echo web_service)"
+compose_file="$(cat .dw-compose-file 2>/dev/null || echo docker-compose.yml)"
+compose_env_args=""
+if [ -f ./.env ]; then
+  compose_env_args="--env-file ./.env"
+fi
 if [ "$strategy" = "desktop_dev" ]; then
   echo "[dw] desktop_dev package has no managed compose service to stop"
 else
-  docker compose --project-name "$project" down
+  test -f "$compose_file"
+  docker compose $compose_env_args -f "$compose_file" -p "$project" down
 fi
 "#,
     )?;
@@ -1746,15 +1869,21 @@ fi
 set -eu
 project="${DW_COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '-' '_')}"
 strategy="$(cat .dw-deploy-strategy 2>/dev/null || echo web_service)"
+compose_file="$(cat .dw-compose-file 2>/dev/null || echo docker-compose.yml)"
+compose_env_args=""
+if [ -f ./.env ]; then
+  compose_env_args="--env-file ./.env"
+fi
 if [ "$strategy" = "desktop_dev" ]; then
   chmod +x scripts/verify-dev.sh
   ./scripts/verify-dev.sh
 else
-  docker compose --project-name "$project" ps
-  docker compose --project-name "$project" ps --format json >/tmp/dw-compose-ps.json 2>/dev/null || true
-  if docker compose --project-name "$project" ps --status exited | grep -q .; then
+  test -f "$compose_file"
+  docker compose $compose_env_args -f "$compose_file" -p "$project" ps
+  docker compose $compose_env_args -f "$compose_file" -p "$project" ps --format json >/tmp/dw-compose-ps.json 2>/dev/null || true
+  if docker compose $compose_env_args -f "$compose_file" -p "$project" ps --status exited | grep -q .; then
     echo "[dw] one or more services exited" >&2
-    docker compose --project-name "$project" ps >&2
+    docker compose $compose_env_args -f "$compose_file" -p "$project" ps >&2
     exit 1
   fi
 fi
@@ -1767,11 +1896,17 @@ echo "[dw] healthcheck ok"
 set -eu
 project="${DW_COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '-' '_')}"
 strategy="$(cat .dw-deploy-strategy 2>/dev/null || echo web_service)"
+compose_file="$(cat .dw-compose-file 2>/dev/null || echo docker-compose.yml)"
+compose_env_args=""
+if [ -f ./.env ]; then
+  compose_env_args="--env-file ./.env"
+fi
 if [ "$strategy" = "desktop_dev" ]; then
   find .dw-runbook/logs -type f -maxdepth 1 -print -exec sh -c 'echo "===== $1"; tail -160 "$1"' sh {} \; 2>/dev/null || true
 else
-  docker compose --project-name "$project" ps
-  docker compose --project-name "$project" logs --tail=160
+  test -f "$compose_file"
+  docker compose $compose_env_args -f "$compose_file" -p "$project" ps
+  docker compose $compose_env_args -f "$compose_file" -p "$project" logs --tail=160
 fi
 "#,
     )?;
@@ -2406,10 +2541,11 @@ fn write_agent_plan_scripts(
     root: &Path,
     plan: &serde_json::Value,
     package_strategy: &str,
+    compose_mode: &PackageComposeMode,
 ) -> anyhow::Result<()> {
     let scripts_root = root.join("scripts");
     for (relative_path, body) in deploy_plan::script_artifacts_from_plan(plan)? {
-        if protected_runbook_script(&relative_path, package_strategy) {
+        if protected_runbook_script(&relative_path, package_strategy, compose_mode) {
             continue;
         }
         let path = root.join(&relative_path);
@@ -2424,7 +2560,11 @@ fn write_agent_plan_scripts(
     Ok(())
 }
 
-fn protected_runbook_script(relative_path: &str, package_strategy: &str) -> bool {
+fn protected_runbook_script(
+    relative_path: &str,
+    package_strategy: &str,
+    compose_mode: &PackageComposeMode,
+) -> bool {
     matches!(
         relative_path,
         "scripts/install-base-linux.sh" | "scripts/install-deploy.ps1"
@@ -2432,6 +2572,20 @@ fn protected_runbook_script(relative_path: &str, package_strategy: &str) -> bool
         && deploy_runbook_scripts()
             .into_iter()
             .any(|script| script == relative_path))
+        || (compose_mode.uses_source_passthrough()
+            && compose_runbook_scripts()
+                .into_iter()
+                .any(|script| script == relative_path))
+}
+
+fn compose_runbook_scripts() -> Vec<&'static str> {
+    vec![
+        "scripts/preflight.sh",
+        "scripts/deploy.sh",
+        "scripts/healthcheck.sh",
+        "scripts/logs.sh",
+        "scripts/stop.sh",
+    ]
 }
 
 fn write_agent_plan_files(root: &Path, plan: &serde_json::Value) -> anyhow::Result<()> {
@@ -3443,6 +3597,7 @@ mod tests {
                 package_manager: Some("npm".to_string()),
                 has_dockerfile: false,
                 has_compose: false,
+                compose_path: None,
                 services: vec![],
                 ports: vec![deploy_detect::DeployPortSuggestion {
                     container: 3000,
@@ -3474,6 +3629,7 @@ mod tests {
                 package_manager: Some("pip".to_string()),
                 has_dockerfile: false,
                 has_compose: false,
+                compose_path: None,
                 services: vec![],
                 ports: vec![deploy_detect::DeployPortSuggestion {
                     container: 8000,
@@ -3519,6 +3675,7 @@ mod tests {
                 package_manager: Some("npm".to_string()),
                 has_dockerfile: false,
                 has_compose: false,
+                compose_path: None,
                 services: vec![],
                 ports: vec![deploy_detect::DeployPortSuggestion {
                     container: 3000,
@@ -3573,6 +3730,7 @@ mod tests {
                 package_manager: Some("cargo".to_string()),
                 has_dockerfile: true,
                 has_compose: true,
+                compose_path: Some("docker-compose.yml".to_string()),
                 services: vec![],
                 ports: vec![deploy_detect::DeployPortSuggestion {
                     container: 8080,
@@ -3682,17 +3840,158 @@ mod tests {
     fn runbook_scripts_are_generated_for_every_package() {
         let root = temp_root("runbook");
         let scripts_dir = root.join("scripts");
-        write_scripts(&scripts_dir, "web_service", &[]).expect("write scripts");
+        let compose_mode = PackageComposeMode::Generated {
+            path: "docker-compose.yml".to_string(),
+        };
+        write_scripts(&scripts_dir, "web_service", &[], &compose_mode).expect("write scripts");
 
         for script in deploy_runbook_scripts() {
             assert!(root.join(script).is_file(), "missing {script}");
         }
         let preflight =
             std::fs::read_to_string(scripts_dir.join("preflight.sh")).expect("read preflight");
-        assert!(preflight.contains("docker compose"));
+        assert!(preflight.contains(
+            "docker compose $compose_env_args -f \"$compose_file\" -p \"$project\" config"
+        ));
         let rollback =
             std::fs::read_to_string(scripts_dir.join("rollback.sh")).expect("read rollback");
         assert!(rollback.contains("reactivating a previous approved version"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn custom_compose_passthrough_resolves_relative_paths_from_copied_source() {
+        let root = temp_root("compose-passthrough");
+        let source = root.join("projects/lettrebox/source");
+        std::fs::create_dir_all(source.join("config")).expect("config dir");
+        std::fs::write(source.join("config/x.json"), "{}\n").expect("config");
+        std::fs::write(source.join("Dockerfile.prod"), "FROM alpine:3.20\n").expect("dockerfile");
+        std::fs::write(
+            source.join("docker-compose.yml"),
+            r#"services:
+  app:
+    build:
+      context: ${SRC:-.}
+      dockerfile: Dockerfile.prod
+    volumes:
+      - ${SRC:-.}/config/x.json:/app/config/x.json:ro
+  postgres:
+    image: postgres:16-alpine
+  mailhog:
+    image: mailhog/mailhog:latest
+  stalwart:
+    image: stalwartlabs/mail-server:latest
+"#,
+        )
+        .expect("compose");
+        std::fs::write(root.join(".env"), "").expect("env");
+        std::fs::write(root.join("manifest.json"), "{}\n").expect("manifest");
+
+        let project = PackagedProject {
+            project: store::Project {
+                id: 1,
+                workspace_id: 1,
+                name: "lettrebox".to_string(),
+                path: source.display().to_string(),
+                remote_url: None,
+                parent_project_id: None,
+                is_submodule: false,
+                submodule_path: None,
+                created_at: "now".to_string(),
+            },
+            detection: DeployProjectDetection {
+                project_id: 1,
+                name: "lettrebox".to_string(),
+                path: source.display().to_string(),
+                language: "rust".to_string(),
+                framework: None,
+                package_manager: Some("cargo".to_string()),
+                has_dockerfile: true,
+                has_compose: true,
+                compose_path: Some("docker-compose.yml".to_string()),
+                services: vec![],
+                ports: vec![deploy_detect::DeployPortSuggestion {
+                    container: 5000,
+                    host: 5000,
+                    confidence: "detected".to_string(),
+                }],
+                healthcheck: Some("http://127.0.0.1:5000/".to_string()),
+                deploy_strategy: "custom_compose".to_string(),
+                strategy_reason: "project compose".to_string(),
+                runtime_commands: vec![],
+                requires_desktop_session: false,
+                warnings: vec![],
+            },
+            branch: None,
+            commit_sha: None,
+            dirty: false,
+            git_status_short: String::new(),
+            package_path: "projects/lettrebox/source".to_string(),
+            dockerfile_path: "projects/lettrebox/Dockerfile".to_string(),
+        };
+        let plan = serde_json::json!({
+            "artifacts": {
+                "compose": null
+            }
+        });
+        let mode = package_compose_mode("custom_compose", std::slice::from_ref(&project), &plan);
+        assert_eq!(
+            mode,
+            PackageComposeMode::SourcePassthrough {
+                path: "projects/lettrebox/source/docker-compose.yml".to_string()
+            }
+        );
+        write_scripts(&root.join("scripts"), "custom_compose", &[project], &mode).expect("scripts");
+        assert!(!root.join("docker-compose.yml").exists());
+
+        let output = std::process::Command::new("docker")
+            .args([
+                "compose",
+                "--env-file",
+                "./.env",
+                "-f",
+                "projects/lettrebox/source/docker-compose.yml",
+                "-p",
+                "lettrebox_fixture",
+                "config",
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("docker compose config");
+        assert!(
+            output.status.success(),
+            "docker compose config failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let config = String::from_utf8_lossy(&output.stdout);
+        for service in ["app:", "postgres:", "mailhog:", "stalwart:"] {
+            assert!(config.contains(service), "missing {service}\n{config}");
+        }
+        let expected_source = source.display().to_string();
+        assert!(
+            config.contains(&format!("context: {expected_source}")),
+            "compose did not resolve build context to source dir\n{config}"
+        );
+        assert!(
+            config.contains(&format!("source: {expected_source}/config/x.json"))
+                && config.contains("target: /app/config/x.json")
+                && config.contains("read_only: true"),
+            "compose did not resolve bind mount to source dir\n{config}"
+        );
+
+        let preflight = std::process::Command::new("sh")
+            .args(["scripts/preflight.sh"])
+            .current_dir(&root)
+            .output()
+            .expect("preflight");
+        assert!(
+            preflight.status.success(),
+            "preflight failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&preflight.stdout),
+            String::from_utf8_lossy(&preflight.stderr)
+        );
+
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -3720,6 +4019,7 @@ mod tests {
                 package_manager: Some("npm".to_string()),
                 has_dockerfile: false,
                 has_compose: false,
+                compose_path: None,
                 services: vec![],
                 ports: vec![],
                 healthcheck: None,
@@ -3738,7 +4038,16 @@ mod tests {
         };
         let compose = root.join("docker-compose.yml");
         write_compose(&compose, std::slice::from_ref(&project)).expect("compose");
-        write_scripts(&root.join("scripts"), "desktop_dev", &[project]).expect("scripts");
+        let compose_mode = PackageComposeMode::Generated {
+            path: "docker-compose.yml".to_string(),
+        };
+        write_scripts(
+            &root.join("scripts"),
+            "desktop_dev",
+            &[project],
+            &compose_mode,
+        )
+        .expect("scripts");
 
         let compose_content = std::fs::read_to_string(compose).expect("read compose");
         assert_eq!(compose_content, "services: {}\n");
@@ -3823,7 +4132,10 @@ mod tests {
     #[test]
     fn desktop_dev_package_ignores_agent_overrides_for_core_runbook_scripts() {
         let root = temp_root("desktop-runbook-agent-overrides");
-        write_scripts(&root.join("scripts"), "desktop_dev", &[]).expect("scripts");
+        let compose_mode = PackageComposeMode::Generated {
+            path: "docker-compose.yml".to_string(),
+        };
+        write_scripts(&root.join("scripts"), "desktop_dev", &[], &compose_mode).expect("scripts");
         let plan = serde_json::json!({
             "artifacts": {
                 "scripts": [
@@ -3842,7 +4154,8 @@ mod tests {
                 ]
             }
         });
-        write_agent_plan_scripts(&root, &plan, "desktop_dev").expect("agent scripts");
+        write_agent_plan_scripts(&root, &plan, "desktop_dev", &compose_mode)
+            .expect("agent scripts");
 
         let preflight =
             std::fs::read_to_string(root.join("scripts/preflight.sh")).expect("preflight");
@@ -3992,6 +4305,95 @@ mod tests {
         let compose =
             std::fs::read_to_string(artifact.join("docker-compose.yml")).expect("compose");
         assert!(compose.contains("image: nginx:alpine"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn create_package_passthroughs_detected_custom_compose_when_agent_omits_compose() {
+        let root = temp_root("agent-plan-compose-passthrough");
+        let db = store::Database::open(&root).expect("open db");
+        let workspace_root = root.join("workspace");
+        let project_root = workspace_root.join("lettrebox");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::write(
+            project_root.join("package.json"),
+            r#"{"dependencies":{"pg":"latest"}}"#,
+        )
+        .expect("package");
+        std::fs::write(
+            project_root.join("docker-compose.yml"),
+            "services:\n  app:\n    image: nginx:alpine\n  postgres:\n    image: postgres:16-alpine\n",
+        )
+        .expect("compose");
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("create workspace");
+        let project = db
+            .add_project(
+                workspace.id,
+                "lettrebox",
+                &project_root.display().to_string(),
+                None,
+            )
+            .expect("add project");
+        let agent = db
+            .create_agent_profile(store::AgentProfileCreate {
+                workspace_id: workspace.id,
+                project_id: None,
+                name: "Codex Deploy",
+                provider: "codex",
+                model: Some("gpt-5"),
+                reasoning_effort: None,
+                sandbox: "danger-full-access",
+                context_mode: "auto_lean",
+                rtk_enabled: false,
+            })
+            .expect("create agent");
+
+        let version = create_package(
+            &db,
+            CreateDeployPackageInput {
+                workspace_id: workspace.id,
+                stack_name: "lettrebox deploy".to_string(),
+                project_ids: vec![project.id],
+                target_machine_id: None,
+                agent_profile_id: agent.id,
+                deploy_plan_path: Some(write_passthrough_plan(&workspace_root, project.id)),
+                include_dirty: true,
+            },
+        )
+        .expect("create package");
+
+        let artifact = PathBuf::from(&version.artifact_path);
+        assert!(!artifact.join("docker-compose.yml").exists());
+        assert_eq!(
+            std::fs::read_to_string(artifact.join(".dw-compose-file")).expect("compose file"),
+            "projects/lettrebox/source/docker-compose.yml"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&version.manifest_json).expect("manifest");
+        assert_eq!(
+            manifest
+                .get("compose")
+                .and_then(|compose| compose.get("mode"))
+                .and_then(serde_json::Value::as_str),
+            Some("source_passthrough")
+        );
+        assert_eq!(
+            manifest
+                .get("compose")
+                .and_then(|compose| compose.get("path"))
+                .and_then(serde_json::Value::as_str),
+            Some("projects/lettrebox/source/docker-compose.yml")
+        );
+        let env_example =
+            std::fs::read_to_string(artifact.join(".env.example")).expect("env example");
+        assert!(env_example.contains("\n#DATABASE_URL=\n"));
+        assert!(!env_example.contains("DATABASE_URL=postgres://"));
+        let deploy = std::fs::read_to_string(artifact.join("scripts/deploy.sh")).expect("deploy");
+        assert!(deploy.contains("-f \"$compose_file\" -p \"$project\" up -d --build"));
+        assert!(!deploy.contains("agent generated deploy"));
+
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -4213,6 +4615,60 @@ mod tests {
                     {"path": "scripts/rollback.sh", "purpose": "rollback", "body": "#!/usr/bin/env sh\nset -eu\necho agent generated rollback\n"},
                     {"path": "scripts/install-base-linux.sh", "purpose": "linux base", "body": "#!/usr/bin/env sh\nset -eu\necho agent generated linux base\n"},
                     {"path": "scripts/install-deploy.ps1", "purpose": "windows base", "body": "Write-Host 'agent generated windows base'\n"}
+                ]
+            },
+            "risks": []
+        });
+        let path = analysis_dir.join("deploy-plan.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&plan).expect("plan json"),
+        )
+        .expect("write plan");
+        path.display().to_string()
+    }
+
+    fn write_passthrough_plan(workspace_root: &Path, project_id: i64) -> String {
+        let analysis_dir = workspace_root
+            .join(".dw")
+            .join("deploy-plans")
+            .join(format!("plan-{project_id}-custom-compose-passthrough"))
+            .join("analysis");
+        std::fs::create_dir_all(&analysis_dir).expect("analysis dir");
+        let plan = serde_json::json!({
+            "schema_version": "1.0",
+            "strategy": "custom_compose",
+            "confidence": "high",
+            "summary": "agent omits compose so ADE passthroughs source compose",
+            "projects": [{
+                "project_id": project_id,
+                "name": "lettrebox",
+                "kind": "compose",
+                "package_manager": "none",
+                "runtime": "compose",
+                "install": [],
+                "verify": [],
+                "run": null,
+                "requires": {
+                    "system_packages": [],
+                    "desktop_session": false,
+                    "docker": true
+                },
+                "ports": [{"container": 5000, "host": 5000, "confidence": "suggested"}],
+                "healthcheck": "curl -fsS http://127.0.0.1:5000/",
+                "risks": []
+            }],
+            "services": [],
+            "ports": [{"container": 5000, "host": 5000, "confidence": "suggested"}],
+            "env": {"required": [], "optional": []},
+            "artifacts": {
+                "compose": null,
+                "dockerfiles": [],
+                "scripts": [
+                    {"path": "scripts/deploy.sh", "purpose": "deploy", "body": "#!/usr/bin/env sh\nset -eu\necho agent generated deploy\n"},
+                    {"path": "scripts/healthcheck.sh", "purpose": "health", "body": "#!/usr/bin/env sh\nset -eu\necho agent generated health\n"},
+                    {"path": "scripts/logs.sh", "purpose": "logs", "body": "#!/usr/bin/env sh\nset -eu\necho agent generated logs\n"},
+                    {"path": "scripts/stop.sh", "purpose": "stop", "body": "#!/usr/bin/env sh\nset -eu\necho agent generated stop\n"}
                 ]
             },
             "risks": []

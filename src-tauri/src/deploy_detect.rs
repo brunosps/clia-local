@@ -26,6 +26,7 @@ pub struct DeployProjectDetection {
     pub package_manager: Option<String>,
     pub has_dockerfile: bool,
     pub has_compose: bool,
+    pub compose_path: Option<String>,
     pub services: Vec<DeployServiceSuggestion>,
     pub ports: Vec<DeployPortSuggestion>,
     pub healthcheck: Option<String>,
@@ -119,7 +120,8 @@ fn detect_project(project: &store::Project) -> DeployProjectDetection {
     }
     let lower = haystack.to_lowercase();
     let has_dockerfile = has_dockerfile_contract(root);
-    let has_compose = has_compose_contract(root);
+    let compose_path = compose_contract_path(root);
+    let has_compose = compose_path.is_some();
     let (language, mut framework, package_manager, default_port) =
         if let Some(package_json) = package_json.as_deref() {
             (
@@ -241,6 +243,7 @@ fn detect_project(project: &store::Project) -> DeployProjectDetection {
         package_manager,
         has_dockerfile,
         has_compose,
+        compose_path,
         services,
         ports,
         healthcheck,
@@ -281,30 +284,31 @@ fn has_dockerfile_contract(root: &Path) -> bool {
     })
 }
 
-fn has_compose_contract(root: &Path) -> bool {
+fn compose_contract_path(root: &Path) -> Option<String> {
     compose_contract_names()
         .iter()
-        .any(|name| root.join(name).is_file())
+        .find(|name| root.join(name).is_file())
+        .map(|name| (*name).to_string())
 }
 
 fn compose_contract_names() -> &'static [&'static str] {
     &[
+        "compose.deploy.yml",
+        "compose.deploy.yaml",
+        "docker-compose.deploy.yml",
+        "docker-compose.deploy.yaml",
         "docker-compose.yml",
         "docker-compose.yaml",
         "compose.yml",
         "compose.yaml",
-        "docker-compose.dev.yml",
-        "docker-compose.dev.yaml",
-        "docker-compose.prod.yml",
-        "docker-compose.prod.yaml",
-        "docker-compose.deploy.yml",
-        "docker-compose.deploy.yaml",
-        "compose.dev.yml",
-        "compose.dev.yaml",
         "compose.prod.yml",
         "compose.prod.yaml",
-        "compose.deploy.yml",
-        "compose.deploy.yaml",
+        "docker-compose.prod.yml",
+        "docker-compose.prod.yaml",
+        "compose.dev.yml",
+        "compose.dev.yaml",
+        "docker-compose.dev.yml",
+        "docker-compose.dev.yaml",
     ]
 }
 
@@ -556,7 +560,49 @@ mod tests {
 
         assert!(detected.has_dockerfile);
         assert!(detected.has_compose);
+        assert_eq!(detected.compose_path.as_deref(), Some("compose.yaml"));
         assert_eq!(detected.deploy_strategy, "custom_compose");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn compose_contract_path_uses_deploy_then_root_then_prod_then_dev_priority() {
+        let root = temp_root();
+        for name in [
+            "docker-compose.dev.yml",
+            "docker-compose.prod.yml",
+            "compose.yml",
+            "docker-compose.deploy.yml",
+            "compose.deploy.yaml",
+        ] {
+            std::fs::write(root.join(name), "services: {}\n").expect("compose");
+        }
+
+        assert_eq!(
+            compose_contract_path(&root).as_deref(),
+            Some("compose.deploy.yaml")
+        );
+
+        std::fs::remove_file(root.join("compose.deploy.yaml")).expect("remove compose deploy");
+        assert_eq!(
+            compose_contract_path(&root).as_deref(),
+            Some("docker-compose.deploy.yml")
+        );
+
+        std::fs::remove_file(root.join("docker-compose.deploy.yml")).expect("remove docker deploy");
+        assert_eq!(compose_contract_path(&root).as_deref(), Some("compose.yml"));
+
+        std::fs::remove_file(root.join("compose.yml")).expect("remove root compose");
+        assert_eq!(
+            compose_contract_path(&root).as_deref(),
+            Some("docker-compose.prod.yml")
+        );
+
+        std::fs::remove_file(root.join("docker-compose.prod.yml")).expect("remove prod compose");
+        assert_eq!(
+            compose_contract_path(&root).as_deref(),
+            Some("docker-compose.dev.yml")
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

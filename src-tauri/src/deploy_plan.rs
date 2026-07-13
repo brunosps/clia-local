@@ -396,6 +396,7 @@ Rules:
 - Do not include secret values.
 - Do not write outside the deploy package or copied project directories.
 - For web_service/custom_compose/mixed, include a healthcheck as a non-empty string command/URL or an object with non-empty url, command, or test.
+- If a project provides Compose (`compose_path` in Project context), you may omit `artifacts.compose` and ADE will passthrough that source Compose file, or you may emit an adapted package Compose artifact. Never describe Compose reuse unless you do one of those two things.
 - For desktop_dev, include build-dev.sh, verify-dev.sh, and run-dev.sh scripts.
 - For Windows targets, include install-deploy.ps1 guidance when relevant.
 
@@ -570,6 +571,7 @@ fn build_project_context(
             "package_manager": project.package_manager,
             "has_dockerfile": project.has_dockerfile,
             "has_compose": project.has_compose,
+            "compose_path": project.compose_path,
             "deploy_strategy": project.deploy_strategy,
             "strategy_reason": project.strategy_reason,
             "runtime_commands": project.runtime_commands,
@@ -754,6 +756,18 @@ fn validate_plan(
         warnings
             .push("One or more projects are unsupported by the current deploy planner".to_string());
     }
+    if !plan_has_compose_artifact(plan) {
+        for project in detection.projects.iter().filter(|project| {
+            project.deploy_strategy == "custom_compose" && project.compose_path.is_some()
+        }) {
+            if let Some(compose_path) = project.compose_path.as_deref() {
+                warnings.push(format!(
+                    "package will passthrough {compose_path} from project {}",
+                    project.name
+                ));
+            }
+        }
+    }
     let status = if findings.iter().any(|finding| {
         finding
             .get("blocking")
@@ -908,6 +922,15 @@ fn plan_healthchecks(plan: &Value) -> Vec<String> {
         }
     }
     healthchecks
+}
+
+fn plan_has_compose_artifact(plan: &Value) -> bool {
+    plan.get("artifacts")
+        .and_then(|artifacts| artifacts.get("compose"))
+        .and_then(|compose| compose.get("body"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|body| !body.is_empty())
 }
 
 fn healthcheck_repr(value: &Value) -> Option<String> {
@@ -1157,6 +1180,7 @@ mod tests {
                 package_manager: Some("npm".to_string()),
                 has_dockerfile: false,
                 has_compose: false,
+                compose_path: None,
                 services: vec![],
                 ports: vec![],
                 healthcheck: None,
@@ -1200,6 +1224,7 @@ mod tests {
                 package_manager: Some("cargo".to_string()),
                 has_dockerfile: false,
                 has_compose: false,
+                compose_path: None,
                 services: vec![],
                 ports: vec![],
                 healthcheck: Some("http://127.0.0.1:5000/".to_string()),
@@ -1218,6 +1243,7 @@ mod tests {
     fn custom_compose_detection(root: &str) -> DeployDetectionReport {
         let mut detection = web_detection(root);
         detection.projects[0].has_compose = true;
+        detection.projects[0].compose_path = Some("docker-compose.yml".to_string());
         detection.projects[0].deploy_strategy = "custom_compose".to_string();
         detection.projects[0].strategy_reason = "Compose runtime contract detected".to_string();
         detection
@@ -1317,6 +1343,7 @@ mod tests {
                 package_manager: None,
                 has_dockerfile: false,
                 has_compose: false,
+                compose_path: None,
                 services: vec![],
                 ports: vec![],
                 healthcheck: None,
@@ -1662,6 +1689,46 @@ CMD ["/usr/local/bin/lettrebox"]
         );
         assert_eq!(report.get("status").and_then(Value::as_str), Some("passed"));
         assert_eq!(validation_findings(&report), Vec::new());
+        assert!(!validation_blocks_package(&report));
+    }
+
+    #[test]
+    fn custom_compose_with_detected_compose_can_omit_compose_artifact() {
+        let plan = json!({
+            "schema_version": PLAN_SCHEMA_VERSION,
+            "strategy": "custom_compose",
+            "confidence": "high",
+            "summary": "reuse project compose",
+            "projects": [{
+                "project_id": 1,
+                "healthcheck": "curl -fsS http://127.0.0.1:5000/"
+            }],
+            "artifacts": {
+                "compose": null,
+                "dockerfiles": [],
+                "scripts": [
+                    {"path": "scripts/preflight.sh", "body": "echo preflight"},
+                    {"path": "scripts/deploy.sh", "body": "echo deploy"},
+                    {"path": "scripts/healthcheck.sh", "body": "echo health"}
+                ]
+            }
+        });
+
+        let report = validate_plan(&plan, &custom_compose_detection("/tmp/lettrebox"), None);
+
+        assert_eq!(report.get("status").and_then(Value::as_str), Some("passed"));
+        assert_eq!(validation_findings(&report), Vec::new());
+        assert!(report
+            .get("warnings")
+            .and_then(Value::as_array)
+            .is_some_and(
+                |warnings| warnings
+                    .iter()
+                    .any(|warning| warning
+                        .as_str()
+                        .is_some_and(|warning| warning
+                            .contains("package will passthrough docker-compose.yml")))
+            ));
         assert!(!validation_blocks_package(&report));
     }
 

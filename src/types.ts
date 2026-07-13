@@ -139,6 +139,7 @@ export type DeployProjectDetection = {
   package_manager?: string | null;
   has_dockerfile: boolean;
   has_compose: boolean;
+  compose_path?: string | null;
   services: DeployServiceSuggestion[];
   ports: DeployPortSuggestion[];
   healthcheck?: string | null;
