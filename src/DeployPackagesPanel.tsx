@@ -1044,6 +1044,9 @@ export default function DeployPackagesPanel({
                     </span>
                     <code title={finding.path}>{finding.path}</code>
                     <small>{finding.reason}</small>
+                    {finding.hint ? (
+                      <small className="deploy-finding-hint">{finding.hint}</small>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -1576,6 +1579,9 @@ export default function DeployPackagesPanel({
                           {deployFindingPathLabel(finding, selectedVersion.artifact_path)}
                         </code>
                         <small>{finding.reason}</small>
+                        {finding.hint ? (
+                          <small className="deploy-finding-hint">{finding.hint}</small>
+                        ) : null}
                       </li>
                     ))}
                   </ul>

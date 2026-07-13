@@ -22,6 +22,7 @@ export type DeployProgressEntry = {
 export type DeployPackageFinding = {
   path: string;
   reason: string;
+  hint?: string;
   severity: string;
   blocking: boolean;
 };
@@ -572,6 +573,7 @@ function normalizeDeployFinding(value: unknown): DeployPackageFinding {
       typeof record.reason === "string" && record.reason.trim()
         ? record.reason
         : "unknown deploy package finding",
+    hint: typeof record.hint === "string" && record.hint.trim() ? record.hint : undefined,
     severity,
     blocking,
   };

@@ -184,6 +184,7 @@ export type DeployPlanReport = {
 export type DeployPlanFinding = {
   path: string;
   reason: string;
+  hint: string;
   severity: string;
   blocking: boolean;
 };

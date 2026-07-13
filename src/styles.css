@@ -10626,6 +10626,13 @@ h2 {
   color: #aebbd0;
 }
 
+.deploy-plan-findings .deploy-finding-hint,
+.deploy-review-details .deploy-finding-hint {
+  color: #8f9bb0;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
 .deploy-section-details > summary,
 .deploy-review-details > summary,
 .deploy-technical-details > summary {
