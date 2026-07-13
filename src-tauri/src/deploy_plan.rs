@@ -1527,6 +1527,7 @@ mod tests {
             "secret=${APP_SECRET}",
             "api_key=$API_KEY",
             "password=\"$PASSWORD\"",
+            "PASSWORD={password}",
             "apikey=<placeholder>",
             "password=xxx",
             "secret=ChangeMe",
@@ -1540,9 +1541,40 @@ mod tests {
             "api_key=sk-live",
             "apikey=abc123",
             "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9",
+            "SMTP_PASSWORD=\nSMTP_SECRET=${SMTP_SECRET}\nADMIN_PASSWORD=hunter2",
+            "let header = format!(\"Bearer {token}\");\nAuthorization: Bearer eyJhbGciOiJIUzI1NiJ9",
         ] {
             assert!(contains_secret_marker(content), "{content}");
         }
+    }
+
+    #[test]
+    fn plan_secret_scan_blocks_non_runtime_named_artifacts() {
+        let report = validate_plan(
+            &json!({
+                "schema_version": PLAN_SCHEMA_VERSION,
+                "strategy": "web_service",
+                "confidence": "high",
+                "projects": [{"project_id": 1, "healthcheck": "curl -fsS http://127.0.0.1:5000/"}],
+                "artifacts": {
+                    "compose": null,
+                    "dockerfiles": [{
+                        "path": "projects/app/tests/fixtures/Dockerfile",
+                        "body": "FROM alpine\nENV password=hunter2\n"
+                    }],
+                    "scripts": [{"path": "scripts/deploy.sh", "body": "echo ok"}]
+                }
+            }),
+            &web_detection("/tmp/lettrebox"),
+            None,
+        );
+        let findings = validation_findings(&report);
+        assert!(findings.iter().any(|finding| {
+            finding.path == "projects/app/tests/fixtures/Dockerfile"
+                && finding.reason == "artifact contains secret-like marker"
+                && finding.severity == "error"
+                && finding.blocking
+        }));
     }
 
     #[test]

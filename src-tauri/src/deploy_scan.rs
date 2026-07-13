@@ -15,26 +15,33 @@ pub fn first_blocking_secret_marker(text: &str) -> Option<SecretMarkerOccurrence
 fn next_secret_marker(text: &str, lower: &str, offset: usize) -> Option<SecretMarkerOccurrence> {
     ASSIGNMENT_MARKERS
         .iter()
-        .filter_map(|marker| {
-            lower[offset..]
-                .find(marker)
-                .map(|index| (offset + index, *marker))
-        })
-        .chain(
-            lower[offset..]
-                .find(BEARER_MARKER)
-                .map(|index| (offset + index, BEARER_MARKER)),
-        )
-        .filter(|(index, marker)| {
-            let value_start = *index + marker.len();
-            if *marker == BEARER_MARKER {
-                bearer_value_is_blocking(&text[value_start..])
-            } else {
-                !secret_assignment_is_placeholder(&text[value_start..])
-            }
-        })
-        .min_by_key(|(index, _)| *index)
-        .map(|(index, marker)| SecretMarkerOccurrence { marker, index })
+        .copied()
+        .chain(std::iter::once(BEARER_MARKER))
+        .filter_map(|marker| next_blocking_marker_occurrence(text, lower, offset, marker))
+        .min_by_key(|hit| hit.index)
+}
+
+fn next_blocking_marker_occurrence(
+    text: &str,
+    lower: &str,
+    offset: usize,
+    marker: &'static str,
+) -> Option<SecretMarkerOccurrence> {
+    let mut search_offset = offset.min(lower.len());
+    while let Some(relative_index) = lower[search_offset..].find(marker) {
+        let index = search_offset + relative_index;
+        let value_start = index + marker.len();
+        let blocks = if marker == BEARER_MARKER {
+            bearer_value_is_blocking(&text[value_start..])
+        } else {
+            !secret_assignment_is_placeholder(&text[value_start..])
+        };
+        if blocks {
+            return Some(SecretMarkerOccurrence { marker, index });
+        }
+        search_offset = value_start;
+    }
+    None
 }
 
 pub fn contains_blocking_secret_marker(text: &str) -> bool {
@@ -63,6 +70,7 @@ fn secret_assignment_is_placeholder(tail: &str) -> bool {
     let lower = token.to_ascii_lowercase();
     lower == "xxx"
         || lower == "changeme"
+        || token.starts_with('{')
         || (token.starts_with("${") && token.contains('}'))
         || shell_env_reference_is_placeholder(token)
         || (token.starts_with('<') && token.contains('>'))
@@ -92,7 +100,11 @@ fn shell_env_reference_is_placeholder(token: &str) -> bool {
 }
 
 fn bearer_value_is_blocking(tail: &str) -> bool {
-    let value = tail.trim_start();
+    let line = tail
+        .split_once(['\n', '\r'])
+        .map(|(line, _)| line)
+        .unwrap_or(tail);
+    let value = line.trim_start();
     let Some(first) = value.chars().next() else {
         return false;
     };
@@ -123,6 +135,7 @@ mod tests {
             "secret=${APP_SECRET}",
             "api_key=$API_KEY",
             "password=\"$PASSWORD\"",
+            "PASSWORD={password}",
             "apikey=<placeholder>",
             "password=xxx",
             "secret=ChangeMe",
@@ -147,6 +160,7 @@ mod tests {
             "format!(\"Bearer {}\", token)",
             "Authorization: Bearer $TOKEN",
             "Authorization: Bearer ",
+            "Authorization: Bearer \nnotasecretword",
             "Authorization: Bearer %s",
             "Authorization: Bearer token",
         ] {
@@ -155,5 +169,22 @@ mod tests {
         assert!(contains_blocking_secret_marker(
             "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9"
         ));
+    }
+
+    #[test]
+    fn scans_past_placeholder_occurrences_for_later_assignment_secrets() {
+        let content = "SMTP_PASSWORD=\nSMTP_SECRET=${SMTP_SECRET}\nADMIN_PASSWORD=hunter2\n";
+        let hit = first_blocking_secret_marker(content).expect("later real secret blocks");
+        assert_eq!(hit.marker, "password=");
+        assert!(content[hit.index..].starts_with("PASSWORD=hunter2"));
+    }
+
+    #[test]
+    fn scans_past_placeholder_occurrences_for_later_bearer_tokens() {
+        let content =
+            "let header = format!(\"Bearer {token}\");\nAuthorization: Bearer eyJhbGciOiJIUzI1NiJ9\n";
+        let hit = first_blocking_secret_marker(content).expect("later real bearer blocks");
+        assert_eq!(hit.marker, "bearer ");
+        assert!(content[hit.index..].starts_with("Bearer eyJhbGciOiJIUzI1NiJ9"));
     }
 }

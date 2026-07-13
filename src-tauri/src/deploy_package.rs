@@ -669,16 +669,32 @@ fn excluded_secret_reason(name: &str) -> Option<&'static str> {
     }
 }
 
-fn scan_secret_content(_source_path: &Path, copied_path: &Path) -> Option<SecretFinding> {
+fn scan_secret_content(source_path: &Path, copied_path: &Path) -> Option<SecretFinding> {
     let bytes = std::fs::read(copied_path).ok()?;
     if bytes.len() > 512 * 1024 || bytes.contains(&0) {
         return None;
     }
     let text = String::from_utf8(bytes).ok()?;
-    deploy_scan::first_blocking_secret_marker(&text).map(|hit| {
-        SecretFinding::blocking(
-            copied_path.display().to_string(),
-            format!("secret-like content marker `{}`", hit.marker),
+    let hit = deploy_scan::first_blocking_secret_marker(&text)?;
+    let reason = format!("secret-like content marker `{}`", hit.marker);
+    let path = copied_path.display().to_string();
+    Some(
+        if is_non_runtime_path(source_path) || is_non_runtime_path(copied_path) {
+            SecretFinding::warning(path, reason)
+        } else {
+            SecretFinding::blocking(path, reason)
+        },
+    )
+}
+
+fn is_non_runtime_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let Component::Normal(value) = component else {
+            return false;
+        };
+        matches!(
+            value.to_string_lossy().to_ascii_lowercase().as_str(),
+            "test" | "tests" | "__tests__" | "e2e" | "fixtures" | "docs"
         )
     })
 }
@@ -2051,7 +2067,7 @@ mod tests {
         std::fs::write(root.join("package.json"), "{}").expect("package");
         std::fs::write(
             root.join("templates/install.rs"),
-            "PASSWORD=\nAPI_KEY=<api-key>\nSECRET=${APP_SECRET}\n",
+            "PASSWORD={password}\nAPI_KEY=<api-key>\nSECRET=${APP_SECRET}\n",
         )
         .expect("template");
         let dest = temp_root("placeholder-dest");
@@ -2113,6 +2129,38 @@ mod tests {
     }
 
     #[test]
+    fn package_scanner_blocks_later_runtime_secret_after_placeholder_markers() {
+        let root = temp_root("multi-secret-source");
+        std::fs::write(
+            root.join(".env.example"),
+            "SMTP_HOST=\nSMTP_USERNAME=\nSMTP_PASSWORD=\nSMTP_SECRET=${SMTP_SECRET}\nADMIN_PASSWORD=hunter2\n",
+        )
+        .expect("env example");
+        std::fs::write(
+            root.join("auth.txt"),
+            "let header = format!(\"Bearer {token}\");\nAuthorization: Bearer eyJhbGciOiJIUzI1NiJ9\n",
+        )
+        .expect("auth");
+        let dest = temp_root("multi-secret-dest");
+        let mut findings = Vec::new();
+        copy_source_snapshot(&root, &dest, &mut findings).expect("copy");
+        assert!(findings.iter().any(|finding| {
+            finding.path.contains(".env.example")
+                && finding.blocking
+                && finding.severity == "error"
+                && finding.reason.contains("password=")
+        }));
+        assert!(findings.iter().any(|finding| {
+            finding.path.contains("auth.txt")
+                && finding.blocking
+                && finding.severity == "error"
+                && finding.reason.contains("bearer ")
+        }));
+        std::fs::remove_dir_all(root).expect("cleanup");
+        std::fs::remove_dir_all(dest).expect("cleanup");
+    }
+
+    #[test]
     fn minimal_package_excludes_non_runtime_test_assets() {
         let root = temp_root("minimal-source");
         std::fs::create_dir_all(root.join("tests/e2e/fixtures")).expect("fixtures");
@@ -2127,6 +2175,29 @@ mod tests {
         assert!(findings.is_empty());
         std::fs::remove_dir_all(root).expect("cleanup");
         std::fs::remove_dir_all(dest).expect("cleanup");
+    }
+
+    #[test]
+    fn package_scanner_downgrades_non_runtime_secret_content_to_warning() {
+        let root = temp_root("non-runtime-secret-source");
+        let non_runtime_path = root.join("test/tests/__tests__/e2e/fixtures/docs/seed.sh");
+        std::fs::create_dir_all(non_runtime_path.parent().expect("parent")).expect("dirs");
+        std::fs::write(&non_runtime_path, "password=hunter2\n").expect("fixture");
+        let finding =
+            scan_secret_content(&non_runtime_path, &non_runtime_path).expect("warning finding");
+        assert_eq!(finding.severity, "warning");
+        assert!(!finding.blocking);
+        assert!(finding.reason.contains("password="));
+
+        let runtime_path = root.join("src/config.txt");
+        std::fs::create_dir_all(runtime_path.parent().expect("parent")).expect("src");
+        std::fs::write(&runtime_path, "password=hunter2\n").expect("runtime config");
+        let runtime_finding =
+            scan_secret_content(&runtime_path, &runtime_path).expect("blocking finding");
+        assert_eq!(runtime_finding.severity, "error");
+        assert!(runtime_finding.blocking);
+        assert!(runtime_finding.reason.contains("password="));
+        std::fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
