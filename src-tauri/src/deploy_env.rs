@@ -181,16 +181,7 @@ fn read_template_variables(
     version: &store::DeployVersion,
 ) -> anyhow::Result<Vec<EnvTemplateVariable>> {
     let path = Path::new(&version.artifact_path).join(".env.example");
-    let values = read_env_values(&path)?;
-    Ok(values
-        .into_iter()
-        .map(|(key, placeholder)| EnvTemplateVariable {
-            required: true,
-            secret: is_sensitive_env_key_or_value(&key, &placeholder),
-            key,
-            placeholder,
-        })
-        .collect())
+    read_env_template_variables(&path)
 }
 
 fn saved_env_path(
@@ -273,6 +264,41 @@ fn read_env_values(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(values)
 }
 
+fn read_env_template_variables(path: &Path) -> anyhow::Result<Vec<EnvTemplateVariable>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let mut variables = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (required, declaration) = if let Some(commented) = trimmed.strip_prefix('#') {
+            (false, commented.trim_start())
+        } else {
+            (true, trimmed)
+        };
+        let Some((key, value)) = declaration.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if !is_valid_env_key(key) {
+            continue;
+        }
+        let placeholder = unquote_env_value(value.trim()).to_string();
+        variables.push(EnvTemplateVariable {
+            required,
+            secret: is_sensitive_env_key_or_value(key, &placeholder),
+            key: key.to_string(),
+            placeholder,
+        });
+    }
+    Ok(variables)
+}
+
 fn unquote_env_value(value: &str) -> &str {
     if value.len() >= 2
         && ((value.starts_with('"') && value.ends_with('"'))
@@ -340,7 +366,7 @@ mod tests {
         std::fs::create_dir_all(&artifact).expect("artifact");
         std::fs::write(
             artifact.join(".env.example"),
-            "# comment\nDATABASE_URL=postgres://user:password@postgres:5432/app\nREDIS_URL=redis://redis:6379\n",
+            "# comment\nDATABASE_URL=postgres://user:password@postgres:5432/app\n#REDIS_URL=redis://redis:6379\n",
         )
         .expect("env example");
         let version = deploy_version_fixture(&artifact);
@@ -348,6 +374,92 @@ mod tests {
         assert_eq!(variables.len(), 2);
         assert!(variables[0].secret);
         assert!(!variables[1].secret);
+        assert!(variables[0].required);
+        assert!(!variables[1].required);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn optional_template_keys_are_allowed_but_not_required() {
+        let root = temp_root("optional-env");
+        let db = store::Database::open(&root).expect("open db");
+        let workspace_root = root.join("workspace");
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("workspace");
+        let stack = db
+            .create_deploy_stack(store::DeployStackCreate {
+                workspace_id: workspace.id,
+                name: "Stack",
+                slug: "stack",
+            })
+            .expect("stack");
+        let artifact = root.join("artifact");
+        std::fs::create_dir_all(&artifact).expect("artifact");
+        std::fs::write(
+            artifact.join(".env.example"),
+            "REQUIRED_KEY=\n#OPTIONAL_KEY=\n",
+        )
+        .expect("env example");
+        let version = db
+            .create_deploy_version(store::DeployVersionCreate {
+                stack_id: &stack.id,
+                workspace_id: workspace.id,
+                label: "deploy-001",
+                target_machine_id: None,
+                artifact_path: &artifact.display().to_string(),
+                manifest_path: &artifact.join("manifest.json").display().to_string(),
+                manifest_json: "{}",
+                blocking_findings_json: "[]",
+            })
+            .expect("version");
+
+        save_environment(
+            &db,
+            SaveDeployEnvironmentInput {
+                version_id: version.id.clone(),
+                machine_id: "vm-1".to_string(),
+                variables: vec![
+                    DeployEnvironmentValueInput {
+                        key: "REQUIRED_KEY".to_string(),
+                        value: "present".to_string(),
+                    },
+                    DeployEnvironmentValueInput {
+                        key: "OPTIONAL_KEY".to_string(),
+                        value: "also-present".to_string(),
+                    },
+                ],
+            },
+        )
+        .expect("save optional");
+        save_environment(
+            &db,
+            SaveDeployEnvironmentInput {
+                version_id: version.id.clone(),
+                machine_id: "vm-1".to_string(),
+                variables: vec![DeployEnvironmentValueInput {
+                    key: "REQUIRED_KEY".to_string(),
+                    value: "present".to_string(),
+                }],
+            },
+        )
+        .expect("save required only");
+
+        let env = require_environment_ready(&db, &version, &stack, "vm-1").expect("ready");
+        assert!(env.ready);
+        assert_eq!(env.missing_keys, Vec::<String>::new());
+        assert!(save_environment(
+            &db,
+            SaveDeployEnvironmentInput {
+                version_id: version.id,
+                machine_id: "vm-1".to_string(),
+                variables: vec![DeployEnvironmentValueInput {
+                    key: "UNDECLARED_KEY".to_string(),
+                    value: "nope".to_string(),
+                }],
+            },
+        )
+        .is_err());
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

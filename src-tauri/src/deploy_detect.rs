@@ -118,11 +118,8 @@ fn detect_project(project: &store::Project) -> DeployProjectDetection {
         haystack.push('\n');
     }
     let lower = haystack.to_lowercase();
-    let has_dockerfile = root.join("Dockerfile").exists() || root.join("Dockerfile.dev").exists();
-    let has_compose = root.join("docker-compose.yml").exists()
-        || root.join("compose.yml").exists()
-        || root.join("docker-compose.dev.yml").exists()
-        || root.join("docker-compose.prod.yml").exists();
+    let has_dockerfile = has_dockerfile_contract(root);
+    let has_compose = has_compose_contract(root);
     let (language, mut framework, package_manager, default_port) =
         if let Some(package_json) = package_json.as_deref() {
             (
@@ -269,6 +266,46 @@ fn detect_node_framework(package_json: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn has_dockerfile_contract(root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.path().is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name == "Dockerfile" || name.starts_with("Dockerfile."))
+    })
+}
+
+fn has_compose_contract(root: &Path) -> bool {
+    compose_contract_names()
+        .iter()
+        .any(|name| root.join(name).is_file())
+}
+
+fn compose_contract_names() -> &'static [&'static str] {
+    &[
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+        "docker-compose.dev.yml",
+        "docker-compose.dev.yaml",
+        "docker-compose.prod.yml",
+        "docker-compose.prod.yaml",
+        "docker-compose.deploy.yml",
+        "docker-compose.deploy.yaml",
+        "compose.dev.yml",
+        "compose.dev.yaml",
+        "compose.prod.yml",
+        "compose.prod.yaml",
+        "compose.deploy.yml",
+        "compose.deploy.yaml",
+    ]
 }
 
 fn detect_tauri_project(root: &Path, package_json: &str) -> bool {
@@ -495,6 +532,31 @@ mod tests {
             .runtime_commands
             .iter()
             .any(|command| command.contains("cargo metadata")));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn detects_extended_docker_and_compose_contracts() {
+        let root = temp_root();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname='api'\n").expect("cargo");
+        std::fs::write(root.join("Dockerfile.prod"), "FROM alpine\n").expect("dockerfile");
+        std::fs::write(root.join("compose.yaml"), "services: {}\n").expect("compose");
+        let project = store::Project {
+            id: 1,
+            workspace_id: 1,
+            name: "api".to_string(),
+            path: root.display().to_string(),
+            remote_url: None,
+            parent_project_id: None,
+            is_submodule: false,
+            submodule_path: None,
+            created_at: "now".to_string(),
+        };
+        let detected = detect_project(&project);
+
+        assert!(detected.has_dockerfile);
+        assert!(detected.has_compose);
+        assert_eq!(detected.deploy_strategy, "custom_compose");
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

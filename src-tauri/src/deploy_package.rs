@@ -5,6 +5,7 @@ use crate::store;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -163,7 +164,11 @@ pub fn create_package(
         &artifact_root.join("docker-compose.yml"),
         &packaged_projects,
     )?;
-    write_env_example(&artifact_root.join(".env.example"), &detection.services)?;
+    write_env_example(
+        &artifact_root.join(".env.example"),
+        &detection.services,
+        &plan_bundle.plan,
+    )?;
     let package_strategy = package_deploy_strategy(&packaged_projects);
     std::fs::write(artifact_root.join(".dw-deploy-strategy"), &package_strategy)?;
     write_scripts(
@@ -841,18 +846,10 @@ fn write_compose(path: &Path, projects: &[PackagedProject]) -> anyhow::Result<()
     for project in compose_projects {
         let service = slugify(&project.project.name);
         let dockerfile = if project.detection.deploy_strategy == "custom_compose" {
-            if Path::new(&project.project.path).join("Dockerfile").exists() {
-                "Dockerfile"
-            } else if Path::new(&project.project.path)
-                .join("Dockerfile.dev")
-                .exists()
-            {
-                "Dockerfile.dev"
-            } else {
-                "../Dockerfile"
-            }
+            select_custom_dockerfile(Path::new(&project.project.path))
+                .unwrap_or_else(|| "../Dockerfile".to_string())
         } else {
-            "../Dockerfile"
+            "../Dockerfile".to_string()
         };
         let port = project
             .detection
@@ -872,21 +869,106 @@ fn write_compose(path: &Path, projects: &[PackagedProject]) -> anyhow::Result<()
 fn write_env_example(
     path: &Path,
     services: &[deploy_detect::DeployServiceSuggestion],
+    plan: &serde_json::Value,
 ) -> anyhow::Result<()> {
     let mut content =
         String::from("# Generated placeholder values. Do not paste real secrets here.\n");
+    let mut required = BTreeSet::<String>::new();
+    let mut optional = BTreeSet::<String>::new();
+    let mut placeholders = BTreeMap::<String, String>::new();
+
+    for key in plan_env_keys(plan, "required") {
+        optional.remove(&key);
+        required.insert(key);
+    }
+    for key in plan_env_keys(plan, "optional") {
+        if !required.contains(&key) {
+            optional.insert(key);
+        }
+    }
     for service in services {
         match service.name.as_str() {
             "postgres" => {
-                content.push_str("DATABASE_URL=postgres://user:password@postgres:5432/app\n")
+                required.insert("DATABASE_URL".to_string());
+                placeholders.insert(
+                    "DATABASE_URL".to_string(),
+                    "postgres://user:password@postgres:5432/app".to_string(),
+                );
             }
-            "redis" => content.push_str("REDIS_URL=redis://redis:6379\n"),
-            "smtp" => content.push_str("SMTP_URL=smtp://mailhog:1025\n"),
+            "redis" => {
+                required.insert("REDIS_URL".to_string());
+                placeholders.insert("REDIS_URL".to_string(), "redis://redis:6379".to_string());
+            }
+            "smtp" => {
+                required.insert("SMTP_URL".to_string());
+                placeholders.insert("SMTP_URL".to_string(), "smtp://mailhog:1025".to_string());
+            }
             _ => {}
         }
     }
+    optional.retain(|key| !required.contains(key));
+    for key in required {
+        content.push_str(&key);
+        content.push('=');
+        if let Some(placeholder) = placeholders.get(&key) {
+            content.push_str(placeholder);
+        }
+        content.push('\n');
+    }
+    for key in optional {
+        content.push('#');
+        content.push_str(&key);
+        content.push_str("=\n");
+    }
     std::fs::write(path, content)?;
     Ok(())
+}
+
+fn select_custom_dockerfile(root: &Path) -> Option<String> {
+    for name in ["Dockerfile", "Dockerfile.prod", "Dockerfile.dev"] {
+        if root.join(name).is_file() {
+            return Some(name.to_string());
+        }
+    }
+    let mut candidates = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_file() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with("Dockerfile.") {
+                candidates.insert(name.to_string());
+            }
+        }
+    }
+    candidates.into_iter().next()
+}
+
+fn plan_env_keys(plan: &serde_json::Value, group: &str) -> Vec<String> {
+    plan.get("env")
+        .and_then(|env| env.get(group))
+        .and_then(serde_json::Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|key| is_valid_env_key(key))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn is_valid_env_key(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn write_scripts(dir: &Path, strategy: &str, projects: &[PackagedProject]) -> anyhow::Result<()> {
@@ -2135,6 +2217,94 @@ mod tests {
         let content = std::fs::read_to_string(compose).expect("read compose");
         assert!(content.contains("env_file: .env"));
         assert!(!content.contains(".env.example"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn custom_compose_prefers_prod_dockerfile_from_source_contract() {
+        let root = temp_root("compose-prod-dockerfile");
+        std::fs::write(root.join("Dockerfile.dev"), "FROM alpine\n").expect("dev dockerfile");
+        std::fs::write(root.join("Dockerfile.prod"), "FROM alpine\n").expect("prod dockerfile");
+        let project = PackagedProject {
+            project: store::Project {
+                id: 1,
+                workspace_id: 1,
+                name: "api".to_string(),
+                path: root.display().to_string(),
+                remote_url: None,
+                parent_project_id: None,
+                is_submodule: false,
+                submodule_path: None,
+                created_at: "now".to_string(),
+            },
+            detection: DeployProjectDetection {
+                project_id: 1,
+                name: "api".to_string(),
+                path: root.display().to_string(),
+                language: "rust".to_string(),
+                framework: None,
+                package_manager: Some("cargo".to_string()),
+                has_dockerfile: true,
+                has_compose: true,
+                services: vec![],
+                ports: vec![deploy_detect::DeployPortSuggestion {
+                    container: 8080,
+                    host: 8080,
+                    confidence: "default".to_string(),
+                }],
+                healthcheck: None,
+                deploy_strategy: "custom_compose".to_string(),
+                strategy_reason: "custom docker contract".to_string(),
+                runtime_commands: vec![],
+                requires_desktop_session: false,
+                warnings: vec![],
+            },
+            branch: None,
+            commit_sha: None,
+            dirty: false,
+            git_status_short: String::new(),
+            package_path: "projects/api/source".to_string(),
+            dockerfile_path: "projects/api/Dockerfile".to_string(),
+        };
+        let compose = root.join("docker-compose.yml");
+        write_compose(&compose, &[project]).expect("compose");
+        let content = std::fs::read_to_string(compose).expect("read compose");
+        assert!(content.contains("dockerfile: Dockerfile.prod"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn env_example_merges_plan_required_and_optional_keys() {
+        let root = temp_root("env-example");
+        let plan = serde_json::json!({
+            "env": {
+                "required": ["APP_SECRET", "DATABASE_URL"],
+                "optional": ["RUST_LOG", "APP_SECRET", "REDIS_URL"]
+            }
+        });
+        write_env_example(
+            &root.join(".env.example"),
+            &[
+                deploy_detect::DeployServiceSuggestion {
+                    name: "postgres".to_string(),
+                    reason: "detected pg".to_string(),
+                },
+                deploy_detect::DeployServiceSuggestion {
+                    name: "redis".to_string(),
+                    reason: "detected redis".to_string(),
+                },
+            ],
+            &plan,
+        )
+        .expect("env example");
+        let content = std::fs::read_to_string(root.join(".env.example")).expect("read env");
+        assert!(content.contains("\nAPP_SECRET=\n"));
+        assert!(content.contains("\nDATABASE_URL=postgres://user:password@postgres:5432/app\n"));
+        assert!(content.contains("\nREDIS_URL=redis://redis:6379\n"));
+        assert!(content.contains("\n#RUST_LOG=\n"));
+        assert_eq!(content.matches("APP_SECRET=").count(), 1);
+        assert_eq!(content.matches("DATABASE_URL=").count(), 1);
+        assert_eq!(content.matches("REDIS_URL=").count(), 1);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
