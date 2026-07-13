@@ -1,0 +1,158 @@
+name: lettrebox-deploy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rwfw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rwfw}
+      POSTGRES_DB: lettrebox
+    volumes:
+      - deploy-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rwfw -d lettrebox"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8025"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  stalwart:
+    image: stalwartlabs/stalwart:v0.16.12
+    restart: unless-stopped
+    environment:
+      STALWART_RECOVERY_ADMIN: admin:${STALWART_ADMIN_PASSWORD:-lettrebox-deploy-admin}
+    volumes:
+      - deploy-stalwart-data:/var/lib/stalwart
+      - ${LETTREBOX_SRC:-.}/config/stalwart/config.json:/etc/stalwart/config.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz/ready >/dev/null || wget --quiet --spider http://localhost:8080/healthz/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  stalwart-webmail-port:
+    image: alpine/socat:1.8.0.3
+    profiles: ["webmail"]
+    restart: unless-stopped
+    depends_on:
+      stalwart:
+        condition: service_healthy
+    ports:
+      - "18080:8080"
+    command:
+      - "TCP-LISTEN:8080,fork,reuseaddr"
+      - "TCP:stalwart:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://127.0.0.1:8080/healthz/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  app:
+    build:
+      context: ${LETTREBOX_SRC:-.}
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    environment:
+      RWFW_ENV: production
+      RWFW__DATABASE__URL: postgres://rwfw:${POSTGRES_PASSWORD:-rwfw}@postgres:5432/lettrebox
+      STALWART_BASE_URL: http://stalwart:8080
+      STALWART_RECOVERY_ADMIN: admin:${STALWART_ADMIN_PASSWORD:-lettrebox-deploy-admin}
+      NFSE_CALLBACK_TOKEN: ${NFSE_CALLBACK_TOKEN:-lettrebox-deploy-nfse-callback-token-0001}
+      RWFW__ACCOUNTS__MAIL__HOST: ${RWFW__ACCOUNTS__MAIL__HOST:-mailhog}
+      RWFW__ACCOUNTS__MAIL__PORT: "${RWFW__ACCOUNTS__MAIL__PORT:-1025}"
+      RWFW__ACCOUNTS__MAIL__FROM: "${RWFW__ACCOUNTS__MAIL__FROM:-Lettrebox <no-reply@lettrebox.local>}"
+      RWFW__ACCOUNTS__MAIL__STARTTLS: "${RWFW__ACCOUNTS__MAIL__STARTTLS:-false}"
+      RWFW__ACCOUNTS__STALWART__BASE_URL: http://stalwart:8080
+      RWFW__ACCOUNTS__STALWART__USERNAME: admin
+      RWFW__ACCOUNTS__STALWART__PASSWORD: ${STALWART_ADMIN_PASSWORD:-lettrebox-deploy-admin}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailhog:
+        condition: service_healthy
+      stalwart:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  stalwart-cors:
+    image: curlimages/curl:8.10.1
+    profiles: ["webmail"]
+    restart: "no"
+    depends_on:
+      stalwart:
+        condition: service_healthy
+    environment:
+      STALWART_RECOVERY_ADMIN: admin:${STALWART_ADMIN_PASSWORD:-lettrebox-deploy-admin}
+    command:
+      - sh
+      - -ec
+      - |
+        curl -fsS -u "$${STALWART_RECOVERY_ADMIN}" \
+          -H 'Content-Type: application/json' \
+          --data '{"using":["urn:ietf:params:jmap:core","urn:stalwart:jmap"],"methodCalls":[["x:Http/set",{"update":{"singleton":{"usePermissiveCors":true}}},"c0"]]}' \
+          http://stalwart:8080/jmap >/dev/null
+
+  bulwark:
+    image: ghcr.io/bulwarkmail/webmail:v1.7.6
+    profiles: ["webmail"]
+    restart: unless-stopped
+    depends_on:
+      stalwart:
+        condition: service_healthy
+      stalwart-cors:
+        condition: service_completed_successfully
+    ports:
+      - "13000:3000"
+    environment:
+      HOSTNAME: "0.0.0.0"
+      PORT: "3000"
+      APP_NAME: ${BULWARK_APP_NAME:-Lettrebox Mail}
+      JMAP_SERVER_URL: http://stalwart.local:18080
+      SESSION_SECRET: ${BULWARK_SESSION_SECRET:-change-me-change-me-change-me-32chars}
+      ADMIN_PASSWORD: ${BULWARK_ADMIN_PASSWORD:-lettrebox-deploy-bulwark-admin}
+      BULWARK_TELEMETRY: "off"
+      SETTINGS_SYNC_ENABLED: "true"
+    extra_hosts:
+      - "stalwart.local:host-gateway"
+    volumes:
+      - deploy-bulwark-settings:/app/data/settings
+      - deploy-bulwark-config:/app/data/admin
+      - deploy-bulwark-state:/app/data/admin-state
+      - deploy-bulwark-telemetry:/app/data/telemetry
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  deploy-postgres-data:
+  deploy-stalwart-data:
+  deploy-bulwark-settings:
+  deploy-bulwark-config:
+  deploy-bulwark-state:
+  deploy-bulwark-telemetry:

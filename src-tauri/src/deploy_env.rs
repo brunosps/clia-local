@@ -1,8 +1,10 @@
 use crate::store;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+const ENV_TEMPLATE_DEFAULT_MARKER: &str = "dw:default";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeployEnvironmentInput {
@@ -125,7 +127,7 @@ pub fn write_runtime_env(
     let env = require_environment_ready(db, version, stack, machine_id)?;
     let mut values = BTreeMap::new();
     for variable in &env.variables {
-        if !variable.value.trim().is_empty() {
+        if !variable.value.trim().is_empty() && (variable.required || variable.saved) {
             values.insert(variable.key.clone(), variable.value.clone());
         }
     }
@@ -284,6 +286,7 @@ fn read_env_template_variables(path: &Path) -> anyhow::Result<Vec<EnvTemplateVar
     }
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
+    let default_keys = env_template_default_keys(&content);
     let mut variables = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -291,6 +294,9 @@ fn read_env_template_variables(path: &Path) -> anyhow::Result<Vec<EnvTemplateVar
             continue;
         }
         let (required, declaration) = if let Some(commented) = trimmed.strip_prefix('#') {
+            if env_template_default_key(commented).is_some() {
+                continue;
+            }
             if commented
                 .chars()
                 .next()
@@ -310,21 +316,49 @@ fn read_env_template_variables(path: &Path) -> anyhow::Result<Vec<EnvTemplateVar
             continue;
         }
         let template_value = unquote_env_value(value.trim()).to_string();
-        let default_source = if template_value.trim().is_empty() {
-            None
+        let marked_default = default_keys.contains(key);
+        let (default_value, placeholder, default_source) = if marked_default {
+            (
+                template_value.clone(),
+                String::new(),
+                if template_value.trim().is_empty() {
+                    None
+                } else {
+                    Some("project".to_string())
+                },
+            )
         } else {
-            Some("project".to_string())
+            (String::new(), template_value.clone(), None)
         };
         variables.push(EnvTemplateVariable {
             required,
             secret: is_sensitive_env_key_or_value(key, &template_value),
             key: key.to_string(),
-            placeholder: String::new(),
-            default_value: template_value,
+            placeholder,
+            default_value,
             default_source,
         });
     }
     Ok(variables)
+}
+
+fn env_template_default_keys(content: &str) -> BTreeSet<String> {
+    content
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('#'))
+        .filter_map(env_template_default_key)
+        .collect()
+}
+
+fn env_template_default_key(commented: &str) -> Option<String> {
+    let marker = commented.trim_start();
+    let rest = marker.strip_prefix(ENV_TEMPLATE_DEFAULT_MARKER)?;
+    let key = rest.split_whitespace().next()?;
+    if is_valid_env_key(key) {
+        Some(key.to_string())
+    } else {
+        None
+    }
 }
 
 fn unquote_env_value(value: &str) -> &str {
@@ -511,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn template_defaults_make_required_environment_ready_without_save() {
+    fn marked_template_defaults_make_required_environment_ready_without_save() {
         let root = temp_root("default-env");
         let db = store::Database::open(&root).expect("open db");
         let workspace_root = root.join("workspace");
@@ -529,7 +563,7 @@ mod tests {
         std::fs::create_dir_all(&artifact).expect("artifact");
         std::fs::write(
             artifact.join(".env.example"),
-            "POSTGRES_PASSWORD=rwfw\nDATABASE_URL=\n#LOG_LEVEL=debug\n",
+            "#dw:default POSTGRES_PASSWORD project\nPOSTGRES_PASSWORD=rwfw\nDATABASE_URL=\n#dw:default LOG_LEVEL project\n#LOG_LEVEL=debug\n",
         )
         .expect("env example");
         let version = db
@@ -593,8 +627,30 @@ mod tests {
         write_runtime_env(&db, &version, &stack, "vm-1", &package).expect("runtime env");
         let runtime_env = std::fs::read_to_string(package.join(".env")).expect("read runtime env");
         assert!(runtime_env.contains("POSTGRES_PASSWORD=owner-value\n"));
-        assert!(runtime_env.contains("LOG_LEVEL=debug\n"));
+        assert!(!runtime_env.contains("LOG_LEVEL=debug\n"));
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_real_lettrebox_env_example_values_are_placeholders() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/deploy/lettrebox/deploy-003.env.example");
+        let variables = read_env_template_variables(&path).expect("template");
+
+        assert!(!variables.is_empty());
+        assert!(variables
+            .iter()
+            .all(|variable| variable.default_source.is_none()));
+        assert!(variables
+            .iter()
+            .all(|variable| variable.default_value.is_empty()));
+        assert_eq!(
+            variables
+                .iter()
+                .find(|variable| variable.key == "DATABASE_URL")
+                .map(|variable| (variable.placeholder.as_str(), variable.required)),
+            Some(("postgres://user:password@postgres:5432/app", true))
+        );
     }
 
     #[test]

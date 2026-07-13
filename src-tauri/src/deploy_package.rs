@@ -4,16 +4,15 @@ use crate::deploy_repair;
 use crate::deploy_scan;
 use crate::store;
 use anyhow::Context;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 pub const DEPLOY_RUNBOOK_VERSION: &str = "2026-06-02.1";
+const ENV_TEMPLATE_DEFAULT_MARKER: &str = "#dw:default";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateDeployPackageInput {
@@ -97,6 +96,12 @@ struct PackagedProject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageComposeDecision {
+    mode: PackageComposeMode,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PackageComposeMode {
     Generated { path: String },
     AgentArtifact { path: String },
@@ -145,7 +150,7 @@ pub fn create_package(
         .ok_or_else(|| {
             anyhow::anyhow!("deploy_plan_required: run agent planning before package creation")
         })?;
-    let plan_bundle = deploy_plan::load_plan_bundle_from_path(
+    let mut plan_bundle = deploy_plan::load_plan_bundle_from_path(
         db,
         deploy_plan::PlanDeployPackageInput {
             workspace_id: input.workspace_id,
@@ -199,7 +204,6 @@ pub fn create_package(
         dismissed_findings_json: "[]",
     })?;
     let mut findings = Vec::<SecretFinding>::new();
-    deploy_plan::write_analysis_artifacts(&artifact_root, &plan_bundle)?;
     let mut packaged_projects = Vec::<PackagedProject>::new();
     for project_detection in &detection.projects {
         let project = db.get_project(project_detection.project_id)?;
@@ -252,8 +256,13 @@ pub fn create_package(
         packaged_projects.push(packaged);
     }
     let package_strategy = package_deploy_strategy(&packaged_projects);
-    let compose_mode =
+    let compose_decision =
         package_compose_mode(&package_strategy, &packaged_projects, &plan_bundle.plan);
+    for warning in &compose_decision.warnings {
+        append_validation_warning(&mut plan_bundle.validation, warning);
+    }
+    deploy_plan::write_analysis_artifacts(&artifact_root, &plan_bundle)?;
+    let compose_mode = &compose_decision.mode;
     if compose_mode.writes_generated_compose() {
         write_compose(
             &artifact_root.join(compose_mode.file_path()),
@@ -273,14 +282,14 @@ pub fn create_package(
         &artifact_root.join("scripts"),
         &package_strategy,
         &packaged_projects,
-        &compose_mode,
+        compose_mode,
     )?;
     write_agent_plan_files(&artifact_root, &plan_bundle.plan)?;
     write_agent_plan_scripts(
         &artifact_root,
         &plan_bundle.plan,
         &package_strategy,
-        &compose_mode,
+        compose_mode,
     )?;
     scan_package_review_files(&artifact_root, &mut findings);
     annotate_finding_occurrences(&mut findings);
@@ -304,7 +313,8 @@ pub fn create_package(
         &plan_bundle,
         &findings,
         &dismissed_findings,
-        &compose_mode,
+        compose_mode,
+        &compose_decision.warnings,
     )?;
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     std::fs::write(&manifest_path, &manifest_json)
@@ -879,6 +889,21 @@ fn review_identity_is_content(identity: &ReviewFindingIdentity) -> bool {
     identity.marker.is_some() || identity.reason.contains("secret-like content marker")
 }
 
+fn append_validation_warning(validation: &mut serde_json::Value, warning: &str) {
+    let Some(object) = validation.as_object_mut() else {
+        return;
+    };
+    let warnings = object
+        .entry("warnings")
+        .or_insert_with(|| json!([]))
+        .as_array_mut();
+    if let Some(warnings) = warnings {
+        if !warnings.iter().any(|item| item.as_str() == Some(warning)) {
+            warnings.push(json!(warning));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_manifest(
     workspace: &store::Workspace,
@@ -891,6 +916,7 @@ fn build_manifest(
     findings: &[SecretFinding],
     dismissed_findings: &[DismissedReviewFinding],
     compose_mode: &PackageComposeMode,
+    package_warnings: &[String],
 ) -> anyhow::Result<serde_json::Value> {
     Ok(json!({
         "schema_version": "1.0",
@@ -907,6 +933,7 @@ fn build_manifest(
         "compose": {
             "mode": compose_mode.kind(),
             "path": compose_mode.file_path(),
+            "warnings": package_warnings,
         },
         "analysis": {
             "mode": "agent_planned",
@@ -951,6 +978,7 @@ fn build_manifest(
             "version": DEPLOY_RUNBOOK_VERSION,
             "scripts": deploy_runbook_scripts()
         },
+        "warnings": package_warnings,
         "review": {
             "status": "pending",
             "blocking_findings": findings,
@@ -1504,17 +1532,43 @@ fn package_compose_mode(
     package_strategy: &str,
     projects: &[PackagedProject],
     plan: &serde_json::Value,
-) -> PackageComposeMode {
+) -> PackageComposeDecision {
     if let Some(path) = compose_artifact_path(plan) {
-        return PackageComposeMode::AgentArtifact { path };
+        return PackageComposeDecision {
+            mode: PackageComposeMode::AgentArtifact { path },
+            warnings: Vec::new(),
+        };
     }
     if package_strategy == "custom_compose" {
-        if let Some(path) = projects.iter().find_map(source_passthrough_compose_path) {
-            return PackageComposeMode::SourcePassthrough { path };
+        let passthrough_paths = projects
+            .iter()
+            .filter_map(source_passthrough_compose_path)
+            .collect::<Vec<_>>();
+        if passthrough_paths.len() == 1 {
+            return PackageComposeDecision {
+                mode: PackageComposeMode::SourcePassthrough {
+                    path: passthrough_paths[0].clone(),
+                },
+                warnings: Vec::new(),
+            };
+        }
+        if passthrough_paths.len() > 1 {
+            return PackageComposeDecision {
+                mode: PackageComposeMode::Generated {
+                    path: "docker-compose.yml".to_string(),
+                },
+                warnings: vec![format!(
+                    "multiple project compose files detected ({}); source passthrough disabled, generated compose selected",
+                    passthrough_paths.join(", ")
+                )],
+            };
         }
     }
-    PackageComposeMode::Generated {
-        path: "docker-compose.yml".to_string(),
+    PackageComposeDecision {
+        mode: PackageComposeMode::Generated {
+            path: "docker-compose.yml".to_string(),
+        },
+        warnings: Vec::new(),
     }
 }
 
@@ -1572,34 +1626,81 @@ fn collect_project_env_defaults(projects: &[PackagedProject]) -> BTreeMap<String
 }
 
 fn read_project_compose_env_defaults(project: &PackagedProject) -> BTreeMap<String, String> {
-    let mut defaults = BTreeMap::new();
     let Some(compose_path) = safe_project_relative_path(project.detection.compose_path.as_deref())
     else {
-        return defaults;
+        return BTreeMap::new();
     };
     let path = Path::new(&project.project.path).join(compose_path);
     let Ok(content) = std::fs::read_to_string(path) else {
-        return defaults;
+        return BTreeMap::new();
     };
-    static COMPOSE_DEFAULT_RE: OnceLock<Regex> = OnceLock::new();
-    let re = COMPOSE_DEFAULT_RE.get_or_init(|| {
-        Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}\r\n]*)\}")
-            .expect("valid compose default regex")
-    });
-    for capture in re.captures_iter(&content) {
-        let Some(key) = capture.get(1).map(|item| item.as_str()) else {
+    parse_compose_env_defaults(&content)
+}
+
+fn parse_compose_env_defaults(content: &str) -> BTreeMap<String, String> {
+    let mut defaults = BTreeMap::new();
+    for line in content.lines() {
+        if line.trim_start().starts_with('#') {
             continue;
-        };
-        let value = capture
-            .get(2)
-            .map(|item| item.as_str())
-            .unwrap_or_default()
-            .trim();
-        if is_valid_env_key(key) && !value.is_empty() {
-            defaults.insert(key.to_string(), value.to_string());
+        }
+        let bytes = line.as_bytes();
+        let mut index = 0;
+        while index + 1 < bytes.len() {
+            if bytes[index] != b'$' || bytes[index + 1] != b'{' {
+                index += 1;
+                continue;
+            }
+            if index > 0 && bytes[index - 1] == b'$' {
+                index += 2;
+                continue;
+            }
+            let Some((expression, end)) = compose_interpolation_expression(line, index + 2) else {
+                break;
+            };
+            if let Some((key, value)) = compose_default_expression(expression) {
+                defaults.insert(key.to_string(), value.to_string());
+            }
+            index = end + 1;
         }
     }
     defaults
+}
+
+fn compose_interpolation_expression(line: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = line.as_bytes();
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => return Some((&line[start..index], index)),
+            b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn compose_default_expression(expression: &str) -> Option<(&str, &str)> {
+    let key_end = expression
+        .char_indices()
+        .take_while(|(_, ch)| *ch == '_' || ch.is_ascii_alphanumeric())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()?;
+    let key = &expression[..key_end];
+    if !is_valid_env_key(key) {
+        return None;
+    }
+    let rest = &expression[key_end..];
+    let value = rest
+        .strip_prefix(":-")
+        .or_else(|| rest.strip_prefix('-'))?
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some((key, value))
 }
 
 fn read_project_env_example_defaults(project_root: &Path) -> BTreeMap<String, String> {
@@ -1610,22 +1711,10 @@ fn read_project_env_example_defaults(project_root: &Path) -> BTreeMap<String, St
     };
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let declaration = if let Some(commented) = trimmed.strip_prefix('#') {
-            if commented
-                .chars()
-                .next()
-                .is_none_or(|ch| ch.is_ascii_whitespace())
-            {
-                continue;
-            }
-            commented
-        } else {
-            trimmed
-        };
-        let Some((key, value)) = declaration.split_once('=') else {
+        let Some((key, value)) = trimmed.split_once('=') else {
             continue;
         };
         let key = key.trim();
@@ -1745,9 +1834,8 @@ fn write_env_example(
     detector_keys_optional: bool,
     defaults: &BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
-    let mut content = String::from(
-        "# Generated environment defaults from project files. Do not paste real secrets here.\n",
-    );
+    let mut content =
+        String::from("# Generated environment template. Do not paste real secrets here.\n");
     let mut required = BTreeSet::<String>::new();
     let mut optional = BTreeSet::<String>::new();
 
@@ -1796,6 +1884,12 @@ fn write_env_example(
     }
     optional.retain(|key| !required.contains(key));
     for key in required {
+        if defaults.contains_key(&key) {
+            content.push_str(ENV_TEMPLATE_DEFAULT_MARKER);
+            content.push(' ');
+            content.push_str(&key);
+            content.push_str(" project\n");
+        }
         content.push_str(&key);
         content.push('=');
         if let Some(value) = defaults.get(&key) {
@@ -1804,6 +1898,12 @@ fn write_env_example(
         content.push('\n');
     }
     for key in optional {
+        if defaults.contains_key(&key) {
+            content.push_str(ENV_TEMPLATE_DEFAULT_MARKER);
+            content.push(' ');
+            content.push_str(&key);
+            content.push_str(" project\n");
+        }
         content.push('#');
         content.push_str(&key);
         content.push('=');
@@ -2722,11 +2822,9 @@ fn write_agent_plan_files(root: &Path, plan: &serde_json::Value) -> anyhow::Resu
 }
 
 fn scan_package_review_files(root: &Path, findings: &mut Vec<SecretFinding>) {
-    let paths = [
-        root.join(".env.example"),
-        root.join("docker-compose.yml"),
-        root.join("compose.yml"),
-    ];
+    // The root .env.example is generated by ADE from already packaged public inputs.
+    // Project .env.example files under projects/*/source are scanned during source copy.
+    let paths = [root.join("docker-compose.yml"), root.join("compose.yml")];
     for path in paths {
         if path.is_file() {
             for finding in scan_secret_content(&path, &path, root, root) {
@@ -4000,7 +4098,7 @@ mod tests {
         .expect("compose");
         std::fs::write(
             root.join(".env.example"),
-            "POSTGRES_PASSWORD=from-example\nAPI_KEY=public-test-key\n",
+            "POSTGRES_PASSWORD=from-example\nAPI_KEY=public-test-key\n#COMMENTED_DEFAULT=ignored\n",
         )
         .expect("env example");
         let project = PackagedProject {
@@ -4049,7 +4147,33 @@ mod tests {
             defaults.get("API_KEY"),
             Some(&"public-test-key".to_string())
         );
+        assert_eq!(defaults.get("COMMENTED_DEFAULT"), None);
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn compose_env_defaults_ignore_comments_escapes_and_parse_compose_forms() {
+        let defaults = parse_compose_env_defaults(
+            r#"
+# COMMENTED=${COMMENTED:-ignored}
+services:
+  app:
+    environment:
+      DASH_DEFAULT: ${DASH_DEFAULT-fallback}
+      COLON_DEFAULT: ${COLON_DEFAULT:-fallback}
+      ESCAPED: $${ESCAPED:-ignored}
+      JSON_DEFAULT: ${JSON_DEFAULT:-{"nested":"ok"}}
+"#,
+        );
+
+        assert_eq!(defaults.get("COMMENTED"), None);
+        assert_eq!(defaults.get("ESCAPED"), None);
+        assert_eq!(defaults.get("DASH_DEFAULT"), Some(&"fallback".to_string()));
+        assert_eq!(defaults.get("COLON_DEFAULT"), Some(&"fallback".to_string()));
+        assert_eq!(
+            defaults.get("JSON_DEFAULT"),
+            Some(&r#"{"nested":"ok"}"#.to_string())
+        );
     }
 
     #[test]
@@ -4150,7 +4274,10 @@ mod tests {
                 "compose": null
             }
         });
-        let mode = package_compose_mode("custom_compose", std::slice::from_ref(&project), &plan);
+        let decision =
+            package_compose_mode("custom_compose", std::slice::from_ref(&project), &plan);
+        let mode = decision.mode;
+        assert!(decision.warnings.is_empty());
         assert_eq!(
             mode,
             PackageComposeMode::SourcePassthrough {
@@ -4208,6 +4335,44 @@ mod tests {
             String::from_utf8_lossy(&preflight.stderr)
         );
 
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn custom_compose_passthrough_falls_back_when_multiple_projects_have_compose() {
+        let root = temp_root("compose-passthrough-multi");
+        let project_a = custom_compose_project_fixture(
+            1,
+            "api",
+            &root.join("api"),
+            "projects/api/source",
+            "compose.deploy.yaml",
+        );
+        let project_b = custom_compose_project_fixture(
+            2,
+            "worker",
+            &root.join("worker"),
+            "projects/worker/source",
+            "docker-compose.yml",
+        );
+        let plan = serde_json::json!({
+            "artifacts": {
+                "compose": null
+            }
+        });
+
+        let decision = package_compose_mode("custom_compose", &[project_a, project_b], &plan);
+
+        assert_eq!(
+            decision.mode,
+            PackageComposeMode::Generated {
+                path: "docker-compose.yml".to_string()
+            }
+        );
+        assert_eq!(decision.warnings.len(), 1);
+        assert!(decision.warnings[0].contains("multiple project compose files detected"));
+        assert!(decision.warnings[0].contains("projects/api/source/compose.deploy.yaml"));
+        assert!(decision.warnings[0].contains("projects/worker/source/docker-compose.yml"));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -4613,6 +4778,98 @@ mod tests {
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
+    #[test]
+    fn create_package_with_real_lettrebox_compose_prefills_without_blocking_review() {
+        let root = temp_root("real-lettrebox-compose-prefill");
+        let db = store::Database::open(&root).expect("open db");
+        let workspace_root = root.join("workspace");
+        let project_root = workspace_root.join("lettrebox");
+        std::fs::create_dir_all(project_root.join("config/stalwart")).expect("project dirs");
+        std::fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"lettrebox\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("cargo");
+        std::fs::write(project_root.join("Dockerfile.prod"), "FROM alpine:3.20\n")
+            .expect("dockerfile");
+        std::fs::write(project_root.join("config/stalwart/config.json"), "{}\n")
+            .expect("stalwart config");
+        std::fs::write(
+            project_root.join(".env.example"),
+            "POSTGRES_PASSWORD=\nBULWARK_SESSION_SECRET=\n",
+        )
+        .expect("project env example");
+        std::fs::write(
+            project_root.join("compose.deploy.yaml"),
+            include_str!("../fixtures/deploy/lettrebox/compose.deploy.yaml"),
+        )
+        .expect("compose");
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("create workspace");
+        let project = db
+            .add_project(
+                workspace.id,
+                "lettrebox",
+                &project_root.display().to_string(),
+                None,
+            )
+            .expect("add project");
+        let agent = db
+            .create_agent_profile(store::AgentProfileCreate {
+                workspace_id: workspace.id,
+                project_id: None,
+                name: "Codex Deploy",
+                provider: "codex",
+                model: Some("gpt-5"),
+                reasoning_effort: None,
+                sandbox: "danger-full-access",
+                context_mode: "auto_lean",
+                rtk_enabled: false,
+            })
+            .expect("create agent");
+
+        let version = create_package(
+            &db,
+            CreateDeployPackageInput {
+                workspace_id: workspace.id,
+                stack_name: "lettrebox deploy".to_string(),
+                project_ids: vec![project.id],
+                target_machine_id: None,
+                agent_profile_id: agent.id,
+                deploy_plan_path: Some(write_passthrough_plan(&workspace_root, project.id)),
+                include_dirty: true,
+            },
+        )
+        .expect("create package");
+
+        let artifact = PathBuf::from(&version.artifact_path);
+        let env_example =
+            std::fs::read_to_string(artifact.join(".env.example")).expect("env example");
+        assert!(env_example.contains("#dw:default POSTGRES_PASSWORD project\n"));
+        assert!(env_example.contains("POSTGRES_PASSWORD=rwfw"));
+        assert!(env_example.contains("STALWART_ADMIN_PASSWORD=lettrebox-deploy-admin"));
+        assert!(
+            env_example.contains("BULWARK_SESSION_SECRET=change-me-change-me-change-me-32chars")
+        );
+        assert!(env_example.contains("BULWARK_ADMIN_PASSWORD=lettrebox-deploy-bulwark-admin"));
+        let findings = serde_json::from_str::<Vec<SecretFinding>>(&version.blocking_findings_json)
+            .expect("review findings");
+        assert!(
+            findings.iter().all(|finding| !finding.blocking),
+            "{findings:?}"
+        );
+        crate::deploy::approve_version(
+            &db,
+            crate::deploy::ApproveDeployVersionInput {
+                version_id: version.id.clone(),
+            },
+        )
+        .expect("approve version");
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
     fn create_secret_scan_package<F>(
         label: &str,
         stack_name: &str,
@@ -4896,6 +5153,57 @@ mod tests {
         )
         .expect("write plan");
         path.display().to_string()
+    }
+
+    fn custom_compose_project_fixture(
+        id: i64,
+        name: &str,
+        path: &Path,
+        package_path: &str,
+        compose_path: &str,
+    ) -> PackagedProject {
+        PackagedProject {
+            project: store::Project {
+                id,
+                workspace_id: 1,
+                name: name.to_string(),
+                path: path.display().to_string(),
+                remote_url: None,
+                parent_project_id: None,
+                is_submodule: false,
+                submodule_path: None,
+                created_at: "now".to_string(),
+            },
+            detection: DeployProjectDetection {
+                project_id: id,
+                name: name.to_string(),
+                path: path.display().to_string(),
+                language: "rust".to_string(),
+                framework: None,
+                package_manager: Some("cargo".to_string()),
+                has_dockerfile: true,
+                has_compose: true,
+                compose_path: Some(compose_path.to_string()),
+                services: vec![],
+                ports: vec![deploy_detect::DeployPortSuggestion {
+                    container: 8080,
+                    host: 8080,
+                    confidence: "suggested".to_string(),
+                }],
+                healthcheck: Some("http://127.0.0.1:8080/health".to_string()),
+                deploy_strategy: "custom_compose".to_string(),
+                strategy_reason: "project compose".to_string(),
+                runtime_commands: vec![],
+                requires_desktop_session: false,
+                warnings: vec![],
+            },
+            branch: None,
+            commit_sha: None,
+            dirty: false,
+            git_status_short: String::new(),
+            package_path: package_path.to_string(),
+            dockerfile_path: format!("projects/{name}/Dockerfile"),
+        }
     }
 
     fn temp_root(label: &str) -> PathBuf {
