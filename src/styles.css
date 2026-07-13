@@ -10433,6 +10433,14 @@ h2 {
   white-space: nowrap;
 }
 
+.deploy-summary-grid strong + small {
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .deploy-repair-callout {
   margin-top: 10px;
   padding: 10px 12px;
@@ -10454,6 +10462,18 @@ h2 {
   display: grid;
   grid-template-columns: 1fr;
   gap: 10px;
+}
+
+.deploy-env-helper,
+.deploy-env-save-result {
+  margin: 0;
+  color: #b8c4d4;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.deploy-env-save-result {
+  color: #d9e2ef;
 }
 
 .deploy-env-section {
@@ -10504,11 +10524,24 @@ h2 {
 
 .deploy-env-grid input {
   min-height: 38px;
+  min-width: 0;
   border: 1px solid #3a4656;
   border-radius: 6px;
   background: #10141d;
   color: #e5edf8;
   padding: 8px 10px;
+}
+
+.deploy-env-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.deploy-env-example-button {
+  min-height: 38px;
+  padding-inline: 10px;
+  white-space: nowrap;
 }
 
 .deploy-env-field.pending input {
@@ -10991,8 +11024,20 @@ h2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .deploy-env-helper,
+  .deploy-env-save-result,
+  .deploy-env-grid > .secondary-button {
+    grid-column: 1 / -1;
+  }
+
   .deploy-primary-actions {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .deploy-env-input-row {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -127,6 +127,29 @@ function deployAnalysisText(analysis: Record<string, unknown> | null, key: strin
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function deployComposeSummary(version: DeployVersion | null | undefined) {
+  if (!version?.manifest_json) return "compose não identificado";
+  try {
+    const manifest = JSON.parse(version.manifest_json) as Record<string, unknown>;
+    const compose = manifest.compose;
+    if (!compose || typeof compose !== "object") return "compose não identificado";
+    const record = compose as Record<string, unknown>;
+    const path = typeof record.path === "string" && record.path.trim() ? record.path : null;
+    switch (record.mode) {
+      case "source_passthrough":
+        return path ? `passthrough: ${path}` : "passthrough do source";
+      case "agent_artifact":
+        return path ? `artefato do agente: ${path}` : "artefato do agente";
+      case "generated":
+        return path ? `gerado: ${path}` : "compose gerado";
+      default:
+        return path ?? "compose não identificado";
+    }
+  } catch {
+    return "compose não identificado";
+  }
+}
+
 function DeploySubnav({
   view,
   onViewChange,
@@ -199,6 +222,7 @@ export default function DeployPackagesPanel({
   const [runLogs, setRunLogs] = useState("");
   const [deployEnvironment, setDeployEnvironment] = useState<DeployEnvironment | null>(null);
   const [environmentDraft, setEnvironmentDraft] = useState<Record<string, string>>({});
+  const [environmentSaveResult, setEnvironmentSaveResult] = useState<string | null>(null);
   const [environmentSaving, setEnvironmentSaving] = useState(false);
   const [progress, setProgress] = useState<DeployProgressEntry[]>([]);
   const [busy, setBusy] = useState(false);
@@ -668,6 +692,7 @@ export default function DeployPackagesPanel({
               typeof project.package_manager === "string" ? project.package_manager : null,
             has_dockerfile: Boolean(project.has_dockerfile),
             has_compose: Boolean(project.has_compose),
+            compose_path: typeof project.compose_path === "string" ? project.compose_path : null,
             services: [],
             ports: [],
             healthcheck: null,
@@ -808,6 +833,7 @@ export default function DeployPackagesPanel({
     if (!selectedVersion || !selectedMachineId) return;
     setEnvironmentSaving(true);
     setError("");
+    setEnvironmentSaveResult(null);
     const variables =
       activeDeployEnvironment?.variables.map((variable) => ({
         key: variable.key,
@@ -824,6 +850,12 @@ export default function DeployPackagesPanel({
         Object.fromEntries(
           deployEnvironmentValues(result.value).map((item) => [item.key, item.value]),
         ),
+      );
+      const pending = deployPendingEnvironmentKeys(result.value);
+      setEnvironmentSaveResult(
+        pending.length
+          ? `Ambiente salvo; ${pending.length} obrigatória${pending.length === 1 ? "" : "s"} continuam vazia${pending.length === 1 ? "" : "s"}.`
+          : "Ambiente salvo; obrigatórias preenchidas.",
       );
     } else {
       setError(deployErrorMessage(result.error));
@@ -1823,7 +1855,12 @@ export default function DeployPackagesPanel({
                   </span>
                   <span>
                     <small>Plano</small>
-                    <strong>{deployStrategyLabel(selectedDeployStrategy)}</strong>
+                    <strong title={deployComposeSummary(selectedVersion)}>
+                      {deployStrategyLabel(selectedDeployStrategy)}
+                    </strong>
+                    <small title={deployComposeSummary(selectedVersion)}>
+                      {deployComposeSummary(selectedVersion)}
+                    </small>
                   </span>
                   <span>
                     <small>Análise</small>
@@ -1868,6 +1905,13 @@ export default function DeployPackagesPanel({
                 </summary>
                 {activeDeployEnvironment?.variables.length ? (
                   <div className="deploy-env-grid">
+                    <p className="deploy-env-helper">
+                      O texto cinza é exemplo. Digite o valor real ou use o exemplo quando ele for
+                      suficiente para este deploy.
+                    </p>
+                    {environmentSaveResult ? (
+                      <p className="deploy-env-save-result">{environmentSaveResult}</p>
+                    ) : null}
                     {environmentGroups.required.length ? (
                       <section className="deploy-env-section">
                         <h4>Obrigatórias</h4>
@@ -1883,19 +1927,37 @@ export default function DeployPackagesPanel({
                                 <small>obrigatória</small>
                                 {pending ? <b>pendente</b> : null}
                               </span>
-                              <input
-                                aria-invalid={pending}
-                                aria-label={`Valor de ${variable.key}`}
-                                type={variable.secret ? "password" : "text"}
-                                value={environmentDraft[variable.key] ?? ""}
-                                placeholder={variable.placeholder}
-                                onChange={(event) =>
-                                  setEnvironmentDraft((current) => ({
-                                    ...current,
-                                    [variable.key]: event.target.value,
-                                  }))
-                                }
-                              />
+                              <div className="deploy-env-input-row">
+                                <input
+                                  aria-invalid={pending}
+                                  aria-label={`Valor de ${variable.key}`}
+                                  type={variable.secret ? "password" : "text"}
+                                  value={environmentDraft[variable.key] ?? ""}
+                                  placeholder={variable.placeholder}
+                                  onChange={(event) => {
+                                    setEnvironmentSaveResult(null);
+                                    setEnvironmentDraft((current) => ({
+                                      ...current,
+                                      [variable.key]: event.target.value,
+                                    }));
+                                  }}
+                                />
+                                {variable.placeholder ? (
+                                  <button
+                                    className="secondary-button deploy-env-example-button"
+                                    type="button"
+                                    onClick={() => {
+                                      setEnvironmentSaveResult(null);
+                                      setEnvironmentDraft((current) => ({
+                                        ...current,
+                                        [variable.key]: variable.placeholder,
+                                      }));
+                                    }}
+                                  >
+                                    Usar exemplo
+                                  </button>
+                                ) : null}
+                              </div>
                             </label>
                           );
                         })}
@@ -1915,12 +1977,13 @@ export default function DeployPackagesPanel({
                               type={variable.secret ? "password" : "text"}
                               value={environmentDraft[variable.key] ?? ""}
                               placeholder={variable.placeholder}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                setEnvironmentSaveResult(null);
                                 setEnvironmentDraft((current) => ({
                                   ...current,
                                   [variable.key]: event.target.value,
-                                }))
-                              }
+                                }));
+                              }}
                             />
                           </label>
                         ))}
