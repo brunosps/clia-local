@@ -385,7 +385,7 @@ export function deployEnvironmentSummary(environment: DeployEnvironment | null) 
   if (!environment) return "Ambiente não carregado";
   if (!environment.variables.length) return "Sem variáveis obrigatórias";
   if (environment.ready) {
-    return `${environment.saved_count}/${environment.required_count} variáveis salvas`;
+    return `${environment.saved_count}/${environment.required_count} variáveis preenchidas`;
   }
   return (
     formatDeployPendingEnvironmentLabel(deployPendingEnvironmentKeys(environment)) ??

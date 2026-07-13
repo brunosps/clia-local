@@ -266,6 +266,8 @@ export type WorkspaceDeployReset = {
 export type DeployEnvironmentVariable = {
   key: string;
   value: string;
+  default_value: string;
+  default_source?: string | null;
   placeholder: string;
   required: boolean;
   secret: boolean;

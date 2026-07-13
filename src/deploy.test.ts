@@ -101,6 +101,8 @@ const readyEnvironment: DeployEnvironment = {
     {
       key: "DATABASE_URL",
       value: "postgres://local",
+      default_value: "",
+      default_source: null,
       placeholder: "postgres://user:password@postgres:5432/app",
       required: true,
       secret: true,
@@ -334,6 +336,8 @@ describe("deploy helpers", () => {
         {
           key: "SMTP_URL",
           value: "",
+          default_value: "",
+          default_source: null,
           placeholder: "smtp://local",
           required: true,
           secret: true,
@@ -342,6 +346,8 @@ describe("deploy helpers", () => {
         {
           key: "API_KEY",
           value: "",
+          default_value: "",
+          default_source: null,
           placeholder: "",
           required: true,
           secret: true,
@@ -350,6 +356,8 @@ describe("deploy helpers", () => {
         {
           key: "REDIS_URL",
           value: "",
+          default_value: "",
+          default_source: null,
           placeholder: "redis://localhost:6379",
           required: true,
           secret: false,
@@ -358,6 +366,8 @@ describe("deploy helpers", () => {
         {
           key: "SENTRY_DSN",
           value: "",
+          default_value: "",
+          default_source: null,
           placeholder: "",
           required: true,
           secret: true,
@@ -366,6 +376,8 @@ describe("deploy helpers", () => {
         {
           key: "LOG_LEVEL",
           value: "",
+          default_value: "",
+          default_source: null,
           placeholder: "info",
           required: false,
           secret: false,

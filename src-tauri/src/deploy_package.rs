@@ -4,12 +4,14 @@ use crate::deploy_repair;
 use crate::deploy_scan;
 use crate::store;
 use anyhow::Context;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 pub const DEPLOY_RUNBOOK_VERSION: &str = "2026-06-02.1";
 
@@ -258,11 +260,13 @@ pub fn create_package(
             &packaged_projects,
         )?;
     }
+    let project_env_defaults = collect_project_env_defaults(&packaged_projects);
     write_env_example(
         &artifact_root.join(".env.example"),
         &detection.services,
         &plan_bundle.plan,
         plan_has_compose_artifact(&plan_bundle.plan) || compose_mode.uses_source_passthrough(),
+        &project_env_defaults,
     )?;
     std::fs::write(artifact_root.join(".dw-deploy-strategy"), &package_strategy)?;
     write_scripts(
@@ -1552,6 +1556,106 @@ fn source_passthrough_compose_path(project: &PackagedProject) -> Option<String> 
     ))
 }
 
+fn collect_project_env_defaults(projects: &[PackagedProject]) -> BTreeMap<String, String> {
+    let mut defaults = BTreeMap::new();
+    for project in projects {
+        for (key, value) in read_project_env_example_defaults(Path::new(&project.project.path)) {
+            defaults.entry(key).or_insert(value);
+        }
+    }
+    for project in projects {
+        for (key, value) in read_project_compose_env_defaults(project) {
+            defaults.insert(key, value);
+        }
+    }
+    defaults
+}
+
+fn read_project_compose_env_defaults(project: &PackagedProject) -> BTreeMap<String, String> {
+    let mut defaults = BTreeMap::new();
+    let Some(compose_path) = safe_project_relative_path(project.detection.compose_path.as_deref())
+    else {
+        return defaults;
+    };
+    let path = Path::new(&project.project.path).join(compose_path);
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return defaults;
+    };
+    static COMPOSE_DEFAULT_RE: OnceLock<Regex> = OnceLock::new();
+    let re = COMPOSE_DEFAULT_RE.get_or_init(|| {
+        Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}\r\n]*)\}")
+            .expect("valid compose default regex")
+    });
+    for capture in re.captures_iter(&content) {
+        let Some(key) = capture.get(1).map(|item| item.as_str()) else {
+            continue;
+        };
+        let value = capture
+            .get(2)
+            .map(|item| item.as_str())
+            .unwrap_or_default()
+            .trim();
+        if is_valid_env_key(key) && !value.is_empty() {
+            defaults.insert(key.to_string(), value.to_string());
+        }
+    }
+    defaults
+}
+
+fn read_project_env_example_defaults(project_root: &Path) -> BTreeMap<String, String> {
+    let path = project_root.join(".env.example");
+    let mut defaults = BTreeMap::new();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return defaults;
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let declaration = if let Some(commented) = trimmed.strip_prefix('#') {
+            if commented
+                .chars()
+                .next()
+                .is_none_or(|ch| ch.is_ascii_whitespace())
+            {
+                continue;
+            }
+            commented
+        } else {
+            trimmed
+        };
+        let Some((key, value)) = declaration.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = unquote_env_value(value.trim());
+        if is_valid_env_key(key) && !value.trim().is_empty() {
+            defaults.insert(key.to_string(), value.to_string());
+        }
+    }
+    defaults
+}
+
+fn safe_project_relative_path(value: Option<&str>) -> Option<PathBuf> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let path = Path::new(value);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
 fn write_generated_dockerfile(
     path: &Path,
     detection: &DeployProjectDetection,
@@ -1639,12 +1743,13 @@ fn write_env_example(
     services: &[deploy_detect::DeployServiceSuggestion],
     plan: &serde_json::Value,
     detector_keys_optional: bool,
+    defaults: &BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
-    let mut content =
-        String::from("# Generated placeholder values. Do not paste real secrets here.\n");
+    let mut content = String::from(
+        "# Generated environment defaults from project files. Do not paste real secrets here.\n",
+    );
     let mut required = BTreeSet::<String>::new();
     let mut optional = BTreeSet::<String>::new();
-    let mut placeholders = BTreeMap::<String, String>::new();
 
     for key in plan_env_keys(plan, "required") {
         optional.remove(&key);
@@ -1664,10 +1769,6 @@ fn write_env_example(
                     "DATABASE_URL",
                     detector_keys_optional,
                 );
-                placeholders.insert(
-                    "DATABASE_URL".to_string(),
-                    "postgres://user:password@postgres:5432/app".to_string(),
-                );
             }
             "redis" => {
                 insert_detected_env_key(
@@ -1676,7 +1777,6 @@ fn write_env_example(
                     "REDIS_URL",
                     detector_keys_optional,
                 );
-                placeholders.insert("REDIS_URL".to_string(), "redis://redis:6379".to_string());
             }
             "smtp" => {
                 insert_detected_env_key(
@@ -1685,27 +1785,46 @@ fn write_env_example(
                     "SMTP_URL",
                     detector_keys_optional,
                 );
-                placeholders.insert("SMTP_URL".to_string(), "smtp://mailhog:1025".to_string());
             }
             _ => {}
+        }
+    }
+    for key in defaults.keys() {
+        if !required.contains(key) {
+            optional.insert(key.clone());
         }
     }
     optional.retain(|key| !required.contains(key));
     for key in required {
         content.push_str(&key);
         content.push('=');
-        if let Some(placeholder) = placeholders.get(&key) {
-            content.push_str(placeholder);
+        if let Some(value) = defaults.get(&key) {
+            content.push_str(value);
         }
         content.push('\n');
     }
     for key in optional {
         content.push('#');
         content.push_str(&key);
-        content.push_str("=\n");
+        content.push('=');
+        if let Some(value) = defaults.get(&key) {
+            content.push_str(value);
+        }
+        content.push('\n');
     }
     std::fs::write(path, content)?;
     Ok(())
+}
+
+fn unquote_env_value(value: &str) -> &str {
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
 }
 
 fn insert_detected_env_key(
@@ -3781,12 +3900,16 @@ mod tests {
             ],
             &plan,
             false,
+            &BTreeMap::from([(
+                "DATABASE_URL".to_string(),
+                "postgres://user:password@postgres:5432/app".to_string(),
+            )]),
         )
         .expect("env example");
         let content = std::fs::read_to_string(root.join(".env.example")).expect("read env");
         assert!(content.contains("\nAPP_SECRET=\n"));
         assert!(content.contains("\nDATABASE_URL=postgres://user:password@postgres:5432/app\n"));
-        assert!(content.contains("\nREDIS_URL=redis://redis:6379\n"));
+        assert!(content.contains("\nREDIS_URL=\n"));
         assert!(content.contains("\n#RUST_LOG=\n"));
         assert_eq!(content.matches("APP_SECRET=").count(), 1);
         assert_eq!(content.matches("DATABASE_URL=").count(), 1);
@@ -3824,6 +3947,7 @@ mod tests {
             ],
             &plan,
             true,
+            &BTreeMap::new(),
         )
         .expect("env example");
         let content = std::fs::read_to_string(root.join(".env.example")).expect("read env");
@@ -3833,6 +3957,98 @@ mod tests {
         assert!(content.contains("\n#RUST_LOG=\n"));
         assert!(!content.contains("\nDATABASE_URL=postgres://"));
         assert!(!content.contains("\nSMTP_URL=smtp://"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn env_example_prefills_project_defaults_before_empty_values() {
+        let root = temp_root("env-example-defaults");
+        let plan = serde_json::json!({
+            "env": {
+                "required": ["POSTGRES_PASSWORD", "SMTP_HOST", "API_KEY"],
+                "optional": ["LOG_LEVEL"]
+            }
+        });
+        write_env_example(
+            &root.join(".env.example"),
+            &[],
+            &plan,
+            false,
+            &BTreeMap::from([
+                ("LOG_LEVEL".to_string(), "debug".to_string()),
+                ("POSTGRES_PASSWORD".to_string(), "rwfw".to_string()),
+                ("SMTP_HOST".to_string(), "mailhog".to_string()),
+            ]),
+        )
+        .expect("env example");
+
+        let content = std::fs::read_to_string(root.join(".env.example")).expect("read env");
+        assert!(content.contains("\nPOSTGRES_PASSWORD=rwfw\n"));
+        assert!(content.contains("\nSMTP_HOST=mailhog\n"));
+        assert!(content.contains("\nAPI_KEY=\n"));
+        assert!(content.contains("\n#LOG_LEVEL=debug\n"));
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn project_env_defaults_prefer_compose_interpolation_over_env_example() {
+        let root = temp_root("project-defaults");
+        std::fs::write(
+            root.join("docker-compose.yml"),
+            "services:\n  db:\n    image: postgres\n    environment:\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rwfw}\n      SMTP_HOST: ${SMTP_HOST:-mailhog}\n",
+        )
+        .expect("compose");
+        std::fs::write(
+            root.join(".env.example"),
+            "POSTGRES_PASSWORD=from-example\nAPI_KEY=public-test-key\n",
+        )
+        .expect("env example");
+        let project = PackagedProject {
+            project: store::Project {
+                id: 1,
+                workspace_id: 1,
+                name: "lettrebox".to_string(),
+                path: root.display().to_string(),
+                remote_url: None,
+                parent_project_id: None,
+                is_submodule: false,
+                submodule_path: None,
+                created_at: "now".to_string(),
+            },
+            detection: DeployProjectDetection {
+                project_id: 1,
+                name: "lettrebox".to_string(),
+                path: root.display().to_string(),
+                language: "typescript".to_string(),
+                framework: None,
+                package_manager: Some("pnpm".to_string()),
+                has_dockerfile: false,
+                has_compose: true,
+                compose_path: Some("docker-compose.yml".to_string()),
+                services: vec![],
+                ports: vec![],
+                healthcheck: None,
+                deploy_strategy: "custom_compose".to_string(),
+                strategy_reason: "custom compose".to_string(),
+                runtime_commands: vec![],
+                requires_desktop_session: false,
+                warnings: vec![],
+            },
+            branch: None,
+            commit_sha: None,
+            dirty: false,
+            git_status_short: String::new(),
+            package_path: "projects/lettrebox/source".to_string(),
+            dockerfile_path: "projects/lettrebox/Dockerfile".to_string(),
+        };
+
+        let defaults = collect_project_env_defaults(&[project]);
+        assert_eq!(defaults.get("POSTGRES_PASSWORD"), Some(&"rwfw".to_string()));
+        assert_eq!(defaults.get("SMTP_HOST"), Some(&"mailhog".to_string()));
+        assert_eq!(
+            defaults.get("API_KEY"),
+            Some(&"public-test-key".to_string())
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

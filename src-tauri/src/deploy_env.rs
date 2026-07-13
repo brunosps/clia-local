@@ -40,6 +40,8 @@ pub struct DeployEnvironment {
 pub struct DeployEnvironmentVariable {
     pub key: String,
     pub value: String,
+    pub default_value: String,
+    pub default_source: Option<String>,
     pub placeholder: String,
     pub required: bool,
     pub secret: bool,
@@ -50,6 +52,8 @@ pub struct DeployEnvironmentVariable {
 struct EnvTemplateVariable {
     key: String,
     placeholder: String,
+    default_value: String,
+    default_source: Option<String>,
     required: bool,
     secret: bool,
 }
@@ -121,7 +125,7 @@ pub fn write_runtime_env(
     let env = require_environment_ready(db, version, stack, machine_id)?;
     let mut values = BTreeMap::new();
     for variable in &env.variables {
-        if variable.saved {
+        if !variable.value.trim().is_empty() {
             values.insert(variable.key.clone(), variable.value.clone());
         }
     }
@@ -143,23 +147,33 @@ fn build_environment(
     let saved = read_env_values(&env_path)?;
     let mut variables = Vec::new();
     for template in templates {
-        let value = saved.get(&template.key).cloned().unwrap_or_default();
-        let saved_value = !value.trim().is_empty();
+        let saved_value = saved.get(&template.key).cloned().unwrap_or_default();
+        let saved_filled = !saved_value.trim().is_empty();
+        let value = if saved_value.trim().is_empty() {
+            template.default_value.clone()
+        } else {
+            saved_value.clone()
+        };
         variables.push(DeployEnvironmentVariable {
             key: template.key,
             value,
+            default_value: template.default_value,
+            default_source: template.default_source,
             placeholder: template.placeholder,
             required: template.required,
             secret: template.secret,
-            saved: saved_value,
+            saved: saved_filled,
         });
     }
     let missing_keys = variables
         .iter()
-        .filter(|variable| variable.required && !variable.saved)
+        .filter(|variable| variable.required && variable.value.trim().is_empty())
         .map(|variable| variable.key.clone())
         .collect::<Vec<_>>();
-    let saved_count = variables.iter().filter(|variable| variable.saved).count();
+    let saved_count = variables
+        .iter()
+        .filter(|variable| variable.required && !variable.value.trim().is_empty())
+        .count();
     let required_count = variables
         .iter()
         .filter(|variable| variable.required)
@@ -295,12 +309,19 @@ fn read_env_template_variables(path: &Path) -> anyhow::Result<Vec<EnvTemplateVar
         if !is_valid_env_key(key) {
             continue;
         }
-        let placeholder = unquote_env_value(value.trim()).to_string();
+        let template_value = unquote_env_value(value.trim()).to_string();
+        let default_source = if template_value.trim().is_empty() {
+            None
+        } else {
+            Some("project".to_string())
+        };
         variables.push(EnvTemplateVariable {
             required,
-            secret: is_sensitive_env_key_or_value(key, &placeholder),
+            secret: is_sensitive_env_key_or_value(key, &template_value),
             key: key.to_string(),
-            placeholder,
+            placeholder: String::new(),
+            default_value: template_value,
+            default_source,
         });
     }
     Ok(variables)
@@ -486,6 +507,93 @@ mod tests {
             },
         )
         .is_err());
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn template_defaults_make_required_environment_ready_without_save() {
+        let root = temp_root("default-env");
+        let db = store::Database::open(&root).expect("open db");
+        let workspace_root = root.join("workspace");
+        let workspace = db
+            .create_workspace("Workspace", &workspace_root.display().to_string())
+            .expect("workspace");
+        let stack = db
+            .create_deploy_stack(store::DeployStackCreate {
+                workspace_id: workspace.id,
+                name: "Stack",
+                slug: "stack",
+            })
+            .expect("stack");
+        let artifact = root.join("artifact");
+        std::fs::create_dir_all(&artifact).expect("artifact");
+        std::fs::write(
+            artifact.join(".env.example"),
+            "POSTGRES_PASSWORD=rwfw\nDATABASE_URL=\n#LOG_LEVEL=debug\n",
+        )
+        .expect("env example");
+        let version = db
+            .create_deploy_version(store::DeployVersionCreate {
+                stack_id: &stack.id,
+                workspace_id: workspace.id,
+                label: "deploy-001",
+                target_machine_id: None,
+                artifact_path: &artifact.display().to_string(),
+                manifest_path: &artifact.join("manifest.json").display().to_string(),
+                manifest_json: "{}",
+                blocking_findings_json: "[]",
+            })
+            .expect("version");
+
+        let env = build_environment(&db, &version, &stack, "vm-1").expect("environment");
+        assert!(!env.ready);
+        assert_eq!(env.missing_keys, vec!["DATABASE_URL"]);
+        assert_eq!(
+            env.variables
+                .iter()
+                .find(|variable| variable.key == "POSTGRES_PASSWORD")
+                .map(|variable| (
+                    variable.value.as_str(),
+                    variable.saved,
+                    variable.default_source.as_deref()
+                )),
+            Some(("rwfw", false, Some("project")))
+        );
+
+        save_environment(
+            &db,
+            SaveDeployEnvironmentInput {
+                version_id: version.id.clone(),
+                machine_id: "vm-1".to_string(),
+                variables: vec![
+                    DeployEnvironmentValueInput {
+                        key: "POSTGRES_PASSWORD".to_string(),
+                        value: "owner-value".to_string(),
+                    },
+                    DeployEnvironmentValueInput {
+                        key: "DATABASE_URL".to_string(),
+                        value: "postgres://local".to_string(),
+                    },
+                ],
+            },
+        )
+        .expect("save overrides");
+        let ready = require_environment_ready(&db, &version, &stack, "vm-1").expect("ready");
+        assert!(ready.ready);
+        assert_eq!(
+            ready
+                .variables
+                .iter()
+                .find(|variable| variable.key == "POSTGRES_PASSWORD")
+                .map(|variable| (variable.value.as_str(), variable.saved)),
+            Some(("owner-value", true))
+        );
+
+        let package = root.join("runtime");
+        write_runtime_env(&db, &version, &stack, "vm-1", &package).expect("runtime env");
+        let runtime_env = std::fs::read_to_string(package.join(".env")).expect("read runtime env");
+        assert!(runtime_env.contains("POSTGRES_PASSWORD=owner-value\n"));
+        assert!(runtime_env.contains("LOG_LEVEL=debug\n"));
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
