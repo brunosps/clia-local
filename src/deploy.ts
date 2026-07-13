@@ -25,6 +25,16 @@ export type DeployPackageFinding = {
   hint?: string;
   severity: string;
   blocking: boolean;
+  dismissed?: DeployFindingDismissal;
+};
+
+export type DeployFindingDismissal = {
+  path: string;
+  reason: string;
+  justification: string;
+  dismissed_at: string;
+  inherited_from_version_id?: string | null;
+  inherited_from_label?: string | null;
 };
 
 export type DeployReadiness = {
@@ -192,10 +202,15 @@ export function deployStepLabel(stepKey: string) {
 
 export function parseDeployFindings(version: DeployVersion | null): DeployPackageFinding[] {
   if (!version?.blocking_findings_json) return [];
+  const dismissed = parseDismissedReviewFindings(version);
   try {
     const parsed = JSON.parse(version.blocking_findings_json);
     if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeDeployFinding);
+    return parsed.map((finding) => {
+      const normalized = normalizeDeployFinding(finding);
+      const dismissal = dismissed.find((item) => reviewFindingKeyMatches(item, normalized));
+      return dismissal ? { ...normalized, dismissed: dismissal } : normalized;
+    });
   } catch {
     return [
       {
@@ -208,8 +223,21 @@ export function parseDeployFindings(version: DeployVersion | null): DeployPackag
   }
 }
 
+export function parseDismissedReviewFindings(
+  version: DeployVersion | null,
+): DeployFindingDismissal[] {
+  if (!version?.dismissed_findings_json) return [];
+  try {
+    const parsed = JSON.parse(version.dismissed_findings_json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap(normalizeDeployFindingDismissal);
+  } catch {
+    return [];
+  }
+}
+
 export function parseBlockingFindings(version: DeployVersion | null): DeployPackageFinding[] {
-  return parseDeployFindings(version).filter((finding) => finding.blocking);
+  return parseDeployFindings(version).filter((finding) => finding.blocking && !finding.dismissed);
 }
 
 export function canApproveVersion(version: DeployVersion | null) {
@@ -606,4 +634,36 @@ function normalizeDeployFinding(value: unknown): DeployPackageFinding {
     severity,
     blocking,
   };
+}
+
+function normalizeDeployFindingDismissal(value: unknown): DeployFindingDismissal[] {
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  const path = typeof record.path === "string" ? record.path.trim() : "";
+  const reason = typeof record.reason === "string" ? record.reason.trim() : "";
+  const justification =
+    typeof record.justification === "string" ? record.justification.trim() : "";
+  const dismissedAt = typeof record.dismissed_at === "string" ? record.dismissed_at.trim() : "";
+  if (!path || !reason || !justification || !dismissedAt) return [];
+  return [
+    {
+      path,
+      reason,
+      justification,
+      dismissed_at: dismissedAt,
+      inherited_from_version_id:
+        typeof record.inherited_from_version_id === "string"
+          ? record.inherited_from_version_id
+          : null,
+      inherited_from_label:
+        typeof record.inherited_from_label === "string" ? record.inherited_from_label : null,
+    },
+  ];
+}
+
+function reviewFindingKeyMatches(
+  dismissal: DeployFindingDismissal,
+  finding: DeployPackageFinding,
+) {
+  return dismissal.path === finding.path && dismissal.reason === finding.reason;
 }

@@ -19,6 +19,7 @@ import {
   latestDeployRunForContext,
   latestVersion,
   parseBlockingFindings,
+  parseDismissedReviewFindings,
   parseDeployFindings,
   partitionDeployEnvironmentVariables,
   progressForDeploy,
@@ -58,6 +59,7 @@ const baseVersion: DeployVersion = {
   review_status: "pending",
   reviewed_at: null,
   blocking_findings_json: "[]",
+  dismissed_findings_json: "[]",
   created_at: "2026-05-29T00:00:00Z",
   updated_at: "2026-05-29T00:00:00Z",
 };
@@ -209,6 +211,36 @@ describe("deploy helpers", () => {
         { ...baseMachine, preset_id: "xubuntu_lts", image_family: "linux_distro" },
       ),
     ).toBe(false);
+  });
+
+  it("excludes owner-accepted review findings from blocking counts", () => {
+    const version = {
+      ...baseVersion,
+      blocking_findings_json: JSON.stringify([
+        {
+          path: "projects/app/source/src/lib.rs",
+          reason: "secret-like content marker `bearer `",
+          severity: "error",
+          blocking: true,
+        },
+      ]),
+      dismissed_findings_json: JSON.stringify([
+        {
+          path: "projects/app/source/src/lib.rs",
+          reason: "secret-like content marker `bearer `",
+          justification: "owner accepted fake test token",
+          dismissed_at: "2026-07-13T12:00:00Z",
+          inherited_from_label: "deploy-001",
+        },
+      ]),
+    };
+
+    expect(parseDismissedReviewFindings(version)).toHaveLength(1);
+    expect(parseDeployFindings(version)[0].dismissed?.justification).toBe(
+      "owner accepted fake test token",
+    );
+    expect(parseBlockingFindings(version)).toHaveLength(0);
+    expect(canApproveVersion(version)).toBe(true);
   });
 
   it("derives guided deploy readiness from package, environment, approval, and target", () => {

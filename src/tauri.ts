@@ -229,6 +229,21 @@ export const api = {
       input: { version_id: versionId },
     });
   },
+  dismissReviewFinding(
+    versionId: string,
+    path: string,
+    reason: string,
+    justification: string,
+  ) {
+    return invokeSafe<DeployVersion>("dismiss_review_finding", {
+      input: { version_id: versionId, path, reason, justification },
+    });
+  },
+  restoreReviewFinding(versionId: string, path: string, reason: string) {
+    return invokeSafe<DeployVersion>("restore_review_finding", {
+      input: { version_id: versionId, path, reason },
+    });
+  },
   createDeployRepairVersion(runId: string) {
     return invokeSafe<DeployVersion>("create_deploy_repair_version", {
       input: { run_id: runId },

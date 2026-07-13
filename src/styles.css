@@ -10766,9 +10766,14 @@ h2 {
 
 .deploy-review-details li {
   display: grid;
-  grid-template-columns: 84px minmax(0, 1fr);
+  grid-template-columns: 120px minmax(0, 1fr) auto;
   gap: 4px 10px;
   align-items: center;
+}
+
+.deploy-review-details li.accepted {
+  border-left: 2px solid #c49a3a;
+  padding-left: 8px;
 }
 
 .deploy-review-details code {
@@ -10782,6 +10787,12 @@ h2 {
 .deploy-review-details small {
   grid-column: 2;
   color: #aebbd0;
+}
+
+.deploy-review-details .deploy-finding-actions {
+  grid-column: 3;
+  grid-row: 1 / span 3;
+  align-self: start;
 }
 
 .deploy-finding-severity {
@@ -10800,6 +10811,40 @@ h2 {
 .deploy-finding-severity.blocked {
   background: #43202a;
   color: #ffb8c2;
+}
+
+.deploy-finding-severity.accepted {
+  background: #3a3218;
+  color: #f5d27a;
+}
+
+.deploy-review-details .deploy-finding-dismissal {
+  color: #f5d27a;
+}
+
+.deploy-finding-dismiss-modal {
+  width: min(560px, 100%);
+}
+
+.deploy-finding-dismiss-body {
+  display: grid;
+  gap: 12px;
+}
+
+.deploy-finding-dismiss-body > small {
+  color: #aebbd0;
+}
+
+.deploy-finding-dismiss-body label {
+  display: grid;
+  gap: 6px;
+  color: #d9e2ef;
+  font-weight: 700;
+}
+
+.deploy-finding-dismiss-body textarea {
+  min-height: 108px;
+  resize: vertical;
 }
 
 .deploy-meta-grid {
@@ -11017,6 +11062,11 @@ h2 {
 
   .deploy-review-details small {
     grid-column: 1;
+  }
+
+  .deploy-review-details .deploy-finding-actions {
+    grid-column: 1;
+    grid-row: auto;
   }
 
   .deploy-section-details > summary,

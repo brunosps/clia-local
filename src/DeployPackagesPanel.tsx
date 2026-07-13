@@ -43,6 +43,7 @@ import {
   progressForDeploy,
   retryActionLabel,
   sortDeployStacks,
+  type DeployPackageFinding,
   type DeployProgressEntry,
 } from "./deploy";
 import { machineAccessUser, machineSshCommand, machineStatusLabel, sortMachines } from "./machines";
@@ -203,6 +204,9 @@ export default function DeployPackagesPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [createPackageOpen, setCreatePackageOpen] = useState(false);
+  const [pendingDismissFinding, setPendingDismissFinding] =
+    useState<DeployPackageFinding | null>(null);
+  const [dismissJustification, setDismissJustification] = useState("");
 
   const sortedStacks = useMemo(() => sortDeployStacks(stacks), [stacks]);
   const currentDetail = detail?.stack.id === selectedStackId ? detail : null;
@@ -255,6 +259,7 @@ export default function DeployPackagesPanel({
   });
   const deployFindings = parseDeployFindings(selectedVersion);
   const blockingFindings = parseBlockingFindings(selectedVersion);
+  const dismissedFindings = deployFindings.filter((finding) => finding.dismissed);
   const legacyPackage = isLegacyDeployPackage(selectedVersion);
   const defaultStackName =
     projects.length === 1
@@ -748,6 +753,49 @@ export default function DeployPackagesPanel({
     setBusy(false);
   }
 
+  function openDismissFinding(finding: DeployPackageFinding) {
+    setPendingDismissFinding(finding);
+    setDismissJustification("");
+    setError("");
+  }
+
+  async function confirmDismissFinding() {
+    if (!selectedVersion || !pendingDismissFinding) return;
+    if (dismissJustification.trim().length < 10) {
+      setError("Informe uma justificativa com pelo menos 10 caracteres.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    const result = await api.dismissReviewFinding(
+      selectedVersion.id,
+      pendingDismissFinding.path,
+      pendingDismissFinding.reason,
+      dismissJustification,
+    );
+    if (result.ok) {
+      setPendingDismissFinding(null);
+      setDismissJustification("");
+      await loadDetail(result.value.stack_id);
+    } else {
+      setError(deployErrorMessage(result.error));
+    }
+    setBusy(false);
+  }
+
+  async function restoreDismissedFinding(finding: DeployPackageFinding) {
+    if (!selectedVersion) return;
+    setBusy(true);
+    setError("");
+    const result = await api.restoreReviewFinding(selectedVersion.id, finding.path, finding.reason);
+    if (result.ok) {
+      await loadDetail(result.value.stack_id);
+    } else {
+      setError(deployErrorMessage(result.error));
+    }
+    setBusy(false);
+  }
+
   async function saveEnvironment() {
     if (!selectedVersion || !selectedMachineId) return;
     setEnvironmentSaving(true);
@@ -1218,6 +1266,61 @@ export default function DeployPackagesPanel({
         </div>
       ) : null}
 
+      {pendingDismissFinding ? (
+        <div className="modal-backdrop elevated" role="presentation">
+          <section
+            className="modal-panel deploy-finding-dismiss-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="deploy-dismiss-title"
+          >
+            <header className="modal-heading">
+              <div>
+                <h2 id="deploy-dismiss-title">Aceitar risco</h2>
+                <p>{deployFindingPathLabel(pendingDismissFinding, selectedVersion?.artifact_path)}</p>
+              </div>
+              <button
+                className="secondary-button icon-button"
+                type="button"
+                onClick={() => setPendingDismissFinding(null)}
+                aria-label="Fechar modal"
+              >
+                <X aria-hidden="true" size={16} />
+              </button>
+            </header>
+            <div className="deploy-finding-dismiss-body">
+              <small>{pendingDismissFinding.reason}</small>
+              <label>
+                <span>Justificativa do dono</span>
+                <textarea
+                  value={dismissJustification}
+                  onChange={(event) => setDismissJustification(event.target.value)}
+                  rows={4}
+                  placeholder="Explique por que este finding é um falso positivo ou risco aceito."
+                />
+              </label>
+            </div>
+            <div className="modal-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => setPendingDismissFinding(null)}
+              >
+                Cancelar
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void confirmDismissFinding()}
+                disabled={busy || dismissJustification.trim().length < 10}
+              >
+                Aceitar risco
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       <div className="deploy-main deploy-shell">
         <aside className="stacks-panel deploy-setup" aria-label="Deploys do workspace">
           <section className="deploy-stack-picker" aria-label="Stacks de deploy">
@@ -1582,22 +1685,39 @@ export default function DeployPackagesPanel({
                 >
                   <summary>
                     <span>
-                      {blockingFindings.length ? "Bloqueios do review" : "Avisos do pacote"}
+                      {blockingFindings.length
+                        ? "Bloqueios do review"
+                        : dismissedFindings.length
+                          ? "Findings aceitos"
+                          : "Avisos do pacote"}
                     </span>
-                    <strong>{deployFindings.length}</strong>
+                    <strong>
+                      {blockingFindings.length
+                        ? `${blockingFindings.length}/${deployFindings.length}`
+                        : deployFindings.length}
+                    </strong>
                     <ChevronDown aria-hidden="true" size={16} />
                   </summary>
                   <ul>
                     {deployFindings.map((finding, index) => (
-                      <li key={`${finding.path}-${finding.reason}-${index}`}>
+                      <li
+                        key={`${finding.path}-${finding.reason}-${index}`}
+                        className={finding.dismissed ? "accepted" : undefined}
+                      >
                         <span
                           className={
-                            finding.blocking
+                            finding.dismissed
+                              ? "deploy-finding-severity accepted"
+                              : finding.blocking
                               ? "deploy-finding-severity blocked"
                               : "deploy-finding-severity warning"
                           }
                         >
-                          {finding.blocking ? "Bloqueio" : "Aviso"}
+                          {finding.dismissed
+                            ? "Aceito pelo dono"
+                            : finding.blocking
+                              ? "Bloqueio"
+                              : "Aviso"}
                         </span>
                         <code title={finding.path}>
                           {deployFindingPathLabel(finding, selectedVersion.artifact_path)}
@@ -1605,6 +1725,37 @@ export default function DeployPackagesPanel({
                         <small>{finding.reason}</small>
                         {finding.hint ? (
                           <small className="deploy-finding-hint">{finding.hint}</small>
+                        ) : null}
+                        {finding.dismissed ? (
+                          <small className="deploy-finding-dismissal">
+                            {finding.dismissed.inherited_from_label
+                              ? `Herdado de ${finding.dismissed.inherited_from_label}: `
+                              : ""}
+                            {finding.dismissed.justification}
+                          </small>
+                        ) : null}
+                        {finding.blocking ? (
+                          <div className="deploy-finding-actions">
+                            {finding.dismissed ? (
+                              <button
+                                className="text-button"
+                                type="button"
+                                onClick={() => void restoreDismissedFinding(finding)}
+                                disabled={busy}
+                              >
+                                Reverter
+                              </button>
+                            ) : (
+                              <button
+                                className="text-button"
+                                type="button"
+                                onClick={() => openDismissFinding(finding)}
+                                disabled={busy}
+                              >
+                                Aceitar risco
+                              </button>
+                            )}
+                          </div>
                         ) : null}
                       </li>
                     ))}
