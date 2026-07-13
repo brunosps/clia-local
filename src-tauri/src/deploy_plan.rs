@@ -1005,12 +1005,14 @@ fn secret_assignment_is_placeholder(tail: &str) -> bool {
         .map(|(token, _)| token)
         .unwrap_or(line)
         .trim()
-        .trim_matches(',')
-        .trim_matches('"')
-        .trim_matches('\'');
+        .trim_matches(',');
     if token.is_empty() {
         return true;
     }
+    let token = token
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(token);
     let lower = token.to_ascii_lowercase();
     lower == "xxx"
         || lower == "changeme"
@@ -1030,13 +1032,16 @@ fn has_root_target_command(lower: &str, marker: &str) -> bool {
         let Some(next) = lower[after..].chars().next() else {
             return true;
         };
-        if next == '*' || next.is_ascii_whitespace() || matches!(next, '"' | '\'' | ';' | '&' | '|')
-        {
+        if !is_path_component_start(next) {
             return true;
         }
         offset = after;
     }
     false
+}
+
+fn is_path_component_start(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '~' | '-')
 }
 
 fn redact_text(text: &str) -> String {
@@ -1265,11 +1270,18 @@ mod tests {
         ));
         assert!(!contains_dangerous_command("rm -rf /tmp/build"));
         assert!(contains_dangerous_command("rm -rf /"));
+        assert!(contains_dangerous_command("rm -rf //"));
         assert!(contains_dangerous_command("rm -rf /*"));
         assert!(contains_dangerous_command("rm -rf / "));
+        assert!(contains_dangerous_command("$(rm -rf /)"));
+        assert!(contains_dangerous_command("`rm -rf /`"));
+        assert!(contains_dangerous_command("rm -rf />/dev/null"));
+        assert!(contains_dangerous_command("rm -rf /<x"));
         assert!(!contains_dangerous_command("chmod -R 777 /var/cache/app"));
         assert!(contains_dangerous_command("chmod -R 777 /"));
+        assert!(contains_dangerous_command("chmod -R 777 //"));
         assert!(contains_dangerous_command("chmod -r 777 /*"));
+        assert!(contains_dangerous_command("$(chmod -R 777 /)"));
         assert!(contains_dangerous_command("mkfs.ext4 /dev/sda"));
         assert!(contains_dangerous_command("dd if=/dev/zero of=/dev/sda"));
         assert!(contains_dangerous_command("cat /etc/shadow"));
@@ -1282,6 +1294,7 @@ mod tests {
             "password=   \n",
             "secret=${APP_SECRET}",
             "api_key=$API_KEY",
+            "password=\"$PASSWORD\"",
             "apikey=<placeholder>",
             "password=xxx",
             "secret=ChangeMe",
@@ -1290,6 +1303,7 @@ mod tests {
         }
         for content in [
             "password=hunter2",
+            "password='$ecret123'",
             "secret=real-value",
             "api_key=sk-live",
             "apikey=abc123",
@@ -1361,15 +1375,9 @@ CMD ["/usr/local/bin/lettrebox"]
     }
 
     #[test]
-    fn real_owner_lettrebox_deploy_plan_fixture_validates_when_available() {
-        let path = Path::new(
-            "/home/bruno/wks/letrebox/.dw/deploy-plans/plan-1783900982742714445/analysis/deploy-plan.json",
-        );
-        if !path.exists() {
-            return;
-        }
-        let plan = std::fs::read_to_string(path).expect("read owner deploy plan");
-        let plan = serde_json::from_str::<Value>(&plan).expect("parse owner deploy plan");
+    fn real_owner_lettrebox_deploy_plan_fixture_validates() {
+        let plan = include_str!("../tests/fixtures/lettrebox-deploy-plan.json");
+        let plan = serde_json::from_str::<Value>(plan).expect("parse owner deploy plan");
         let report = validate_plan(&plan, &web_detection("/home/bruno/wks/letrebox"), None);
         assert_eq!(report.get("status").and_then(Value::as_str), Some("passed"));
         assert!(!validation_blocks_package(&report));

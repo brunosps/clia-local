@@ -277,7 +277,14 @@ fn read_env_template_variables(path: &Path) -> anyhow::Result<Vec<EnvTemplateVar
             continue;
         }
         let (required, declaration) = if let Some(commented) = trimmed.strip_prefix('#') {
-            (false, commented.trim_start())
+            if commented
+                .chars()
+                .next()
+                .is_none_or(|ch| ch.is_ascii_whitespace())
+            {
+                continue;
+            }
+            (false, commented)
         } else {
             (true, trimmed)
         };
@@ -376,6 +383,24 @@ mod tests {
         assert!(!variables[1].secret);
         assert!(variables[0].required);
         assert!(!variables[1].required);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn env_template_ignores_spaced_comments_as_optional_keys() {
+        let root = temp_root("env-template-comments");
+        let path = root.join(".env.example");
+        std::fs::write(&path, "# NOTE=set later\n#OPTIONAL_KEY=\nREQUIRED_KEY=\n")
+            .expect("env example");
+
+        let variables = read_env_template_variables(&path).expect("template");
+        assert_eq!(
+            variables
+                .iter()
+                .map(|variable| (variable.key.as_str(), variable.required))
+                .collect::<Vec<_>>(),
+            vec![("OPTIONAL_KEY", false), ("REQUIRED_KEY", true)]
+        );
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 

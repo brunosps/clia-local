@@ -1,0 +1,138 @@
+{
+  "artifacts": {
+    "compose": {
+      "body": "services:\n  app:\n    build:\n      context: ./projects/lettrebox\n      dockerfile: Dockerfile\n    image: lettrebox:deploy\n    depends_on:\n      postgres:\n        condition: service_healthy\n    environment:\n      RUST_LOG: ${RUST_LOG:-info}\n      RWFW__DATABASE__URL: ${RWFW__DATABASE__URL:-postgres://rwfw:${POSTGRES_PASSWORD}@postgres:5432/lettrebox}\n      RWFW__APP__BASE_URL: ${RWFW__APP__BASE_URL:-http://localhost:5000}\n      RWFW__MAIL__SMTP_HOST: ${RWFW__MAIL__SMTP_HOST}\n      RWFW__MAIL__SMTP_PORT: ${RWFW__MAIL__SMTP_PORT:-587}\n      RWFW__MAIL__SMTP_USERNAME: ${RWFW__MAIL__SMTP_USERNAME}\n      RWFW__MAIL__SMTP_PASSWORD: ${RWFW__MAIL__SMTP_PASSWORD}\n      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}\n      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}\n    ports:\n      - \"5000:5000\"\n    healthcheck:\n      test: [\"CMD\", \"curl\", \"-fsS\", \"http://127.0.0.1:5000/\"]\n      interval: 30s\n      timeout: 5s\n      retries: 5\n      start_period: 40s\n    restart: unless-stopped\n\n  postgres:\n    image: postgres:16\n    environment:\n      POSTGRES_USER: rwfw\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}\n      POSTGRES_DB: lettrebox\n    volumes:\n      - postgres-data:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U rwfw -d lettrebox\"]\n      interval: 10s\n      timeout: 5s\n      retries: 10\n    restart: unless-stopped\n\nvolumes:\n  postgres-data:\n",
+      "path": "docker-compose.yml"
+    },
+    "dockerfiles": [
+      {
+        "body": "# syntax=docker/dockerfile:1.7\nFROM rust:1-bookworm AS builder\nWORKDIR /src\nENV CARGO_TERM_COLOR=always\nCOPY . .\nRUN --mount=type=cache,target=/usr/local/cargo/registry \\\n    --mount=type=cache,target=/src/target \\\n    cargo build --release --locked --bin lettrebox && \\\n    cp /src/target/release/lettrebox /usr/local/bin/lettrebox\n\nFROM debian:bookworm-slim AS runtime\nRUN apt-get update && \\\n    apt-get install -y --no-install-recommends ca-certificates libssl3 curl && \\\n    rm -rf /var/lib/apt/lists/*\nWORKDIR /app\nCOPY --from=builder /usr/local/bin/lettrebox /usr/local/bin/lettrebox\nCOPY config /app/config\nENV RUST_LOG=info\nEXPOSE 5000\nHEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=5 \\\n  CMD curl -fsS http://127.0.0.1:5000/ || exit 1\nCMD [\"/usr/local/bin/lettrebox\"]\n",
+        "path": "projects/lettrebox/Dockerfile",
+        "project_id": 1
+      }
+    ],
+    "scripts": [
+      {
+        "body": "#!/usr/bin/env bash\nset -euo pipefail\n\nrequire_cmd() {\n  command -v \"$1\" >/dev/null 2>&1 || {\n    echo \"missing required command: $1\" >&2\n    exit 1\n  }\n}\n\nrequire_env() {\n  local name=\"$1\"\n  if [ -z \"${!name:-}\" ]; then\n    echo \"missing required env: $name\" >&2\n    exit 1\n  fi\n}\n\nrequire_cmd docker\ndocker compose version >/dev/null 2>&1 || {\n  echo \"docker compose plugin not available\" >&2\n  exit 1\n}\n\nfor var in POSTGRES_PASSWORD RWFW__MAIL__SMTP_HOST RWFW__MAIL__SMTP_USERNAME RWFW__MAIL__SMTP_PASSWORD; do\n  require_env \"$var\"\ndone\n\necho \"preflight ok\"\n",
+        "path": "scripts/preflight.sh",
+        "purpose": "validate docker, compose, and required env before deploy"
+      },
+      {
+        "body": "#!/usr/bin/env bash\nset -euo pipefail\n\nROOT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)\"\ncd \"$ROOT_DIR\"\n\ndocker compose run --rm app /usr/local/bin/lettrebox __rwfw migrate\n",
+        "path": "scripts/migrate.sh",
+        "purpose": "run rwfw migrations inside the app container after compose up"
+      },
+      {
+        "body": "#!/usr/bin/env bash\nset -euo pipefail\n\nROOT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/..\" && pwd)\"\ncd \"$ROOT_DIR\"\n\n\"$ROOT_DIR/scripts/preflight.sh\"\n\ndocker compose build\ndocker compose up -d postgres --wait\n\"$ROOT_DIR/scripts/migrate.sh\"\ndocker compose up -d --wait\n\ndocker compose ps\n",
+        "path": "scripts/deploy.sh",
+        "purpose": "orchestrate preflight, build, migrate, and start the stack"
+      },
+      {
+        "body": "#!/usr/bin/env bash\nset -euo pipefail\n\nURL=\"${APP_HEALTH_URL:-http://127.0.0.1:5000/}\"\ncurl -fsS --max-time 5 \"$URL\" >/dev/null\necho \"healthcheck ok: $URL\"\n",
+        "path": "scripts/healthcheck.sh",
+        "purpose": "probe the running app's HTTP surface post-deploy"
+      }
+    ]
+  },
+  "confidence": "high",
+  "env": {
+    "optional": [
+      "RUST_LOG",
+      "RWFW__APP__BASE_URL",
+      "STRIPE_SECRET_KEY",
+      "STRIPE_WEBHOOK_SECRET"
+    ],
+    "required": [
+      "POSTGRES_PASSWORD",
+      "RWFW__DATABASE__URL",
+      "RWFW__MAIL__SMTP_HOST",
+      "RWFW__MAIL__SMTP_PORT",
+      "RWFW__MAIL__SMTP_USERNAME",
+      "RWFW__MAIL__SMTP_PASSWORD"
+    ]
+  },
+  "planner": {
+    "agent": {
+      "context_mode": "auto_lean",
+      "model": "claude-opus-4-7",
+      "name": "Claude Code",
+      "profile_id": 1,
+      "provider": "claude",
+      "sandbox": "danger-full-access"
+    },
+    "agent_session_id": 2,
+    "mode": "agent_required",
+    "producer": "selected-agent"
+  },
+  "ports": [
+    5000
+  ],
+  "projects": [
+    {
+      "healthcheck": "curl -fsS http://127.0.0.1:5000/",
+      "install": [
+        "cargo fetch --locked"
+      ],
+      "kind": "unknown",
+      "name": "lettrebox",
+      "package_manager": "cargo",
+      "ports": [
+        5000
+      ],
+      "project_id": 1,
+      "requires": {
+        "desktop_session": false,
+        "docker": true,
+        "system_packages": [
+          "ca-certificates",
+          "libssl3",
+          "curl"
+        ]
+      },
+      "risks": [
+        "Cargo build inside Docker is slow on first run; consider warming the target cache",
+        "READMEs point at port 5000 while detector suggested 8080; using README as source of truth"
+      ],
+      "run": "lettrebox",
+      "runtime": "compose",
+      "verify": [
+        "cargo build --release --bin lettrebox --locked"
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "level": "medium",
+      "message": "SMTP is not provisioned by this compose; Stalwart/SES relay must be reachable via the RWFW__MAIL__SMTP_* env before app boot"
+    },
+    {
+      "level": "medium",
+      "message": "First-time cargo build inside Docker downloads the full crate graph; expect a slow initial deploy"
+    },
+    {
+      "level": "low",
+      "message": "Detector suggested port 8080 but the app binds 5000 per README; verify no reverse proxy assumes 8080"
+    },
+    {
+      "level": "low",
+      "message": "Stripe env vars are optional here; billing flows will fail until STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET are provided"
+    }
+  ],
+  "schema_version": "1.0",
+  "services": [
+    {
+      "image": "built from projects/lettrebox/Dockerfile",
+      "kind": "web",
+      "name": "app",
+      "port": 5000
+    },
+    {
+      "image": "postgres:16",
+      "kind": "database",
+      "name": "postgres",
+      "port": 5432
+    }
+  ],
+  "strategy": "web_service",
+  "summary": "Rust axum web app (lettrebox) built via multi-stage Dockerfile and served with a Postgres sidecar via compose. Runtime port 5000 per README (detector's 8080 overridden). SMTP is provisioned externally in prod; compose does not bundle a mail server."
+}
