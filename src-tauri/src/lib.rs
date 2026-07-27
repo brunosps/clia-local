@@ -3023,6 +3023,40 @@ fn create_source_dir(path: String, relative_path: String) -> AppResult<()> {
     Ok(())
 }
 
+/// Delete a file or directory (recursively) from the project tree.
+///
+/// The path is validated lexically first (`scoped_new_path`) and then the *parent*
+/// is canonicalized — never the entry itself — so a symlink inside the project is
+/// unlinked rather than followed to whatever it points at outside the root.
+#[tauri::command]
+fn delete_source_entry(path: String, relative_path: String) -> AppResult<()> {
+    let root = canonical_project_root(&PathBuf::from(path))?;
+    let target = scoped_new_path(&root, &relative_path)?;
+    if target == root {
+        return Err(anyhow::anyhow!("cannot delete the project root").into());
+    }
+    let name = target
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("path has no file name"))?
+        .to_os_string();
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent directory"))?;
+    let canonical_parent = std::fs::canonicalize(parent).map_err(anyhow::Error::from)?;
+    if !canonical_parent.starts_with(&root) {
+        return Err(anyhow::anyhow!("source path escapes project root").into());
+    }
+    let entry = canonical_parent.join(name);
+    // symlink_metadata so a symlinked directory is unlinked, not walked.
+    let meta = std::fs::symlink_metadata(&entry).map_err(anyhow::Error::from)?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&entry).map_err(anyhow::Error::from)?;
+    } else {
+        std::fs::remove_file(&entry).map_err(anyhow::Error::from)?;
+    }
+    Ok(())
+}
+
 /// Temp-file extension for the external formatter of a dw language, if any.
 fn external_formatter_ext(language: &str) -> Option<&'static str> {
     match language {
@@ -5245,6 +5279,7 @@ pub fn run() {
             search_in_files,
             create_source_file,
             create_source_dir,
+            delete_source_entry,
             project_path_exists,
             format_external,
             lsp_start,
@@ -5549,6 +5584,32 @@ mod tests {
         assert!(
             create_source_file(root.display().to_string(), "src/lib/new.ts".to_string()).is_err()
         );
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn delete_source_entry_removes_files_and_whole_directories() {
+        let root = fixture_root();
+        let path = root.display().to_string();
+
+        create_source_file(path.clone(), "src/lib/gone.ts".to_string()).expect("create file");
+        assert!(root.join("src/lib/gone.ts").is_file());
+        delete_source_entry(path.clone(), "src/lib/gone.ts".to_string()).expect("delete file");
+        assert!(!root.join("src/lib/gone.ts").exists());
+
+        // Directories go recursively, with their contents.
+        create_source_file(path.clone(), "src/lib/nested/keep.ts".to_string())
+            .expect("create nested file");
+        delete_source_entry(path.clone(), "src/lib".to_string()).expect("delete dir");
+        assert!(!root.join("src/lib").exists());
+        assert!(root.join("src").is_dir());
+
+        // Escapes, the root itself and missing entries are all rejected.
+        assert!(delete_source_entry(path.clone(), "../escape.ts".to_string()).is_err());
+        assert!(delete_source_entry(path.clone(), "/etc/passwd".to_string()).is_err());
+        assert!(delete_source_entry(path.clone(), "".to_string()).is_err());
+        assert!(delete_source_entry(path, "src/lib/gone.ts".to_string()).is_err());
 
         std::fs::remove_dir_all(root).expect("cleanup");
     }

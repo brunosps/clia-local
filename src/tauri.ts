@@ -982,6 +982,10 @@ export const api = {
   createSourceDir(path: string, relativePath: string) {
     return invokeSafe<null>("create_source_dir", { path, relativePath });
   },
+  /** Delete a file, or a directory and everything under it. */
+  deleteSourceEntry(path: string, relativePath: string) {
+    return invokeSafe<null>("delete_source_entry", { path, relativePath });
+  },
   projectPathExists(path: string, relativePath: string) {
     return invokeSafe<boolean>("project_path_exists", { path, relativePath });
   },

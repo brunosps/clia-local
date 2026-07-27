@@ -3229,6 +3229,38 @@ export function App() {
     else setError(result.error);
   }
 
+  async function deleteSourceEntry(entry: SourceEntry) {
+    const result = await api.deleteSourceEntry(currentPath, entry.relative_path);
+    if (!result.ok) {
+      setError(result.error);
+      return;
+    }
+    // Close every tab whose file is gone. Deleting a folder takes its whole
+    // subtree with it, so match the prefix as well as the path itself — and do
+    // it in one pass instead of looping closeSourceTab (which would recompute
+    // the remaining tabs from the same stale snapshot each time).
+    const prefix = `${entry.relative_path}/`;
+    const isGone = (relativePath: string) =>
+      relativePath === entry.relative_path || relativePath.startsWith(prefix);
+    const remaining = openFiles.filter((file) => !isGone(file.relative_path));
+    for (const file of openFiles) {
+      if (isGone(file.relative_path)) {
+        lspController.closeFile(fileUriFor(`${currentPath}/${file.relative_path}`));
+      }
+    }
+    setOpenFiles(remaining);
+    if (selectedSourceFile && isGone(selectedSourceFile.relative_path)) {
+      const neighbor = remaining[remaining.length - 1];
+      if (neighbor) {
+        await openSourcePath(currentPath, neighbor.relative_path);
+      } else {
+        setSelectedSourceFile(null);
+        setSourceContent("");
+      }
+    }
+    await reloadSourceTree();
+  }
+
   // Beautifier (Alt+Shift+F): Prettier in-process, or an external CLI per dw language.
   async function formatBuffer(text: string, language: string): Promise<string | null> {
     const parser = prettierParser(language);
@@ -4364,6 +4396,7 @@ export function App() {
                   onRefreshTree={() => void reloadSourceTree()}
                   onCreateFile={(relativePath) => void createNewSourceFile(relativePath)}
                   onCreateDir={(relativePath) => void createNewSourceDir(relativePath)}
+                  onDeleteEntry={(entry) => void deleteSourceEntry(entry)}
                   lsp={
                     activeLspLanguage && lspController.supports(activeLspLanguage)
                       ? {
@@ -10373,6 +10406,7 @@ function SourcePanel({
   onRefreshTree,
   onCreateFile,
   onCreateDir,
+  onDeleteEntry,
   editorPath,
   lsp,
   onEnableLsp,
@@ -10416,6 +10450,7 @@ function SourcePanel({
   onRefreshTree: () => void;
   onCreateFile: (relativePath: string) => void;
   onCreateDir: (relativePath: string) => void;
+  onDeleteEntry: (entry: SourceEntry) => void;
   editorPath: string | undefined;
   lsp: {
     enabled: boolean;
@@ -10436,6 +10471,8 @@ function SourcePanel({
   const expanded = useMemo(() => new Set(expandedPaths), [expandedPaths]);
   const [cursor, setCursor] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
   const { prompt, dialog: promptDialog } = usePrompt();
+  const { confirm: confirmDelete, dialog: confirmDeleteDialog } = useConfirm();
+  const { menu: treeMenu, open: openTreeMenu, close: closeTreeMenu } = useContextMenu();
   const layoutRef = useRef<HTMLDivElement>(null);
 
   // Drag the explorer/editor splitter. To avoid re-rendering the heavy panel on
@@ -10491,6 +10528,55 @@ function SourcePanel({
       confirmLabel: t("common.create"),
     });
     if (relativePath) onCreateDir(relativePath);
+  }
+
+  // Right-clicking a row acts *inside* the folder it targets: for a file the
+  // target dir is its parent, so "new file" always lands next to what was clicked.
+  function targetDirOf(entry: SourceEntry) {
+    if (entry.kind === "directory") return entry.relative_path;
+    const cut = entry.relative_path.lastIndexOf("/");
+    return cut === -1 ? "" : entry.relative_path.slice(0, cut);
+  }
+
+  async function promptNewIn(dir: string, kind: "file" | "dir") {
+    const name = await prompt({
+      title: kind === "file" ? t("editor.newFile") : t("editor.newDir"),
+      label: dir ? t("editor.nameInFolder", { folder: dir }) : t("editor.nameAtRoot"),
+      confirmLabel: t("common.create"),
+    });
+    if (!name) return;
+    const relativePath = dir ? `${dir}/${name}` : name;
+    if (dir && !expanded.has(dir)) onExpandedPathsChange([...expandedPaths, dir]);
+    if (kind === "file") onCreateFile(relativePath);
+    else onCreateDir(relativePath);
+  }
+
+  function entryMenuItems(entry: SourceEntry): MenuItem[] {
+    const isDir = entry.kind === "directory";
+    const dir = targetDirOf(entry);
+    return [
+      ...(isDir
+        ? []
+        : [{ label: t("editor.menu.open"), onSelect: () => onSelect(entry) }, { separator: true }]),
+      { label: t("editor.newFile"), onSelect: () => void promptNewIn(dir, "file") },
+      { label: t("editor.newDir"), onSelect: () => void promptNewIn(dir, "dir") },
+      { separator: true },
+      {
+        label: isDir ? t("editor.menu.deleteFolder") : t("editor.menu.deleteFile"),
+        danger: true,
+        onSelect: () =>
+          void confirmDelete({
+            title: isDir
+              ? t("editor.confirm.deleteFolderTitle", { name: entry.name })
+              : t("editor.confirm.deleteFileTitle", { name: entry.name }),
+            body: isDir ? t("editor.confirm.deleteFolderBody") : entry.relative_path,
+            danger: true,
+            confirmLabel: t("editor.menu.deleteFile"),
+          }).then((ok) => {
+            if (ok) onDeleteEntry(entry);
+          }),
+      },
+    ];
   }
 
   return (
@@ -10611,6 +10697,7 @@ function SourcePanel({
                   expanded={expanded}
                   onSelect={onSelect}
                   onToggle={toggleDir}
+                  onContextEntry={(entry, event) => openTreeMenu(event, entryMenuItems(entry))}
                   selectedPath={selectedFile?.relative_path}
                 />
               ) : (
@@ -10624,6 +10711,8 @@ function SourcePanel({
             </>
           )}
           {promptDialog}
+          {confirmDeleteDialog}
+          {treeMenu ? <ContextMenu {...treeMenu} onClose={closeTreeMenu} /> : null}
         </aside>
 
         <div
@@ -10800,6 +10889,7 @@ function SourceEntryList({
   expanded,
   onSelect,
   onToggle,
+  onContextEntry,
   selectedPath,
   depth = 0,
 }: {
@@ -10807,6 +10897,7 @@ function SourceEntryList({
   expanded: Set<string>;
   onSelect: (entry: SourceEntry) => void;
   onToggle: (path: string) => void;
+  onContextEntry?: (entry: SourceEntry, event: ReactMouseEvent) => void;
   selectedPath?: string;
   depth?: number;
 }) {
@@ -10833,6 +10924,7 @@ function SourceEntryList({
                 .filter(Boolean)
                 .join(" ")}
               onClick={() => (isDir ? onToggle(entry.relative_path) : onSelect(entry))}
+              onContextMenu={onContextEntry ? (event) => onContextEntry(entry, event) : undefined}
               style={
                 {
                   paddingLeft: `${10 + depth * 14}px`,
@@ -10882,6 +10974,7 @@ function SourceEntryList({
                 expanded={expanded}
                 onSelect={onSelect}
                 onToggle={onToggle}
+                onContextEntry={onContextEntry}
                 selectedPath={selectedPath}
               />
             ) : null}
