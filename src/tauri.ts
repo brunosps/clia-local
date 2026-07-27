@@ -837,6 +837,14 @@ export const api = {
   ) {
     return invokeSafe<string>("git_checkout_branch", { path, name, mode });
   },
+  /** Fetch a remote branch (`origin/x`) and check out a local branch tracking it. */
+  gitCheckoutRemoteBranch(
+    path: string,
+    name: string,
+    mode: "plain" | "discard" | "stash" | "stash_apply" = "plain",
+  ) {
+    return invokeSafe<string>("git_checkout_remote_branch", { path, name, mode });
+  },
   gitCreateBranch(path: string, name: string, startPoint?: string, checkout = true) {
     return invokeSafe<string>("git_create_branch", {
       path,

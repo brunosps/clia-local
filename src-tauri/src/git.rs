@@ -1863,6 +1863,114 @@ pub fn checkout_branch(repo: &Path, name: &str, mode: &str) -> anyhow::Result<St
     }
 }
 
+/// Split a remote-tracking ref (`origin/feature/x`) into `(remote, branch)`.
+///
+/// Branch names contain slashes, so the split can't be at the first `/`; the
+/// remote is matched against the repo's configured remotes (longest first, since
+/// one remote name can be a prefix of another).
+fn split_remote_ref(repo: &Path, full: &str) -> anyhow::Result<(String, String)> {
+    let remotes = git(repo, &["remote"])?;
+    let mut candidates: Vec<&str> = remotes
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    candidates.sort_by_key(|remote| std::cmp::Reverse(remote.len()));
+    for remote in candidates {
+        if let Some(branch) = full.strip_prefix(&format!("{remote}/")) {
+            if branch.is_empty() {
+                break;
+            }
+            return Ok((remote.to_string(), branch.to_string()));
+        }
+    }
+    Err(anyhow!("'{full}' does not belong to a known remote"))
+}
+
+fn ref_exists(repo: &Path, reference: &str) -> bool {
+    git(repo, &["rev-parse", "--verify", "--quiet", reference]).is_ok()
+}
+
+/// Check out a *remote* branch (`origin/feature/x`): fetch it, then land on a
+/// local branch tracking it — creating that local branch on the first checkout
+/// and fast-forwarding it on later ones. Plain `git checkout origin/feature/x`
+/// would leave a detached HEAD instead, which is never what a double-click means.
+///
+/// `mode` follows the same uncommitted-changes policy as [`checkout_branch`].
+pub fn checkout_remote_branch(repo: &Path, full: &str, mode: &str) -> anyhow::Result<String> {
+    validate_ref_name(full)?;
+    let (remote, branch) = split_remote_ref(repo, full)?;
+
+    // Bring the branch down first. A failed fetch is only fatal when we have no
+    // local copy of the ref to fall back on (offline with a stale remote ref is
+    // still workable; a branch that never existed here is not).
+    let fetched = git(repo, &["fetch", &remote, &branch]);
+    let remote_ref = format!("refs/remotes/{full}");
+    if !ref_exists(repo, &remote_ref) {
+        return match fetched {
+            Err(error) => Err(error),
+            Ok(_) => Err(anyhow!("remote branch '{full}' not found after fetch")),
+        };
+    }
+
+    // Local branch already exists: switch to it under the caller's policy, then
+    // try to fast-forward it onto the freshly fetched remote tip.
+    if ref_exists(repo, &format!("refs/heads/{branch}")) {
+        let message = checkout_branch(repo, &branch, mode)?;
+        return match git(repo, &["merge", "--ff-only", full]) {
+            Ok(_) => Ok(format!("{message} (fast-forwarded to {full})")),
+            Err(_) => Ok(format!(
+                "{message}. Local branch '{branch}' has diverged from {full} — merge or rebase it manually."
+            )),
+        };
+    }
+
+    // First checkout: create the tracking branch from the remote-tracking ref.
+    let created = format!("Created '{branch}' tracking {full}.");
+    match mode {
+        "plain" => {
+            git(repo, &["checkout", "-b", &branch, "--track", full])?;
+            Ok(created)
+        }
+        "discard" => {
+            git(
+                repo,
+                &["checkout", "--force", "-b", &branch, "--track", full],
+            )?;
+            let _ = git(repo, &["clean", "-fd"]);
+            Ok(format!("{created} Local changes discarded."))
+        }
+        "stash" | "stash_apply" => {
+            git(
+                repo,
+                &[
+                    "stash",
+                    "push",
+                    "--include-untracked",
+                    "-m",
+                    "dwgui-checkout",
+                ],
+            )?;
+            git(repo, &["checkout", "-b", &branch, "--track", full])?;
+            if mode == "stash" {
+                return Ok(format!(
+                    "{created} Local changes stashed (dwgui-checkout) — pop them when you return."
+                ));
+            }
+            match git(repo, &["stash", "apply"]) {
+                Ok(_) => {
+                    let _ = git(repo, &["stash", "drop"]);
+                    Ok(format!("{created} Local changes re-applied."))
+                }
+                Err(error) => Ok(format!(
+                    "{created} Applying the stash hit conflicts ({error}). Your changes are safe in stash 'dwgui-checkout' — resolve in Local Changes."
+                )),
+            }
+        }
+        _ => Err(anyhow!("invalid checkout mode: {mode}")),
+    }
+}
+
 pub fn create_branch(
     repo: &Path,
     name: &str,
@@ -2491,6 +2599,89 @@ mod tests {
         run_git(&root, &["add", "file.txt"]);
         run_git(&root, &["commit", "-m", "initial"]);
         root
+    }
+
+    /// An "upstream" repo plus a clone of it, so remote-tracking refs are real.
+    fn init_repo_with_clone() -> (std::path::PathBuf, std::path::PathBuf) {
+        let upstream = init_repo();
+        let clone = fixture_root();
+        std::fs::remove_dir_all(&clone).expect("clear clone dir");
+        run_git(
+            std::env::temp_dir().as_path(),
+            &[
+                "clone",
+                &upstream.display().to_string(),
+                &clone.display().to_string(),
+            ],
+        );
+        run_git(&clone, &["config", "user.email", "test@example.com"]);
+        run_git(&clone, &["config", "user.name", "Test User"]);
+        (upstream, clone)
+    }
+
+    #[test]
+    fn split_remote_ref_keeps_slashes_in_the_branch_name() {
+        let (upstream, clone) = init_repo_with_clone();
+
+        let (remote, branch) =
+            split_remote_ref(&clone, "origin/feature/deep/name").expect("split remote ref");
+        assert_eq!(remote, "origin");
+        assert_eq!(branch, "feature/deep/name");
+        assert!(split_remote_ref(&clone, "nosuchremote/main").is_err());
+
+        std::fs::remove_dir_all(upstream).expect("cleanup upstream");
+        std::fs::remove_dir_all(clone).expect("cleanup clone");
+    }
+
+    #[test]
+    fn checkout_remote_branch_creates_a_local_tracking_branch() {
+        let (upstream, clone) = init_repo_with_clone();
+
+        // A branch that exists only upstream, created after the clone.
+        run_git(&upstream, &["checkout", "-b", "feature/x"]);
+        std::fs::write(upstream.join("feature.txt"), "from upstream\n")
+            .expect("write feature file");
+        run_git(&upstream, &["add", "feature.txt"]);
+        run_git(&upstream, &["commit", "-m", "feature commit"]);
+
+        checkout_remote_branch(&clone, "origin/feature/x", "plain")
+            .expect("checkout remote branch");
+
+        // Landed on a *local* branch (not a detached HEAD) that tracks the remote.
+        let head = git(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]).expect("head");
+        assert_eq!(head, "feature/x");
+        let upstream_ref = git(&clone, &["rev-parse", "--abbrev-ref", "@{u}"]).expect("upstream");
+        assert_eq!(upstream_ref, "origin/feature/x");
+        assert!(clone.join("feature.txt").is_file());
+
+        std::fs::remove_dir_all(upstream).expect("cleanup upstream");
+        std::fs::remove_dir_all(clone).expect("cleanup clone");
+    }
+
+    #[test]
+    fn checkout_remote_branch_fast_forwards_an_existing_local_branch() {
+        let (upstream, clone) = init_repo_with_clone();
+
+        // `git init`'s default branch name is config-dependent — read it, don't assume.
+        let default_branch = git(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]).expect("head");
+        run_git(&upstream, &["checkout", "-b", "feature/y"]);
+        run_git(&upstream, &["commit", "--allow-empty", "-m", "first"]);
+        checkout_remote_branch(&clone, "origin/feature/y", "plain").expect("first checkout");
+        run_git(&clone, &["checkout", &default_branch]);
+
+        // Upstream moves on; the second checkout should pull the new commit in.
+        std::fs::write(upstream.join("later.txt"), "later\n").expect("write later file");
+        run_git(&upstream, &["add", "later.txt"]);
+        run_git(&upstream, &["commit", "-m", "second"]);
+
+        checkout_remote_branch(&clone, "origin/feature/y", "plain").expect("second checkout");
+
+        let head = git(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]).expect("head");
+        assert_eq!(head, "feature/y");
+        assert!(clone.join("later.txt").is_file());
+
+        std::fs::remove_dir_all(upstream).expect("cleanup upstream");
+        std::fs::remove_dir_all(clone).expect("cleanup clone");
     }
 
     #[test]

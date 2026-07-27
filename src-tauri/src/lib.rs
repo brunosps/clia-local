@@ -2242,6 +2242,12 @@ fn git_checkout_branch(path: String, name: String, mode: String) -> AppResult<St
 }
 
 #[tauri::command]
+fn git_checkout_remote_branch(path: String, name: String, mode: String) -> AppResult<String> {
+    let root = canonical_project_root(&PathBuf::from(path))?;
+    Ok(git::checkout_remote_branch(&root, &name, &mode)?)
+}
+
+#[tauri::command]
 fn git_create_branch(
     path: String,
     name: String,
@@ -5383,6 +5389,7 @@ pub fn run() {
             git_pull,
             git_push,
             git_checkout_branch,
+            git_checkout_remote_branch,
             git_checkout_commit,
             git_create_branch,
             git_rename_branch,

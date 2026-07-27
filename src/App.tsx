@@ -11169,6 +11169,7 @@ function GitRefTree({
   nodes,
   depth = 0,
   leafIcon,
+  checkoutHint,
   onCheckout,
   onMerge,
   onContext,
@@ -11176,6 +11177,7 @@ function GitRefTree({
   nodes: RefTreeNode[];
   depth?: number;
   leafIcon: ReactNode;
+  checkoutHint?: string;
   onCheckout: (full: string) => void;
   onMerge?: (full: string) => void;
   onContext?: (leaf: RefLeaf, event: ReactMouseEvent) => void;
@@ -11188,7 +11190,7 @@ function GitRefTree({
           <div className={node.leaf.isHead ? "git-ref-row head" : "git-ref-row"} key={node.path}>
             <button
               type="button"
-              title={t("git.checkoutHint")}
+              title={checkoutHint ?? t("git.checkoutHint")}
               style={{ paddingLeft: 8 + depth * 12 }}
               onDoubleClick={() => onCheckout(node.leaf!.full)}
               onContextMenu={onContext ? (event) => onContext(node.leaf!, event) : undefined}
@@ -11218,6 +11220,7 @@ function GitRefTree({
             node={node}
             depth={depth}
             leafIcon={leafIcon}
+            checkoutHint={checkoutHint}
             onCheckout={onCheckout}
             onMerge={onMerge}
             onContext={onContext}
@@ -11233,6 +11236,7 @@ function GitRefFolder({
   node,
   depth,
   leafIcon,
+  checkoutHint,
   onCheckout,
   onMerge,
   onContext,
@@ -11240,6 +11244,7 @@ function GitRefFolder({
   node: RefTreeNode;
   depth: number;
   leafIcon: ReactNode;
+  checkoutHint?: string;
   onCheckout: (full: string) => void;
   onMerge?: (full: string) => void;
   onContext?: (leaf: RefLeaf, event: ReactMouseEvent) => void;
@@ -11267,6 +11272,7 @@ function GitRefFolder({
           nodes={node.children}
           depth={depth + 1}
           leafIcon={leafIcon}
+          checkoutHint={checkoutHint}
           onCheckout={onCheckout}
           onMerge={onMerge}
           onContext={onContext}
@@ -12314,7 +12320,12 @@ function GitWorkbench({
   const [commitDescription, setCommitDescription] = useState("");
   const [amend, setAmend] = useState(false);
   const [newBranchModal, setNewBranchModal] = useState<{ source: string } | null>(null);
-  const [pendingCheckout, setPendingCheckout] = useState<string | null>(null);
+  // `remote: true` means the target is a remote-tracking ref (origin/x) that has
+  // to be fetched into a local tracking branch instead of checked out directly.
+  const [pendingCheckout, setPendingCheckout] = useState<{
+    full: string;
+    remote: boolean;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [autoFetching, setAutoFetching] = useState(false);
@@ -12556,17 +12567,25 @@ function GitWorkbench({
     else setError(result.error);
   }
 
-  function requestCheckout(full: string) {
+  function requestCheckout(full: string, remote = false) {
     if (repoState?.dirty) {
-      setPendingCheckout(full);
+      setPendingCheckout({ full, remote });
     } else {
-      void run(`Checkout ${full}`, () => api.gitCheckoutBranch(path, full, "plain"));
+      doCheckout(full, "plain", remote);
     }
   }
 
-  function doCheckout(full: string, mode: "discard" | "stash" | "stash_apply") {
+  function doCheckout(
+    full: string,
+    mode: "plain" | "discard" | "stash" | "stash_apply",
+    remote = false,
+  ) {
     setPendingCheckout(null);
-    void run(`Checkout ${full}`, () => api.gitCheckoutBranch(path, full, mode));
+    void run(`Checkout ${full}`, () =>
+      remote
+        ? api.gitCheckoutRemoteBranch(path, full, mode)
+        : api.gitCheckoutBranch(path, full, mode),
+    );
   }
 
   const { menu, open: openMenu, close: closeMenu } = useContextMenu();
@@ -12705,6 +12724,28 @@ function GitWorkbench({
           void run("Push", () => api.gitPush(path, { setUpstream: !repoState?.upstream })),
       },
       { label: "Pull", onSelect: () => void run("Pull", pullWithSubmodules(false)) },
+    ];
+  }
+
+  function remoteBranchMenuItems(leaf: RefLeaf): MenuItem[] {
+    return [
+      {
+        label: t("git.menu.checkoutRemote"),
+        onSelect: () => requestCheckout(leaf.full, true),
+      },
+      {
+        label: t("git.menu.createBranchFrom"),
+        onSelect: () => setNewBranchModal({ source: leaf.full }),
+      },
+      {
+        label: t("git.menu.mergeIntoCurrent"),
+        onSelect: () => void run(`Merge ${leaf.full}`, () => api.gitMergeBranch(path, leaf.full)),
+      },
+      {
+        label: t("git.menu.rebaseCurrentOnto"),
+        onSelect: () =>
+          void run(`Rebase onto ${leaf.full}`, () => api.gitRebaseBranch(path, leaf.full)),
+      },
     ];
   }
 
@@ -13124,7 +13165,9 @@ function GitWorkbench({
                       <GitRefTree
                         nodes={remoteTree}
                         leafIcon={<GitFork aria-hidden="true" size={13} />}
-                        onCheckout={(full) => requestCheckout(full)}
+                        checkoutHint={t("git.checkoutRemoteHint")}
+                        onCheckout={(full) => requestCheckout(full, true)}
+                        onContext={(leaf, event) => openMenu(event, remoteBranchMenuItems(leaf))}
                       />
                     </div>
                   </>
@@ -13697,7 +13740,7 @@ function GitWorkbench({
                 <h2 id="checkout-confirm-title">{t("git.checkout.pendingTitle")}</h2>
                 <p>
                   {t("git.checkout.pendingBodyPrefix")}
-                  <strong>{pendingCheckout}</strong>
+                  <strong>{pendingCheckout.full}</strong>
                   {t("git.checkout.pendingBodySuffix")}
                 </p>
               </div>
@@ -13706,21 +13749,23 @@ function GitWorkbench({
               <button
                 className="primary-button"
                 type="button"
-                onClick={() => doCheckout(pendingCheckout, "stash_apply")}
+                onClick={() =>
+                  doCheckout(pendingCheckout.full, "stash_apply", pendingCheckout.remote)
+                }
               >
                 {t("git.checkout.stashApply")}
               </button>
               <button
                 className="secondary-button"
                 type="button"
-                onClick={() => doCheckout(pendingCheckout, "stash")}
+                onClick={() => doCheckout(pendingCheckout.full, "stash", pendingCheckout.remote)}
               >
                 {t("git.checkout.stashOnly")}
               </button>
               <button
                 className="secondary-button checkout-discard"
                 type="button"
-                onClick={() => doCheckout(pendingCheckout, "discard")}
+                onClick={() => doCheckout(pendingCheckout.full, "discard", pendingCheckout.remote)}
               >
                 {t("git.checkout.discard")}
               </button>

@@ -315,6 +315,8 @@ const EN = {
   "git.createBranch": "Create branch",
   "git.branchPlaceholder": "feat/my-branch",
   "git.checkoutHint": "Double-click to checkout · right-click for more actions",
+  "git.checkoutRemoteHint":
+    "Double-click to fetch and checkout a local branch tracking this one · right-click for more actions",
   "git.mergeHint": "Merge into the current branch",
   "git.branchNameLabel": "New branch name",
   "git.branchFromLabel": "Start from",
@@ -326,6 +328,7 @@ const EN = {
   "git.menu.interactiveRebaseHere": "Interactive rebase from here",
   "git.menu.copySha": "Copy SHA",
   "git.menu.copyMessage": "Copy message",
+  "git.menu.checkoutRemote": "Fetch and checkout",
   "git.menu.createBranchFrom": "Create branch from this…",
   "git.menu.mergeIntoCurrent": "Merge into current",
   "git.menu.rebaseCurrentOnto": "Rebase current onto this",
@@ -965,6 +968,8 @@ const PT_BR: Record<TranslationKey, string> = {
   "git.createBranch": "Criar branch",
   "git.branchPlaceholder": "feat/minha-branch",
   "git.checkoutHint": "Duplo clique para checkout · botão direito para mais ações",
+  "git.checkoutRemoteHint":
+    "Duplo clique para baixar e criar uma branch local que a acompanha · botão direito para mais ações",
   "git.mergeHint": "Merge na branch atual",
   "git.branchNameLabel": "Nome da nova branch",
   "git.branchFromLabel": "A partir de",
@@ -976,6 +981,7 @@ const PT_BR: Record<TranslationKey, string> = {
   "git.menu.interactiveRebaseHere": "Rebase interativo a partir daqui",
   "git.menu.copySha": "Copiar SHA",
   "git.menu.copyMessage": "Copiar mensagem",
+  "git.menu.checkoutRemote": "Baixar e fazer checkout",
   "git.menu.createBranchFrom": "Criar branch a partir desta…",
   "git.menu.mergeIntoCurrent": "Merge na atual",
   "git.menu.rebaseCurrentOnto": "Rebase atual sobre esta",
