@@ -38,6 +38,7 @@ import type {
   Workspace,
   WorkspaceMachine,
 } from "./types";
+import { writeClipboardText } from "./clipboard";
 
 type MachineSection = "credentials" | "activity" | "logs";
 
@@ -390,12 +391,8 @@ export default function MachinesPanel({
   }
 
   async function copyText(value: string, label: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-      setError("");
-    } catch {
-      setError(`clipboard_unavailable: não consegui copiar ${label}; copie manualmente.`);
-    }
+    if (await writeClipboardText(value)) setError("");
+    else setError(`clipboard_unavailable: não consegui copiar ${label}; copie manualmente.`);
   }
 
   async function removeSelected(machine: WorkspaceMachine) {

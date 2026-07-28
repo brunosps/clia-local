@@ -66,6 +66,7 @@ import type {
   WorkspaceMachine,
 } from "./types";
 import { projectDisplayName } from "./workspace";
+import { writeClipboardText } from "./clipboard";
 
 type DeployNextAction = {
   tone: "neutral" | "warning" | "blocked" | "ready";
@@ -1018,12 +1019,8 @@ export default function DeployPackagesPanel({
   }
 
   async function copyMachineSsh(machine: WorkspaceMachine) {
-    try {
-      await navigator.clipboard.writeText(machineSshCommand(machine));
-      setError("");
-    } catch {
-      setError("clipboard_unavailable: copie o comando SSH manualmente.");
-    }
+    if (await writeClipboardText(machineSshCommand(machine))) setError("");
+    else setError("clipboard_unavailable: copie o comando SSH manualmente.");
   }
 
   async function openMachineConsole(machine: WorkspaceMachine) {

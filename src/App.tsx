@@ -3723,7 +3723,7 @@ export function App() {
 
   function copyChangedFilePath(file: ChangedFile, fullPath: boolean) {
     const value = fullPath ? `${currentPath.replace(/[\\/]$/, "")}/${file.path}` : file.path;
-    void navigator.clipboard?.writeText(value);
+    void writeClipboardText(value);
   }
 
   function changedFileMenuItems(file: ChangedFile): MenuItem[] {
@@ -9061,7 +9061,7 @@ function AgentsPanel({
   async function copyRawEvents() {
     if (!activeSession || !rawTotal) return;
     const result = await api.getAgentRawPayload(activeSession.id);
-    if (result.ok && result.value) await navigator.clipboard.writeText(result.value);
+    if (result.ok && result.value) await writeClipboardText(result.value);
   }
 
   async function refreshUsage() {
@@ -11982,7 +11982,7 @@ function DockerWorkbench() {
   }
 
   const copyText = (text: string) => {
-    if (navigator.clipboard) void navigator.clipboard.writeText(text);
+    void writeClipboardText(text);
   };
 
   function containerMenu(container: DockerContainer): MenuItem[] {
@@ -12808,10 +12808,10 @@ function GitWorkbench({
       },
       { label: t("git.menu.interactiveRebaseHere"), onSelect: () => openRebase(commit.sha) },
       { separator: true },
-      { label: t("git.menu.copySha"), onSelect: () => void navigator.clipboard?.writeText(commit.sha) },
+      { label: t("git.menu.copySha"), onSelect: () => void writeClipboardText(commit.sha) },
       {
         label: t("git.menu.copyMessage"),
-        onSelect: () => void navigator.clipboard?.writeText(commit.subject),
+        onSelect: () => void writeClipboardText(commit.subject),
       },
     ];
   }
@@ -13640,7 +13640,7 @@ function GitWorkbench({
                           <button
                             type="button"
                             className="secondary-button"
-                            onClick={() => void navigator.clipboard?.writeText(selectedStash.label)}
+                            onClick={() => void writeClipboardText(selectedStash.label)}
                           >
                             {t("git.copyRef")}
                           </button>
@@ -13705,7 +13705,7 @@ function GitWorkbench({
                           <button
                             type="button"
                             className="secondary-button"
-                            onClick={() => void navigator.clipboard?.writeText(detail.sha)}
+                            onClick={() => void writeClipboardText(detail.sha)}
                           >
                             {t("git.menu.copySha")}
                           </button>

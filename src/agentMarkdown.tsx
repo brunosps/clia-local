@@ -7,6 +7,7 @@ import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/atom-one-dark.css";
 import { useI18n } from "./i18n";
 import type { AgentMessage } from "./types";
+import { writeClipboardText } from "./clipboard";
 
 // highlight.js: only colorize blocks with an explicit language tag (```sql, ```ts, …);
 // don't throw on unknown tags (e.g. advpl). `detect` is deliberately OFF — auto-detecting
@@ -43,8 +44,8 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   const [copied, setCopied] = useState(false);
   const code = nodeToText(children).replace(/\n+$/, "");
   const copy = () => {
-    if (!navigator.clipboard) return;
-    void navigator.clipboard.writeText(code).then(() => {
+    void writeClipboardText(code).then((ok) => {
+      if (!ok) return;
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     });
