@@ -78,6 +78,13 @@ jobs:
       - name: Install JS dependencies
         run: corepack pnpm install --frozen-lockfile
 
+      # The cargo cache covers src-tauri/target, so bundles built for an EARLIER
+      # version survive into this run and get picked up by the upload globs — the
+      # v0.3.3 artifact shipped v0.3.2 .deb/.rpm alongside it. Start from empty.
+      - name: Drop bundles left over from a previous version
+        shell: bash
+        run: rm -rf src-tauri/target/release/bundle
+
       - name: Build desktop bundle
         env:
           # Lets winbox:prepare download the WinBox CLI from the private winbox-gui release.
@@ -141,6 +148,13 @@ jobs:
       - name: Install JS dependencies
         run: corepack pnpm install --frozen-lockfile
 
+      # The cargo cache covers src-tauri/target, so bundles built for an EARLIER
+      # version survive into this run and get picked up by the upload globs — the
+      # v0.3.3 artifact shipped v0.3.2 .deb/.rpm alongside it. Start from empty.
+      - name: Drop bundles left over from a previous version
+        shell: bash
+        run: rm -rf src-tauri/target/release/bundle
+
       - name: Build desktop bundle
         env:
           GH_TOKEN: ${{ secrets.WINBOX_GH_TOKEN || secrets.GITHUB_TOKEN }}
@@ -199,6 +213,13 @@ jobs:
 
       - name: Install JS dependencies
         run: corepack pnpm install --frozen-lockfile
+
+      # The cargo cache covers src-tauri/target, so bundles built for an EARLIER
+      # version survive into this run and get picked up by the upload globs — the
+      # v0.3.3 artifact shipped v0.3.2 .deb/.rpm alongside it. Start from empty.
+      - name: Drop bundles left over from a previous version
+        shell: bash
+        run: rm -rf src-tauri/target/release/bundle
 
       - name: Build desktop bundle
         env:
