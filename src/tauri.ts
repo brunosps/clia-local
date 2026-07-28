@@ -616,6 +616,12 @@ export const api = {
   readWindowsClipboardFiles() {
     return invokeSafe<string[]>("read_windows_clipboard_files", {});
   },
+  readWindowsClipboardText() {
+    return invokeSafe<string | null>("read_windows_clipboard_text", {});
+  },
+  writeWindowsClipboardText(text: string) {
+    return invokeSafe<boolean>("write_windows_clipboard_text", { text });
+  },
   stopAgentSession(sessionId: number) {
     return invokeSafe<AgentSession>("stop_agent_session", { sessionId });
   },

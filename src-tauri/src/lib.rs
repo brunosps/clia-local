@@ -2904,16 +2904,65 @@ fn save_agent_attachment(input: AgentAttachmentInput) -> AppResult<String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// On WSL, read *text* off the Windows clipboard via `powershell.exe`.
+///
+/// WSLg is supposed to bridge text to the Linux CLIPBOARD selection, but it does
+/// not always land (the webview then sees an empty `text/plain` and the paste is
+/// swallowed). This is the same escape hatch already used for images and files.
+/// Returns `Ok(None)` when not on WSL or when the clipboard holds no text.
+#[tauri::command]
+fn read_windows_clipboard_text() -> AppResult<Option<String>> {
+    if !is_wsl() {
+        return Ok(None);
+    }
+
+    // `GetText` needs an STA thread. `[Console]::Out.Write` (not Write-Output) so
+    // PowerShell does not append a newline of its own to the clipboard content.
+    let script = "Add-Type -AssemblyName System.Windows.Forms; \
+         [Console]::Out.Write([System.Windows.Forms.Clipboard]::GetText())";
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .output()
+        .map_err(anyhow::Error::from)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    // Windows clipboard text is CRLF; normalize so it pastes as ordinary Unix text.
+    let text = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(text))
+    }
+}
+
+/// On WSL, push text to the Windows clipboard so a copy inside the app is available
+/// to Windows apps even when WSLg does not bridge the selection outward.
+#[tauri::command]
+fn write_windows_clipboard_text(text: String) -> AppResult<bool> {
+    if !is_wsl() {
+        return Ok(false);
+    }
+    let mut child = Command::new("clip.exe")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(anyhow::Error::from)?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin
+            .write_all(text.replace('\n', "\r\n").as_bytes())
+            .map_err(anyhow::Error::from)?;
+    }
+    Ok(child.wait().map_err(anyhow::Error::from)?.success())
+}
+
 /// On WSL, pull an image off the *Windows* clipboard (WSLg does not bridge the image
 /// clipboard to Linux) by shelling out to `powershell.exe`, saving it as a PNG under
 /// the project's agent-attachments dir, and returning that path. Returns `Ok(None)`
 /// when not on WSL or when the Windows clipboard holds no image.
 #[tauri::command]
 fn read_windows_clipboard_image(project_path: String) -> AppResult<Option<String>> {
-    let is_wsl = std::fs::read_to_string("/proc/version")
-        .map(|version| version.to_ascii_lowercase().contains("microsoft"))
-        .unwrap_or(false);
-    if !is_wsl {
+    if !is_wsl() {
         return Ok(None);
     }
 
@@ -2971,10 +3020,7 @@ fn read_windows_clipboard_image(project_path: String) -> AppResult<Option<String
 /// when the Windows clipboard holds no files.
 #[tauri::command]
 fn read_windows_clipboard_files() -> AppResult<Vec<String>> {
-    let is_wsl = std::fs::read_to_string("/proc/version")
-        .map(|version| version.to_ascii_lowercase().contains("microsoft"))
-        .unwrap_or(false);
-    if !is_wsl {
+    if !is_wsl() {
         return Ok(Vec::new());
     }
 
@@ -5226,6 +5272,8 @@ pub fn run() {
             save_agent_attachment,
             read_windows_clipboard_image,
             read_windows_clipboard_files,
+            read_windows_clipboard_text,
+            write_windows_clipboard_text,
             agent_usage,
             check_agent_provider_health,
             list_agent_run_metrics,
@@ -5560,7 +5608,13 @@ mod tests {
 
         // Anything the tree lists and the editor can open must also be creatable:
         // no extension at all, dotfiles, uppercase, and AdvPL/Protheus sources.
-        for name in ["Dockerfile", ".env", "deploy.sh", "Component.TSX", "fonte.prw"] {
+        for name in [
+            "Dockerfile",
+            ".env",
+            "deploy.sh",
+            "Component.TSX",
+            "fonte.prw",
+        ] {
             create_source_file(root.display().to_string(), name.to_string())
                 .unwrap_or_else(|error| panic!("create {name}: {error:?}"));
             assert!(root.join(name).is_file(), "{name} not written");

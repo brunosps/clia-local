@@ -6,6 +6,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { readImage as readClipboardImage } from "@tauri-apps/plugin-clipboard-manager";
+
+import { readClipboardText, writeClipboardText } from "./clipboard";
 import {
   Archive,
   Bot,
@@ -6391,10 +6393,28 @@ function TaskModal({
     // A genuine text paste carries text/plain — let it insert normally. Only a paste with
     // no file and no text probes the Linux/Windows clipboards for an image/file.
     if (data?.getData("text/plain")?.trim()) return;
+    const target = event.currentTarget;
+    const selectionStart = target.selectionStart ?? description.length;
+    const selectionEnd = target.selectionEnd ?? description.length;
     event.preventDefault();
     setModalError("");
     setAttachBusy(true);
-    void pasteClipboardFallback().finally(() => setAttachBusy(false));
+    void (async () => {
+      try {
+        // Same as the chat composer: an empty text/plain may just mean the webview
+        // (or WSLg) did not surface text the clipboard actually holds.
+        const text = await readClipboardText();
+        if (text) {
+          const next =
+            description.slice(0, selectionStart) + text + description.slice(selectionEnd);
+          handleDescriptionChange(next, selectionStart + text.length);
+          return;
+        }
+        await pasteClipboardFallback();
+      } finally {
+        setAttachBusy(false);
+      }
+    })();
   }
 
   async function save() {
@@ -8963,8 +8983,22 @@ function AgentsPanel({
     // powershell round-trip). Only a paste with no file and no text is treated as an
     // image, probing the Linux then Windows clipboards.
     if (data?.getData("text/plain")?.trim()) return;
+    const target = event.currentTarget;
+    const selectionStart = target.selectionStart ?? composer.length;
+    const selectionEnd = target.selectionEnd ?? composer.length;
     event.preventDefault();
-    void addPastedClipboard();
+    void (async () => {
+      // An empty text/plain does not mean "this is an image": WebKitGTK (and WSLg,
+      // which may never bridge the Windows selection) can leave the paste event
+      // without text the clipboard actually holds. Check for text first, or a
+      // plain Ctrl+V would be silently swallowed.
+      const text = await readClipboardText();
+      if (text) {
+        setComposer(composer.slice(0, selectionStart) + text + composer.slice(selectionEnd));
+        return;
+      }
+      await addPastedClipboard();
+    })();
   }
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const rawBodyRef = useRef<HTMLDivElement | null>(null);
@@ -10555,6 +10589,7 @@ function SourcePanel({
   const { prompt, dialog: promptDialog } = usePrompt();
   const { confirm: confirmDelete, dialog: confirmDeleteDialog } = useConfirm();
   const { menu: treeMenu, open: openTreeMenu, close: closeTreeMenu } = useContextMenu();
+  const [pathCopied, setPathCopied] = useState(false);
   const layoutRef = useRef<HTMLDivElement>(null);
 
   // Drag the explorer/editor splitter. To avoid re-rendering the heavy panel on
@@ -10633,6 +10668,17 @@ function SourcePanel({
     else onCreateDir(relativePath);
   }
 
+  // Copy the absolute path shown in the topbar — same value for the button and
+  // for a double-click on the path text itself.
+  function copySourcePath() {
+    if (!fullSourcePath) return;
+    void writeClipboardText(fullSourcePath).then((ok) => {
+      if (!ok) return;
+      setPathCopied(true);
+      window.setTimeout(() => setPathCopied(false), 1200);
+    });
+  }
+
   function entryMenuItems(entry: SourceEntry): MenuItem[] {
     const isDir = entry.kind === "directory";
     const dir = targetDirOf(entry);
@@ -10665,9 +10711,27 @@ function SourcePanel({
     <div className="source-panel">
       <header className="source-topbar screen-topbar">
         <span className="topbar-title">Source Code</span>
-        <span className="topbar-path" title={fullSourcePath || undefined}>
+        <span
+          className="topbar-path"
+          title={fullSourcePath ? t("editor.copyPathHint") : undefined}
+          onDoubleClick={() => copySourcePath()}
+        >
           {fullSourcePath || t("editor.selectFileTopbar")}
         </span>
+        <button
+          className={pathCopied ? "topbar-btn icon-only copied" : "topbar-btn icon-only"}
+          type="button"
+          onClick={() => copySourcePath()}
+          disabled={!fullSourcePath}
+          title={t("editor.copyPath")}
+          aria-label={t("editor.copyPath")}
+        >
+          {pathCopied ? (
+            <Check aria-hidden="true" size={14} />
+          ) : (
+            <Copy aria-hidden="true" size={14} />
+          )}
+        </button>
         <div className="topbar-actions">
           <button className="topbar-btn" type="button" onClick={onQuickOpen}>
             <Search aria-hidden="true" size={14} />

@@ -13599,6 +13599,22 @@ h2 {
   padding: var(--space-2) var(--space-3);
 }
 
+.topbar-btn.icon-only {
+  width: 30px;
+  padding: 0;
+}
+
+/* Transient "copied" flash on the path copy button. */
+.topbar-btn.copied {
+  border-color: var(--clia-primary);
+  color: var(--clia-primary);
+}
+
+/* The source path doubles as a copy target (double-click). */
+.source-topbar .topbar-path {
+  cursor: pointer;
+}
+
 .topbar-btn:hover:not(:disabled),
 .explorer-btn:hover:not(:disabled),
 .sidebar-section-btn:hover:not(:disabled),
