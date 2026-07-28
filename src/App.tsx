@@ -685,6 +685,13 @@ export function App() {
   const [sourceTree, setSourceTree] = useState<SourceEntry[]>([]);
   const [selectedSourceFile, setSelectedSourceFile] = useState<SourceFile | null>(null);
   const [openFiles, setOpenFiles] = useState<SourceFile[]>([]);
+  // Unsaved editor buffers, per file. Switching editor tabs re-reads the file from
+  // disk, which used to throw away whatever had not been saved yet; the draft is
+  // what gets restored instead. Kept in a ref (it changes on every keystroke);
+  // `dirtyPaths` is the render-visible part and only flips when a file's dirty
+  // state actually changes.
+  const sourceDrafts = useRef<Map<string, string>>(new Map());
+  const [dirtyPaths, setDirtyPaths] = useState<string[]>([]);
   const [sourceExpandedPaths, setSourceExpandedPaths] = useState<string[]>([]);
   const [sourceContent, setSourceContent] = useState("");
   const [sourceBlame, setSourceBlame] = useState<BlameLine[]>([]);
@@ -1366,6 +1373,9 @@ export function App() {
     setOpenFiles([]);
     setSelectedSourceFile(null);
     setSourceContent("");
+    // Drafts belong to the project that was open; do not leak them across projects.
+    sourceDrafts.current.clear();
+    setDirtyPaths([]);
     setSourceBlame([]);
     setSourceHistory([]);
     activeSourcePathRef.current = null;
@@ -3242,14 +3252,18 @@ export function App() {
     if (result.ok) {
       const file = result.value;
       setSelectedSourceFile(file);
-      setSourceContent(file.content);
+      // An unsaved buffer for this file wins over what is on disk — that is the
+      // whole point of keeping the draft. Blame and the LSP get the same content
+      // the editor shows, or they would be reasoning about a different text.
+      const shown = sourceDrafts.current.get(relativePath) ?? file.content;
+      setSourceContent(shown);
       setOpenFiles((files) =>
         files.some((item) => item.relative_path === relativePath)
           ? files.map((item) => (item.relative_path === relativePath ? file : item))
           : [...files, file],
       );
       // Load GitLens blame + file history async; ignore if the user switched files.
-      void refreshSourceBlame(path, relativePath, file.content);
+      void refreshSourceBlame(path, relativePath, shown);
       void api.gitLogFile(path, relativePath).then((history) => {
         if (activeSourcePathRef.current === relativePath && history.ok) {
           setSourceHistory(history.value);
@@ -3260,7 +3274,7 @@ export function App() {
         monacoLanguage(relativePath),
         path,
         fileUriFor(`${path}/${relativePath}`),
-        file.content,
+        shown,
       );
     } else {
       setError(result.error);
@@ -3273,11 +3287,33 @@ export function App() {
     await openSourcePath(path, entry.relative_path);
   }
 
+  function setDraftDirty(relativePath: string, dirty: boolean) {
+    setDirtyPaths((paths) => {
+      const listed = paths.includes(relativePath);
+      if (dirty === listed) return paths;
+      return dirty ? [...paths, relativePath] : paths.filter((path) => path !== relativePath);
+    });
+  }
+
+  /** Forget the draft for a file (saved, closed or deleted). */
+  function dropSourceDraft(relativePath: string) {
+    sourceDrafts.current.delete(relativePath);
+    setDraftDirty(relativePath, false);
+  }
+
   // Editor edits: update the buffer immediately, push to the LSP debounced.
   function handleSourceContentChange(content: string) {
     setSourceContent(content);
     const relativePath = activeSourcePathRef.current;
     if (!relativePath) return;
+    // Record (or clear) the draft so switching tabs can restore it.
+    const onDisk = openFiles.find((file) => file.relative_path === relativePath)?.content;
+    if (onDisk != null && content !== onDisk) {
+      sourceDrafts.current.set(relativePath, content);
+      setDraftDirty(relativePath, true);
+    } else {
+      dropSourceDraft(relativePath);
+    }
     const uri = fileUriFor(`${currentPath}/${relativePath}`);
     if (lspChangeTimer.current) window.clearTimeout(lspChangeTimer.current);
     lspChangeTimer.current = window.setTimeout(() => {
@@ -3335,6 +3371,7 @@ export function App() {
     for (const file of openFiles) {
       if (isGone(file.relative_path)) {
         lspController.closeFile(fileUriFor(`${currentPath}/${file.relative_path}`));
+        dropSourceDraft(file.relative_path);
       }
     }
     setOpenFiles(remaining);
@@ -3475,6 +3512,7 @@ export function App() {
 
   function closeSourceTab(relativePath: string) {
     lspController.closeFile(fileUriFor(`${currentPath}/${relativePath}`));
+    dropSourceDraft(relativePath);
     const remaining = openFiles.filter((item) => item.relative_path !== relativePath);
     setOpenFiles(remaining);
     if (selectedSourceFile?.relative_path === relativePath) {
@@ -3503,6 +3541,7 @@ export function App() {
     );
     if (result.ok) {
       setSelectedSourceFile(result.value);
+      dropSourceDraft(result.value.relative_path);
       setOpenFiles((files) =>
         files.map((file) =>
           file.relative_path === result.value.relative_path ? result.value : file,
@@ -4459,6 +4498,7 @@ export function App() {
                   onCloseTab={closeSourceTab}
                   selectedFile={selectedSourceFile}
                   sourceDirty={sourceDirty}
+                  dirtyPaths={dirtyPaths}
                   sourceBusy={sourceBusy}
                   sourceSaving={sourceSaving}
                   sourceContent={sourceContent}
@@ -10698,6 +10738,7 @@ function SourcePanel({
   sourceSaving,
   sourceContent,
   sourceDirty,
+  dirtyPaths,
   sourceTree,
   editorFontSize,
   revealLine,
@@ -10742,6 +10783,7 @@ function SourcePanel({
   sourceSaving: boolean;
   sourceContent: string;
   sourceDirty: boolean;
+  dirtyPaths: string[];
   sourceTree: SourceEntry[];
   editorFontSize: number;
   revealLine: number | null;
@@ -11065,6 +11107,7 @@ function SourcePanel({
             openFiles={openFiles}
             activePath={selectedFile?.relative_path ?? null}
             dirty={sourceDirty}
+            dirtyPaths={dirtyPaths}
             previewActive={previewActive}
             onSelect={onSelectTab}
             onClose={onCloseTab}
@@ -12659,6 +12702,7 @@ function GitWorkbench({
   const [newBranchModal, setNewBranchModal] = useState<{ source: string } | null>(null);
   // `remote: true` means the target is a remote-tracking ref (origin/x) that has
   // to be fetched into a local tracking branch instead of checked out directly.
+  const [branchCopied, setBranchCopied] = useState(false);
   const [pendingCheckout, setPendingCheckout] = useState<{
     full: string;
     remote: boolean;
@@ -13225,6 +13269,27 @@ function GitWorkbench({
             <GitBranch aria-hidden="true" size={14} />
             {currentBranch ?? (repoState?.detached ? "(detached)" : "—")}
           </span>
+          <button
+            className={branchCopied ? "topbar-btn icon-only copied" : "topbar-btn icon-only"}
+            type="button"
+            disabled={!currentBranch}
+            title={t("git.copyBranch")}
+            aria-label={t("git.copyBranch")}
+            onClick={() => {
+              if (!currentBranch) return;
+              void writeClipboardText(currentBranch).then((ok) => {
+                if (!ok) return;
+                setBranchCopied(true);
+                window.setTimeout(() => setBranchCopied(false), 1200);
+              });
+            }}
+          >
+            {branchCopied ? (
+              <Check aria-hidden="true" size={14} />
+            ) : (
+              <Copy aria-hidden="true" size={14} />
+            )}
+          </button>
           {repoState && (repoState.ahead > 0 || repoState.behind > 0) ? (
             <span className="git-tracking">
               ↑{repoState.ahead} ↓{repoState.behind}

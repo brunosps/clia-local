@@ -15,6 +15,7 @@ export function EditorTabs({
   openFiles,
   activePath,
   dirty,
+  dirtyPaths,
   previewActive,
   onSelect,
   onClose,
@@ -23,6 +24,8 @@ export function EditorTabs({
   openFiles: SourceFile[];
   activePath: string | null;
   dirty: boolean;
+  /** Files with unsaved drafts — a tab can be dirty while another one is active. */
+  dirtyPaths: string[];
   previewActive: boolean;
   onSelect: (relativePath: string) => void;
   onClose: (relativePath: string) => void;
@@ -57,7 +60,9 @@ export function EditorTabs({
             >
               <Icon aria-hidden="true" size={15} style={{ color }} />
               <span>{baseName(file.relative_path)}</span>
-              {active && dirty ? <span className="editor-tab-dirty" aria-label="não salvo" /> : null}
+              {(active && dirty) || dirtyPaths.includes(file.relative_path) ? (
+                <span className="editor-tab-dirty" aria-label="não salvo" />
+              ) : null}
             </button>
             {markdown ? (
               <button

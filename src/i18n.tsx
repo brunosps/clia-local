@@ -314,6 +314,7 @@ const EN = {
   "git.noStash": "No stash saved.",
   "git.createBranch": "Create branch",
   "git.branchPlaceholder": "feat/my-branch",
+  "git.copyBranch": "Copy the current branch name",
   "git.checkoutHint": "Double-click to checkout · right-click for more actions",
   "git.checkoutRemoteHint":
     "Double-click to fetch and checkout a local branch tracking this one · right-click for more actions",
@@ -984,6 +985,7 @@ const PT_BR: Record<TranslationKey, string> = {
   "git.noStash": "Nenhum stash salvo.",
   "git.createBranch": "Criar branch",
   "git.branchPlaceholder": "feat/minha-branch",
+  "git.copyBranch": "Copiar o nome da branch atual",
   "git.checkoutHint": "Duplo clique para checkout · botão direito para mais ações",
   "git.checkoutRemoteHint":
     "Duplo clique para baixar e criar uma branch local que a acompanha · botão direito para mais ações",
