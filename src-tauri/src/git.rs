@@ -1793,6 +1793,53 @@ pub fn pull(repo: &Path, rebase: bool) -> anyhow::Result<String> {
     Ok(result)
 }
 
+/// Where a plain `git push` would land, and whether it can land at all.
+#[derive(Debug, Serialize)]
+pub struct PushTarget {
+    pub branch: String,
+    pub upstream: Option<String>,
+    /// True when there is no upstream, or when it points at a branch with a
+    /// different name. Both cases make a bare `git push` fail under the default
+    /// `push.default = simple`, and both are fixed by naming the target explicitly.
+    pub needs_upstream: bool,
+}
+
+/// Inspect the current branch's tracking configuration.
+///
+/// A new branch created off another one often inherits that branch's upstream
+/// (`branch.autoSetupMerge`), so "has an upstream" is not the same as "can be
+/// pushed" — the upstream has to carry the *same name*. Checking only for the
+/// presence of an upstream is what made push fail with git's "upstream branch of
+/// your current branch does not match the name of your current branch".
+pub fn push_target(repo: &Path) -> anyhow::Result<PushTarget> {
+    let branch = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let branch = branch.trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        return Err(anyhow!(
+            "HEAD destacado: faça checkout de uma branch antes do push."
+        ));
+    }
+    let upstream = git(repo, &["rev-parse", "--abbrev-ref", "@{u}"])
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let needs_upstream = match upstream.as_deref() {
+        None => true,
+        Some(full) => match split_remote_ref(repo, full) {
+            Ok((_, tracked)) => tracked != branch,
+            // Unknown remote: naming the target explicitly is the safe move.
+            Err(_) => true,
+        },
+    };
+
+    Ok(PushTarget {
+        branch,
+        upstream,
+        needs_upstream,
+    })
+}
+
 pub fn push(repo: &Path, set_upstream: bool, force_with_lease: bool) -> anyhow::Result<String> {
     let mut args: Vec<&str> = vec!["push"];
     if force_with_lease {
@@ -1999,9 +2046,23 @@ pub fn rename_branch(repo: &Path, old_name: &str, new_name: &str) -> anyhow::Res
     git(repo, &["branch", "-m", old_name, new_name])
 }
 
-pub fn delete_branch(repo: &Path, name: &str, force: bool) -> anyhow::Result<String> {
+/// Delete a local branch, and optionally the branch of the same name on `origin`.
+///
+/// The remote deletion runs first: if the local deletion were done first and the
+/// remote one failed, the branch would be gone locally with no easy way to retry
+/// the remote part from the UI.
+pub fn delete_branch(repo: &Path, name: &str, force: bool, remote: bool) -> anyhow::Result<String> {
     validate_ref_name(name)?;
-    git(repo, &["branch", if force { "-D" } else { "-d" }, name])
+    let mut notes = Vec::new();
+    if remote {
+        match git(repo, &["push", "origin", "--delete", name]) {
+            Ok(_) => notes.push(format!("origin/{name} apagada")),
+            Err(error) => return Err(anyhow!("falha ao apagar origin/{name}: {error}")),
+        }
+    }
+    git(repo, &["branch", if force { "-D" } else { "-d" }, name])?;
+    notes.insert(0, format!("branch '{name}' apagada"));
+    Ok(notes.join(" · "))
 }
 
 pub fn merge_branch(repo: &Path, name: &str) -> anyhow::Result<String> {
@@ -2617,6 +2678,68 @@ mod tests {
         run_git(&clone, &["config", "user.email", "test@example.com"]);
         run_git(&clone, &["config", "user.name", "Test User"]);
         (upstream, clone)
+    }
+
+    #[test]
+    fn push_target_flags_a_branch_whose_upstream_has_another_name() {
+        let (upstream, clone) = init_repo_with_clone();
+        let default_branch = git(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]).expect("head");
+
+        // On the tracking branch itself nothing special is needed.
+        let target = push_target(&clone).expect("push target");
+        assert_eq!(target.branch, default_branch);
+        assert!(!target.needs_upstream, "tracking branch should push as-is");
+
+        // A new branch with NO upstream must name the target explicitly.
+        run_git(&clone, &["checkout", "-b", "tasks/ED-6087"]);
+        let target = push_target(&clone).expect("push target");
+        assert_eq!(target.branch, "tasks/ED-6087");
+        assert_eq!(target.upstream, None);
+        assert!(target.needs_upstream);
+
+        // The real-world case: the branch inherited the parent's upstream, so an
+        // upstream EXISTS but names a different branch — a bare push would fail.
+        run_git(
+            &clone,
+            &[
+                "branch",
+                "--set-upstream-to",
+                &format!("origin/{default_branch}"),
+                "tasks/ED-6087",
+            ],
+        );
+        let target = push_target(&clone).expect("push target");
+        assert_eq!(target.upstream, Some(format!("origin/{default_branch}")));
+        assert!(
+            target.needs_upstream,
+            "an upstream with a different name still needs an explicit target"
+        );
+
+        std::fs::remove_dir_all(upstream).expect("cleanup upstream");
+        std::fs::remove_dir_all(clone).expect("cleanup clone");
+    }
+
+    #[test]
+    fn delete_branch_can_remove_the_remote_one_too() {
+        let (upstream, clone) = init_repo_with_clone();
+        let default_branch = git(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]).expect("head");
+
+        run_git(&clone, &["checkout", "-b", "tasks/gone"]);
+        run_git(&clone, &["commit", "--allow-empty", "-m", "work"]);
+        run_git(&clone, &["push", "-u", "origin", "tasks/gone"]);
+        run_git(&clone, &["checkout", &default_branch]);
+        assert!(ref_exists(&clone, "refs/remotes/origin/tasks/gone"));
+
+        delete_branch(&clone, "tasks/gone", true, true).expect("delete both");
+
+        assert!(!ref_exists(&clone, "refs/heads/tasks/gone"));
+        // Gone on the remote repo itself, not just in this clone's stale refs.
+        let remote_branches =
+            git(&upstream, &["branch", "--list", "tasks/gone"]).expect("branches");
+        assert!(remote_branches.trim().is_empty(), "{remote_branches}");
+
+        std::fs::remove_dir_all(upstream).expect("cleanup upstream");
+        std::fs::remove_dir_all(clone).expect("cleanup clone");
     }
 
     #[test]

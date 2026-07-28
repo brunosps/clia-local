@@ -12948,6 +12948,28 @@ function GitWorkbench({
     else setError(result.error);
   }
 
+  // A bare `git push` fails when the branch has no upstream, or an upstream whose
+  // name differs (a new branch often inherits the parent's tracking). Ask before
+  // creating the branch on origin instead of surfacing git's raw refusal.
+  async function doPush() {
+    const target = await api.gitPushTarget(path);
+    if (!target.ok) {
+      setError(target.error);
+      return;
+    }
+    if (target.value.needs_upstream) {
+      const ok = await confirm({
+        title: t("git.confirm.createRemoteBranchTitle", { name: target.value.branch }),
+        body: target.value.upstream
+          ? t("git.confirm.createRemoteBranchMismatch", { upstream: target.value.upstream })
+          : t("git.confirm.createRemoteBranchMissing"),
+        confirmLabel: t("git.confirm.createRemoteBranchConfirm"),
+      });
+      if (!ok) return;
+    }
+    void run("Push", () => api.gitPush(path, { setUpstream: target.value.needs_upstream }));
+  }
+
   function requestCheckout(full: string, remote = false) {
     if (repoState?.dirty) {
       setPendingCheckout({ full, remote });
@@ -13089,20 +13111,44 @@ function GitWorkbench({
         label: t("git.menu.delete"),
         danger: true,
         disabled: isHead,
-        onSelect: () =>
-          void confirm({
-            title: t("git.confirm.deleteBranchTitle", { name: leaf.full }),
+        submenu: [
+          {
+            label: t("git.menu.deleteLocal"),
+            onSelect: () =>
+              void confirm({
+                title: t("git.confirm.deleteBranchTitle", { name: leaf.full }),
+                danger: true,
+                confirmLabel: t("git.menu.delete"),
+              }).then((ok) => {
+                if (ok)
+                  void run(t("git.run.branchDeleted"), () =>
+                    api.gitDeleteBranch(path, leaf.full),
+                  );
+              }),
+          },
+          {
+            label: t("git.menu.deleteLocalAndRemote"),
             danger: true,
-            confirmLabel: t("git.menu.delete"),
-          }).then((ok) => {
-            if (ok) void run(t("git.run.branchDeleted"), () => api.gitDeleteBranch(path, leaf.full));
-          }),
+            onSelect: () =>
+              void confirm({
+                title: t("git.confirm.deleteBranchRemoteTitle", { name: leaf.full }),
+                body: t("git.confirm.deleteBranchRemoteBody"),
+                danger: true,
+                confirmLabel: t("git.menu.deleteLocalAndRemote"),
+              }).then((ok) => {
+                if (ok)
+                  void run(t("git.run.branchDeleted"), () =>
+                    api.gitDeleteBranch(path, leaf.full, false, true),
+                  );
+              }),
+          },
+        ],
       },
       { separator: true },
       {
         label: "Push",
         onSelect: () =>
-          void run("Push", () => api.gitPush(path, { setUpstream: !repoState?.upstream })),
+          void doPush(),
       },
       { label: "Pull", onSelect: () => void run("Pull", pullWithSubmodules(false)) },
     ];
@@ -13324,7 +13370,7 @@ function GitWorkbench({
             type="button"
             disabled={busy}
             onClick={() =>
-              void run("Push", () => api.gitPush(path, { setUpstream: !repoState?.upstream }))
+              void doPush()
             }
           >
             <GitPullRequestArrow aria-hidden="true" size={15} /> Push

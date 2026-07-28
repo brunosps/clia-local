@@ -32,6 +32,7 @@ import type {
   GitWorktreeFingerprint,
   GitWorktreeSnapshot,
   PatchArea,
+  PushTarget,
   PatchCheckResult,
   RebaseStep,
   RemoteBranch,
@@ -866,8 +867,11 @@ export const api = {
   gitRenameBranch(path: string, oldName: string, newName: string) {
     return invokeSafe<string>("git_rename_branch", { path, oldName, newName });
   },
-  gitDeleteBranch(path: string, name: string, force = false) {
-    return invokeSafe<string>("git_delete_branch", { path, name, force });
+  gitPushTarget(path: string) {
+    return invokeSafe<PushTarget>("git_push_target", { path });
+  },
+  gitDeleteBranch(path: string, name: string, force = false, remote = false) {
+    return invokeSafe<string>("git_delete_branch", { path, name, force, remote });
   },
   gitMergeBranch(path: string, name: string) {
     return invokeSafe<string>("git_merge_branch", { path, name });

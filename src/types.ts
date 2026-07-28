@@ -1097,3 +1097,9 @@ export type ClipboardDiagnostics = {
   windows_text_len: number | null;
   windows_error: string | null;
 };
+
+export type PushTarget = {
+  branch: string;
+  upstream: string | null;
+  needs_upstream: boolean;
+};
