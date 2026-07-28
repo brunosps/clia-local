@@ -166,6 +166,11 @@ export function MonacoSource({
     const dom = ed.getDomNode();
     if (dom) {
       const onPaste = (event: ClipboardEvent) => {
+        // `executeEdits` bypasses readOnly (that option only blocks user input), so
+        // without this the fallback would let a paste mutate the historical-version
+        // viewer. Read the live option rather than the prop, which may have changed
+        // since mount.
+        if (ed.getOption(monaco.editor.EditorOption.readOnly)) return;
         // Text came through normally — let Monaco handle it (keeps multi-cursor,
         // bracket handling and the native undo stop intact).
         if (event.clipboardData?.getData("text/plain")) return;
