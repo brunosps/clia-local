@@ -9,7 +9,15 @@ name: build
 # GITHUB_TOKEN is enough and no secret is needed.)
 
 on:
+  # Manual runs can target a single OS — handy to get one bundle out fast for
+  # testing without paying for the other two. Tag pushes always build all three.
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Which bundles to build"
+        type: choice
+        options: ["all", "linux", "windows", "macos"]
+        default: "all"
   push:
     tags: ["v*"]
 
@@ -25,6 +33,10 @@ jobs:
   build-linux:
     name: linux (appimage + deb)
     runs-on: ubuntu-latest
+    # Tag pushes build everything; a manual run honours the platform input.
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || contains(fromJSON('["all", "linux"]'), inputs.platforms)
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -95,6 +107,10 @@ jobs:
   build-windows:
     name: windows (msi + nsis)
     runs-on: windows-latest
+    # Tag pushes build everything; a manual run honours the platform input.
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || contains(fromJSON('["all", "windows"]'), inputs.platforms)
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -150,6 +166,10 @@ jobs:
   build-macos:
     name: macos (dmg)
     runs-on: macos-latest
+    # Tag pushes build everything; a manual run honours the platform input.
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || contains(fromJSON('["all", "macos"]'), inputs.platforms)
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
