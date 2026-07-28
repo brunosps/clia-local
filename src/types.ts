@@ -1095,6 +1095,7 @@ export type ClipboardDiagnostics = {
   gdk_backend: string | null;
   powershell: string | null;
   windows_text_len: number | null;
+  windows_text_preview: string | null;
   windows_error: string | null;
 };
 

@@ -8226,8 +8226,12 @@ function ClipboardDiagnosticsSection() {
         ["powershell.exe", report.powershell ?? "não encontrado"],
         [
           "clipboard do Windows",
-          report.windows_error ?? (report.windows_text_len == null ? "—" : `${report.windows_text_len} chars`),
+          report.windows_error ??
+            (report.windows_text_len == null ? "—" : `${report.windows_text_len} chars`),
         ],
+        // Shown verbatim: mangled accents here point at the code page, not at an
+        // empty clipboard.
+        ["prévia", report.windows_text_preview ?? "—"],
       ]
     : [];
 

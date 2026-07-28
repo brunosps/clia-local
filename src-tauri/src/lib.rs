@@ -2957,7 +2957,13 @@ fn read_windows_clipboard_text() -> AppResult<Option<String>> {
 
     // `GetText` needs an STA thread. `[Console]::Out.Write` (not Write-Output) so
     // PowerShell does not append a newline of its own to the clipboard content.
-    let script = "Add-Type -AssemblyName System.Windows.Forms; \
+    //
+    // OutputEncoding is set explicitly: with stdout redirected, PowerShell encodes
+    // it in the console's ACTIVE CODE PAGE, not UTF-8. Without this every accented
+    // character comes back mangled — the paste looked like it worked and quietly
+    // corrupted the text.
+    let script = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+         Add-Type -AssemblyName System.Windows.Forms; \
          [Console]::Out.Write([System.Windows.Forms.Clipboard]::GetText())";
     let output = Command::new(&powershell)
         .args(["-NoProfile", "-STA", "-Command", script])
@@ -2991,6 +2997,10 @@ struct ClipboardDiagnostics {
     gdk_backend: Option<String>,
     powershell: Option<String>,
     windows_text_len: Option<usize>,
+    /// First few characters of what the Windows clipboard returned. Present so an
+    /// encoding problem is visible at a glance — mangled accents here mean the
+    /// bridge is decoding with the wrong code page, not that the clipboard is empty.
+    windows_text_preview: Option<String>,
     windows_error: Option<String>,
 }
 
@@ -3000,16 +3010,24 @@ fn diagnose_clipboard() -> AppResult<ClipboardDiagnostics> {
     let wsl = is_wsl();
     let powershell = if wsl { windows_powershell() } else { None };
 
-    let (windows_text_len, windows_error) = match (&wsl, &powershell) {
+    let (windows_text_len, windows_text_preview, windows_error) = match (&wsl, &powershell) {
         (true, Some(_)) => match read_windows_clipboard_text() {
-            Ok(text) => (Some(text.map(|value| value.len()).unwrap_or(0)), None),
-            Err(error) => (None, Some(format!("{error:?}"))),
+            Ok(text) => {
+                let len = text
+                    .as_ref()
+                    .map(|value| value.chars().count())
+                    .unwrap_or(0);
+                let preview = text.map(|value| value.chars().take(48).collect::<String>());
+                (Some(len), preview, None)
+            }
+            Err(error) => (None, None, Some(format!("{error:?}"))),
         },
         (true, None) => (
             None,
+            None,
             Some("powershell.exe not found (PATH nor /mnt/c/...)".to_string()),
         ),
-        _ => (None, None),
+        _ => (None, None, None),
     };
 
     Ok(ClipboardDiagnostics {
@@ -3020,6 +3038,7 @@ fn diagnose_clipboard() -> AppResult<ClipboardDiagnostics> {
         gdk_backend: env("GDK_BACKEND"),
         powershell: powershell.map(|path| path.to_string_lossy().to_string()),
         windows_text_len,
+        windows_text_preview,
         windows_error,
     })
 }
@@ -3028,25 +3047,51 @@ fn diagnose_clipboard() -> AppResult<ClipboardDiagnostics> {
 /// to Windows apps even when WSLg does not bridge the selection outward.
 #[tauri::command]
 fn write_windows_clipboard_text(text: String) -> AppResult<bool> {
-    if !is_wsl() {
+    if !is_wsl() || text.is_empty() {
         return Ok(false);
     }
-    let clip = if Path::new("/mnt/c/Windows/System32/clip.exe").is_file() {
-        PathBuf::from("/mnt/c/Windows/System32/clip.exe")
-    } else {
-        PathBuf::from("clip.exe")
+    let Some(powershell) = windows_powershell() else {
+        return Ok(false);
     };
-    let mut child = Command::new(&clip)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(anyhow::Error::from)?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin
-            .write_all(text.replace('\n', "\r\n").as_bytes())
-            .map_err(anyhow::Error::from)?;
-    }
-    Ok(child.wait().map_err(anyhow::Error::from)?.success())
+
+    // Deliberately NOT `clip.exe`: it decodes stdin with the console's active code
+    // page (CP850/CP1252 on a pt-BR Windows), so piping UTF-8 into it turned every
+    // accented character into mojibake on the Windows side. Handing the text over
+    // as a UTF-8 file and naming the encoding explicitly removes the guesswork.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let temp = std::env::temp_dir().join(format!("clia-clipboard-{stamp}.txt"));
+    // Windows consumers expect CRLF; normalize first so existing CRLF is not doubled.
+    let normalized = text.replace("\r\n", "\n").replace('\n', "\r\n");
+    std::fs::write(&temp, normalized.as_bytes()).map_err(anyhow::Error::from)?;
+
+    let result = (|| -> anyhow::Result<bool> {
+        let win_path_out = Command::new("wslpath").arg("-w").arg(&temp).output()?;
+        if !win_path_out.status.success() {
+            return Ok(false);
+        }
+        let win_path = String::from_utf8_lossy(&win_path_out.stdout)
+            .trim()
+            .to_string();
+        if win_path.is_empty() {
+            return Ok(false);
+        }
+        let escaped = win_path.replace('\'', "''");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             [System.Windows.Forms.Clipboard]::SetText(\
+               [System.IO.File]::ReadAllText('{escaped}', [System.Text.Encoding]::UTF8))"
+        );
+        let output = Command::new(&powershell)
+            .args(["-NoProfile", "-STA", "-Command", &script])
+            .output()?;
+        Ok(output.status.success())
+    })();
+
+    let _ = std::fs::remove_file(&temp);
+    Ok(result?)
 }
 
 /// On WSL, pull an image off the *Windows* clipboard (WSLg does not bridge the image

@@ -2,7 +2,7 @@ import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import { useEffect, useRef } from "react";
 import type { editor, IDisposable, Position } from "monaco-editor";
 import type { BlameLine } from "../types";
-import { readClipboardText } from "../clipboard";
+import { readClipboardText, writeClipboardText } from "../clipboard";
 import { setupMonaco } from "../monaco/setup";
 import {
   fileHeaderSummary,
@@ -194,6 +194,19 @@ export function MonacoSource({
         ed.pushUndoStop();
         ed.focus();
       });
+    });
+
+    // Copy goes through the app's clipboard chain for the same reason as paste:
+    // under WSL the hand-off to Windows has to be done explicitly and in UTF-8.
+    // Empty selection copies the whole line, matching Monaco/VS Code.
+    ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyC, () => {
+      const model = ed.getModel();
+      const selection = ed.getSelection();
+      if (!model || !selection) return;
+      const text = selection.isEmpty()
+        ? model.getLineContent(selection.startLineNumber) + "\n"
+        : model.getValueInRange(selection);
+      if (text) void writeClipboardText(text);
     });
 
     // Belt and braces: if the engine dispatches a paste event anyway right after
