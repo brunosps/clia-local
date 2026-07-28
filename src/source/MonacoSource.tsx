@@ -2,6 +2,7 @@ import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import { useEffect, useRef } from "react";
 import type { editor, IDisposable, Position } from "monaco-editor";
 import type { BlameLine } from "../types";
+import { readClipboardText } from "../clipboard";
 import { setupMonaco } from "../monaco/setup";
 import {
   fileHeaderSummary,
@@ -157,6 +158,40 @@ export function MonacoSource({
         ed.pushUndoStop();
       });
     });
+    // Monaco reads the paste straight off the clipboard event, so it never reaches
+    // the app's clipboard fallbacks. Under WSL the Linux selection can be empty
+    // even when the Windows one is not (WSLg does not always bridge it), and the
+    // paste then silently inserts nothing. Capture phase so this runs before
+    // Monaco's own handler on the inner textarea.
+    const dom = ed.getDomNode();
+    if (dom) {
+      const onPaste = (event: ClipboardEvent) => {
+        // Text came through normally — let Monaco handle it (keeps multi-cursor,
+        // bracket handling and the native undo stop intact).
+        if (event.clipboardData?.getData("text/plain")) return;
+        // preventDefault has to happen synchronously, before the async read.
+        event.preventDefault();
+        event.stopPropagation();
+        void readClipboardText().then((text) => {
+          if (!text) return;
+          const selections = ed.getSelections();
+          if (!selections?.length) return;
+          ed.executeEdits(
+            "clipboard-fallback",
+            selections.map((selection) => ({
+              range: selection,
+              text,
+              forceMoveMarkers: true,
+            })),
+          );
+          ed.pushUndoStop();
+          ed.focus();
+        });
+      };
+      dom.addEventListener("paste", onPaste, true);
+      ed.onDidDispose(() => dom.removeEventListener("paste", onPaste, true));
+    }
+
     applyGutter();
     updateInline(ed.getPosition()?.lineNumber ?? 1);
     const start = ed.getPosition();

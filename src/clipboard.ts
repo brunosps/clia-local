@@ -44,6 +44,69 @@ export async function writeClipboardText(text: string): Promise<boolean> {
 }
 
 /**
+ * Input types a paste can land in. Restricted to the types that support
+ * `setSelectionRange` — `email` and `number` throw InvalidStateError on it, so
+ * they are deliberately absent rather than handled.
+ */
+const TEXT_INPUT_TYPES = new Set(["text", "search", "url", "tel", "password", ""]);
+
+/**
+ * Write into a controlled React field.
+ *
+ * Assigning `.value` directly is invisible to React — it tracks the previous value
+ * on the node and would skip the change. Going through the prototype's setter and
+ * then dispatching `input` is what makes React pick the new value up.
+ */
+function insertIntoField(field: HTMLInputElement | HTMLTextAreaElement, text: string) {
+  const start = field.selectionStart ?? field.value.length;
+  const end = field.selectionEnd ?? field.value.length;
+  const next = field.value.slice(0, start) + text + field.value.slice(end);
+  const prototype =
+    field instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+  if (setter) setter.call(field, next);
+  else field.value = next;
+  const caret = start + text.length;
+  field.setSelectionRange(caret, caret);
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+/**
+ * App-wide safety net for pastes that carry no text.
+ *
+ * The Linux selection can be empty while the clipboard genuinely holds text —
+ * under WSL, WSLg does not always bridge the Windows selection across. Without
+ * this, every plain input in the app silently inserts nothing.
+ *
+ * Deliberately on the BUBBLE phase and skipping `defaultPrevented`: anything that
+ * already handles its own paste (the chat composer and the task description, which
+ * also probe for images/files; Monaco, which inserts through the editor API) runs
+ * first and opts out just by calling preventDefault.
+ */
+export function installPasteFallback(): () => void {
+  const onPaste = (event: ClipboardEvent) => {
+    if (event.defaultPrevented) return;
+    if (event.clipboardData?.getData("text/plain")) return;
+    const target = event.target as HTMLElement | null;
+    const field = target?.closest?.("input, textarea") as
+      | HTMLInputElement
+      | HTMLTextAreaElement
+      | null;
+    if (!field || field.readOnly || field.disabled) return;
+    if (field instanceof HTMLInputElement && !TEXT_INPUT_TYPES.has(field.type)) return;
+    // Must be synchronous — the async read below cannot cancel the default action.
+    event.preventDefault();
+    void readClipboardText().then((text) => {
+      if (text) insertIntoField(field, text);
+    });
+  };
+  window.addEventListener("paste", onPaste);
+  return () => window.removeEventListener("paste", onPaste);
+}
+
+/**
  * Read clipboard text, falling back to the Windows clipboard on WSL.
  * Returns null when every route comes back empty.
  */

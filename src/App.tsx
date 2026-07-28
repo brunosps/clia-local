@@ -7,7 +7,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { readImage as readClipboardImage } from "@tauri-apps/plugin-clipboard-manager";
 
-import { readClipboardText, writeClipboardText } from "./clipboard";
+import { installPasteFallback, readClipboardText, writeClipboardText } from "./clipboard";
 import {
   Archive,
   Bot,
@@ -1247,6 +1247,9 @@ export function App() {
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, []);
+
+  // Safety net for pastes that arrive without text (see clipboard.ts).
+  useEffect(() => installPasteFallback(), []);
 
   useEffect(() => {
     if (!error) return;
