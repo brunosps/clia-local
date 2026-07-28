@@ -2824,13 +2824,16 @@ fn scoped_new_path(root: &Path, relative_path: &str) -> anyhow::Result<PathBuf> 
     Ok(joined)
 }
 
+/// Create an empty file. There is deliberately no extension allow-list: the tree
+/// lists every file and `read_source_file` opens anything non-binary under the
+/// size limit, so gating creation to a fixed set only made it impossible to add
+/// the files the editor can already edit — `Dockerfile`, `.env`, `.sh`, `.sql`,
+/// `.prw`/`.tlpp` (which even have dedicated cp1252 handling), or any extension
+/// spelled in uppercase. A brand-new file is empty, so it is never binary.
 #[tauri::command]
 fn create_source_file(path: String, relative_path: String) -> AppResult<SourceFile> {
     let root = canonical_project_root(&PathBuf::from(path))?;
     let file_path = scoped_new_path(&root, &relative_path)?;
-    if !is_supported_source_file(&file_path) {
-        return Err(anyhow::anyhow!("unsupported file extension").into());
-    }
     if file_path.exists() {
         return Err(anyhow::anyhow!("file already exists").into());
     }
@@ -4598,8 +4601,7 @@ fn should_exclude_source_dir(root: &Path, path: &Path, name: &str, is_root: bool
 fn should_include_source_file(_path: &Path, name: &str, is_root: bool) -> bool {
     // List every file in the folder (the user asked to see all sources). Hidden
     // dotfiles are still only surfaced at the project root; heavy directories are
-    // pruned separately by `should_exclude_source_dir`. `is_supported_source_file`
-    // stays in use to gate which new files the editor may create.
+    // pruned separately by `should_exclude_source_dir`.
     if name.starts_with('.') {
         return is_root;
     }
@@ -4626,36 +4628,6 @@ fn is_advpl_source(path: &Path) -> bool {
                     | "ahu"
                     | "apl"
                     | "apw"
-            )
-        })
-}
-
-fn is_supported_source_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension,
-                "ts" | "tsx"
-                    | "js"
-                    | "jsx"
-                    | "mjs"
-                    | "cjs"
-                    | "json"
-                    | "md"
-                    | "mdx"
-                    | "rs"
-                    | "py"
-                    | "cs"
-                    | "css"
-                    | "scss"
-                    | "less"
-                    | "html"
-                    | "htm"
-                    | "txt"
-                    | "toml"
-                    | "yml"
-                    | "yaml"
             )
         })
 }
@@ -5577,7 +5549,7 @@ mod tests {
     }
 
     #[test]
-    fn create_source_file_creates_nested_supported_file() {
+    fn create_source_file_creates_nested_file_of_any_extension() {
         let root = fixture_root();
 
         let created = create_source_file(root.display().to_string(), "src/lib/new.ts".to_string())
@@ -5586,8 +5558,22 @@ mod tests {
         assert_eq!(created.bytes, 0);
         assert!(root.join("src/lib/new.ts").is_file());
 
-        // Unsupported extension and duplicate creation are rejected.
-        assert!(create_source_file(root.display().to_string(), "notes.bin".to_string()).is_err());
+        // Anything the tree lists and the editor can open must also be creatable:
+        // no extension at all, dotfiles, uppercase, and AdvPL/Protheus sources.
+        for name in ["Dockerfile", ".env", "deploy.sh", "Component.TSX", "fonte.prw"] {
+            create_source_file(root.display().to_string(), name.to_string())
+                .unwrap_or_else(|error| panic!("create {name}: {error:?}"));
+            assert!(root.join(name).is_file(), "{name} not written");
+        }
+        // AdvPL sources still come back tagged cp1252 so accented edits round-trip.
+        assert_eq!(
+            create_source_file(root.display().to_string(), "outro.tlpp".to_string())
+                .expect("create tlpp")
+                .encoding,
+            "windows-1252"
+        );
+
+        // Duplicates are still rejected.
         assert!(
             create_source_file(root.display().to_string(), "src/lib/new.ts".to_string()).is_err()
         );
