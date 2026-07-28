@@ -16045,3 +16045,24 @@ h2 {
   color: var(--clia-muted);
   cursor: pointer;
 }
+
+.splash-caption {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.splash-version {
+  color: rgba(215, 226, 237, 0.5);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.85em;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.zoom-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}

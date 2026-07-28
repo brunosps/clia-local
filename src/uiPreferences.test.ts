@@ -16,6 +16,11 @@ describe("uiPreferences", () => {
     expect(clampNumberPreference("640", 320, { min: 200, max: 620 })).toBe(620);
     expect(clampNumberPreference("180", 320, { min: 200, max: 620 })).toBe(200);
     expect(clampNumberPreference("bad", 320, { min: 200, max: 620 })).toBe(320);
+    // A key that was never stored comes back as null; it must land on the caller's
+    // fallback, not on bounds.min (Number(null) is 0, which is finite).
+    expect(clampNumberPreference(null, 320, { min: 200, max: 620 })).toBe(320);
+    expect(clampNumberPreference(undefined, 320, { min: 200, max: 620 })).toBe(320);
+    expect(clampNumberPreference("", 320, { min: 200, max: 620 })).toBe(320);
   });
 
   it("parses only known app tabs", () => {

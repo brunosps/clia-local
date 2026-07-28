@@ -139,6 +139,14 @@ import cliaMarkUrl from "./assets/brand/clia-dev-mark.svg";
 import cliaSplashLogoUrl from "./assets/brand/clia-dev-splash.svg";
 import packageInfo from "../package.json";
 import {
+  APP_ZOOM_KEY,
+  APP_ZOOM_STEPS,
+  DEFAULT_APP_ZOOM,
+  applyAppZoom,
+  normalizeAppZoom,
+  stepAppZoom,
+} from "./appZoom";
+import {
   ContextMenu,
   useConfirm,
   useContextMenu,
@@ -482,6 +490,13 @@ export function App() {
   const [themeMode, setThemeModeState] = useState<ThemeMode>("clia");
   const [activeTab, setActiveTab] = useState<Tab>("queue");
   const [appVersion, setAppVersion] = useState(APP_VERSION);
+  const [appZoom, setAppZoom] = useState(DEFAULT_APP_ZOOM);
+  // The shortcut handler below is bound once on mount; read the zoom through a ref
+  // so it never steps from a stale value.
+  const zoomRef = useRef(appZoom);
+  useEffect(() => {
+    zoomRef.current = appZoom;
+  }, [appZoom]);
   const [flowRegistry, setFlowRegistry] = useState<FlowRegistry>(() =>
     singleFlowRegistry(DEFAULT_WORKBENCH_SCHEMA),
   );
@@ -1242,14 +1257,54 @@ export function App() {
         event.preventDefault();
         event.stopPropagation();
         setFilePaletteOpen(true);
+      } else if (key === "=" || key === "+" || event.code === "Equal") {
+        event.preventDefault();
+        event.stopPropagation();
+        void changeAppZoom(stepAppZoom(zoomRef.current, 1));
+      } else if (key === "-" || event.code === "Minus") {
+        event.preventDefault();
+        event.stopPropagation();
+        void changeAppZoom(stepAppZoom(zoomRef.current, -1));
+      } else if (key === "0" || event.code === "Digit0") {
+        event.preventDefault();
+        event.stopPropagation();
+        void changeAppZoom(DEFAULT_APP_ZOOM);
       }
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Safety net for pastes that arrive without text (see clipboard.ts).
   useEffect(() => installPasteFallback(), []);
+
+  // Persist only after the webview accepts the zoom: storing a value the platform
+  // silently refused would leave the setting showing a scale that is not applied.
+  async function changeAppZoom(value: number) {
+    const zoom = normalizeAppZoom(value);
+    if (!(await applyAppZoom(zoom))) {
+      setError(t("settings.zoom.unsupported"));
+      return;
+    }
+    setAppZoom(zoom);
+    void api.setAppState(APP_ZOOM_KEY, String(zoom));
+  }
+
+  // App zoom is global (not per workspace/project): it is a display preference for
+  // the window itself. Applied on boot so a restart keeps the chosen scale.
+  useEffect(() => {
+    let cancelled = false;
+    void api.getAppState(APP_ZOOM_KEY).then((result) => {
+      if (cancelled) return;
+      const zoom = normalizeAppZoom(result.ok ? result.value : null);
+      setAppZoom(zoom);
+      if (zoom !== DEFAULT_APP_ZOOM) void applyAppZoom(zoom);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!error) return;
@@ -4594,6 +4649,8 @@ export function App() {
                 onAgentRtkChange={(profile, enabled) => updateAgentRtk(profile, enabled)}
                 editorFontSize={editorFontSize}
                 onEditorFontSizeChange={(value) => setEditorFontSize(clampEditorFontSize(value))}
+                appZoom={appZoom}
+                onAppZoomChange={(value) => void changeAppZoom(value)}
                 locale={locale}
                 onLocaleChange={setLocale}
                 themeMode={themeMode}
@@ -7476,6 +7533,8 @@ function WorkspaceSettingsPanel({
   workspace,
   editorFontSize,
   onEditorFontSizeChange,
+  appZoom,
+  onAppZoomChange,
   themeMode,
   onThemeModeChange,
   workspaceAccentColor,
@@ -7491,6 +7550,8 @@ function WorkspaceSettingsPanel({
   workspace: Workspace;
   editorFontSize: number;
   onEditorFontSizeChange: (value: number) => void;
+  appZoom: number;
+  onAppZoomChange: (value: number) => void;
   themeMode: ThemeMode;
   onThemeModeChange: (value: ThemeMode) => void;
   workspaceAccentColor: string | null;
@@ -7502,7 +7563,7 @@ function WorkspaceSettingsPanel({
   const [rtkBusyProfileId, setRtkBusyProfileId] = useState<number | null>(null);
   const [rtkError, setRtkError] = useState("");
   const [activeSettingsSection, setActiveSettingsSection] = useState<
-    "theme" | "accent" | "language" | "editor" | "rtk" | "skills" | "clipboard"
+    "theme" | "accent" | "language" | "editor" | "zoom" | "rtk" | "skills" | "clipboard"
   >("theme");
   const skillTargetPath = activeProject?.path ?? workspace.root_path;
   const [skillBundles, setSkillBundles] = useState<SkillBundle[]>([]);
@@ -7656,6 +7717,7 @@ function WorkspaceSettingsPanel({
         },
         { id: "language", label: t("settings.nav.language"), icon: <Settings aria-hidden="true" size={16} /> },
         { id: "editor", label: t("settings.nav.editor"), icon: <Code2 aria-hidden="true" size={16} /> },
+        { id: "zoom", label: t("settings.nav.zoom"), icon: <Search aria-hidden="true" size={16} /> },
       ],
     },
     {
@@ -7896,6 +7958,43 @@ function WorkspaceSettingsPanel({
                       aria-label={t("workspace.settings.editorPx")}
                     />
                     <span className="settings-slider-value">{editorFontSize}px</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+          ) : null}
+
+          {activeSettingsSection === "zoom" ? (
+            <section className="settings-section" id="settings-zoom">
+              <h2 className="settings-section-title">{t("settings.zoom.title")}</h2>
+              <p className="settings-section-desc">{t("settings.zoom.description")}</p>
+              <div className="settings-group">
+                <div className="settings-row">
+                  <div className="settings-row-info">
+                    <div className="settings-row-label">{t("settings.zoom.label")}</div>
+                    <div className="settings-row-hint">{t("settings.zoom.hint")}</div>
+                  </div>
+                  <div className="settings-row-control zoom-control">
+                    <div className="chip-row">
+                      {APP_ZOOM_STEPS.map((step) => (
+                        <button
+                          className={appZoom === step ? "chip active" : "chip"}
+                          key={step}
+                          type="button"
+                          onClick={() => onAppZoomChange(step)}
+                        >
+                          {step}%
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={appZoom === DEFAULT_APP_ZOOM}
+                      onClick={() => onAppZoomChange(DEFAULT_APP_ZOOM)}
+                    >
+                      {t("settings.zoom.reset")}
+                    </button>
                   </div>
                 </div>
               </div>

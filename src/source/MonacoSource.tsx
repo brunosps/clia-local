@@ -79,6 +79,9 @@ export function MonacoSource({
   const onFindInFilesRef = useRef(onFindInFiles);
   const onFormatRef = useRef(onFormat);
   const onCursorRef = useRef(onCursorChange);
+  // When the Ctrl+V keybinding last handled a paste, so a paste event that the
+  // engine may still dispatch afterwards can be ignored instead of double-inserting.
+  const pastedAt = useRef(0);
   useEffect(() => {
     onSaveRef.current = onSave;
     onCloseRef.current = onClose;
@@ -158,40 +161,50 @@ export function MonacoSource({
         ed.pushUndoStop();
       });
     });
-    // Monaco reads the paste straight off the clipboard event, so it never reaches
-    // the app's clipboard fallbacks. Under WSL the Linux selection can be empty
-    // even when the Windows one is not (WSLg does not always bridge it), and the
-    // paste then silently inserts nothing. Capture phase so this runs before
-    // Monaco's own handler on the inner textarea.
+    // Paste is taken over at the KEYBINDING level, not via the DOM paste event.
+    //
+    // Monaco reads the paste straight off the clipboard event, so it never reached
+    // the app's clipboard fallbacks — and under WSL the Linux selection is empty
+    // even when the Windows one is not (WSLg does not always bridge it). A DOM
+    // `paste` listener was not enough: with an empty selection the event either
+    // does not fire or carries nothing Monaco will act on, so the paste vanished.
+    // Binding Ctrl/Cmd+V means the shortcut is handled whether or not the engine
+    // decides to dispatch a paste event, and every route is tried in order —
+    // including a plain in-app copy, which the native plugin serves.
+    ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV, () => {
+      // `executeEdits` bypasses readOnly (that option only blocks user input), so
+      // without this a paste could mutate the historical-version viewer.
+      if (ed.getOption(monaco.editor.EditorOption.readOnly)) return;
+      pastedAt.current = Date.now();
+      void readClipboardText().then((text) => {
+        if (!text) return;
+        const selections = ed.getSelections();
+        if (!selections?.length) return;
+        // Monaco's own behaviour: N cursors + N lines pastes one line per cursor.
+        const lines = text.split("\n");
+        const perCursor = selections.length > 1 && lines.length === selections.length;
+        ed.executeEdits(
+          "clipboard-fallback",
+          selections.map((selection, index) => ({
+            range: selection,
+            text: perCursor ? lines[index] : text,
+            forceMoveMarkers: true,
+          })),
+        );
+        ed.pushUndoStop();
+        ed.focus();
+      });
+    });
+
+    // Belt and braces: if the engine dispatches a paste event anyway right after
+    // the keybinding ran, swallow it so the text is not inserted twice.
     const dom = ed.getDomNode();
     if (dom) {
       const onPaste = (event: ClipboardEvent) => {
-        // `executeEdits` bypasses readOnly (that option only blocks user input), so
-        // without this the fallback would let a paste mutate the historical-version
-        // viewer. Read the live option rather than the prop, which may have changed
-        // since mount.
-        if (ed.getOption(monaco.editor.EditorOption.readOnly)) return;
-        // Text came through normally — let Monaco handle it (keeps multi-cursor,
-        // bracket handling and the native undo stop intact).
-        if (event.clipboardData?.getData("text/plain")) return;
-        // preventDefault has to happen synchronously, before the async read.
-        event.preventDefault();
-        event.stopPropagation();
-        void readClipboardText().then((text) => {
-          if (!text) return;
-          const selections = ed.getSelections();
-          if (!selections?.length) return;
-          ed.executeEdits(
-            "clipboard-fallback",
-            selections.map((selection) => ({
-              range: selection,
-              text,
-              forceMoveMarkers: true,
-            })),
-          );
-          ed.pushUndoStop();
-          ed.focus();
-        });
+        if (Date.now() - pastedAt.current < 500) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
       };
       dom.addEventListener("paste", onPaste, true);
       ed.onDidDispose(() => dom.removeEventListener("paste", onPaste, true));

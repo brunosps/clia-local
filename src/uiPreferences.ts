@@ -1,11 +1,4 @@
-export type TabPreference =
-  | "queue"
-  | "code"
-  | "git"
-  | "deploy"
-  | "docker"
-  | "agents"
-  | "settings";
+export type TabPreference = "queue" | "code" | "git" | "deploy" | "docker" | "agents" | "settings";
 export type SourceSideTabPreference = "explorer" | "search";
 export type GitViewPreference = "local" | "commits";
 export type GitDetailTabPreference = "commit" | "changes" | "tree";
@@ -65,6 +58,11 @@ export function clampNumberPreference(
   fallback: number,
   bounds: { min: number; max: number },
 ): number {
+  // Absent values are handled before coercion: `Number(null)` and `Number("")` are
+  // both 0, which is finite, so an unset preference used to clamp to `bounds.min`
+  // instead of the caller's fallback — panes opened narrower than intended on a
+  // fresh install, since `getAppState` returns null for a key that was never set.
+  if (value == null || value === "") return fallback;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.max(bounds.min, Math.min(bounds.max, Math.round(parsed)));

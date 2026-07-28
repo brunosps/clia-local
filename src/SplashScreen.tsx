@@ -1,4 +1,6 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useRef, useState } from "react";
+import packageInfo from "../package.json";
 import cliaSplashLogoUrl from "./assets/brand/clia-dev-splash.svg";
 import { useI18n } from "./i18n";
 
@@ -14,6 +16,24 @@ export function SplashScreen({ onDone }: { onDone: () => void }) {
   const [phase, setPhase] = useState<Phase>("forming");
   const doneRef = useRef(false);
   const timers = useRef<number[]>([]);
+  // The bundled version is the immediate value; the running binary's own version
+  // replaces it once Tauri answers, which is the one that matters when several
+  // builds share a version string.
+  const [version, setVersion] = useState(packageInfo.version);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getVersion()
+      .then((value) => {
+        if (!cancelled) setVersion(value);
+      })
+      .catch(() => {
+        /* keep the bundled version */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Run the animation timeline once on mount. State changes happen inside
   // timer callbacks (not synchronously in the effect body).
@@ -83,7 +103,10 @@ export function SplashScreen({ onDone }: { onDone: () => void }) {
       >
         <img className="splash-logo" src={cliaSplashLogoUrl} alt="" />
       </div>
-      <div className="splash-caption">{t("app.tagline")}</div>
+      <div className="splash-caption">
+        {t("app.tagline")}
+        <span className="splash-version">v{version}</span>
+      </div>
     </div>
   );
 }
