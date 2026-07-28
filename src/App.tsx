@@ -8995,6 +8995,12 @@ async function readClipboardImageBase64(): Promise<{ base64: string; name: strin
 }
 
 /** Read a Blob/File as base64 (without the `data:...;base64,` prefix). */
+// A paste past either of these stops being message text and becomes an attachment:
+// dumping thousands of lines into the prompt buries the actual question and eats
+// the agent's context, while a file it can open costs a couple of lines.
+const LONG_PASTE_CHARS = 2000;
+const LONG_PASTE_LINES = 40;
+
 function fileToBase64(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -9081,6 +9087,7 @@ function AgentsPanel({
   const layoutRef = useRef<HTMLElement>(null);
   // Shown when a paste produced nothing on any route (see clipboard.ts).
   const [pasteHint, setPasteHint] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const [skillAutocompleteHidden, setSkillAutocompleteHidden] = useState(false);
   const [chatAttachments, setChatAttachments] = useState<{ name: string; path: string }[]>([]);
   const [chatAttachmentBusy, setChatAttachmentBusy] = useState(false);
@@ -9179,6 +9186,33 @@ function AgentsPanel({
     }
   }
 
+  /**
+   * Park a long paste in a file under the project and reference it from the
+   * message, instead of inlining it. Returns false when there is no project to
+   * write into, so the caller can fall back to a plain insert.
+   */
+  async function attachLongPaste(text: string, selectionStart: number, selectionEnd: number) {
+    if (!project) return false;
+    setChatAttachmentBusy(true);
+    try {
+      const name = `pasted-text-${chatAttachments.length + 1}.txt`;
+      const base64 = await fileToBase64(new Blob([text], { type: "text/plain" }));
+      const saved = await api.saveAgentAttachment(project.path, name, base64);
+      if (!saved.ok) return false;
+      setChatAttachments((items) => [...items, { name, path: saved.value }]);
+      // Leave a marker where the text would have gone: the attachment block lists
+      // the same file name, so the agent can tell which part of the message it is.
+      const marker = t("agents.pastedAttachment", {
+        name,
+        lines: String(text.split("\n").length),
+      });
+      setComposer(composer.slice(0, selectionStart) + marker + composer.slice(selectionEnd));
+      return true;
+    } finally {
+      setChatAttachmentBusy(false);
+    }
+  }
+
   function handleComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
     const data = event.clipboardData;
     const files: File[] = [];
@@ -9203,7 +9237,22 @@ function AgentsPanel({
     // A genuine text paste carries text/plain — let it insert normally (and skip the
     // powershell round-trip). Only a paste with no file and no text is treated as an
     // image, probing the Linux then Windows clipboards.
-    if (data?.getData("text/plain")?.trim()) return;
+    const pastedText = data?.getData("text/plain") ?? "";
+    if (pastedText.trim()) {
+      const tooLong =
+        pastedText.length > LONG_PASTE_CHARS ||
+        pastedText.split("\n").length > LONG_PASTE_LINES;
+      if (!tooLong || !project) return;
+      const field = event.currentTarget;
+      const start = field.selectionStart ?? composer.length;
+      const end = field.selectionEnd ?? composer.length;
+      event.preventDefault();
+      void attachLongPaste(pastedText, start, end).then((attached) => {
+        // No project to write into: fall back to inlining the text.
+        if (!attached) setComposer(composer.slice(0, start) + pastedText + composer.slice(end));
+      });
+      return;
+    }
     const target = event.currentTarget;
     const selectionStart = target.selectionStart ?? composer.length;
     const selectionEnd = target.selectionEnd ?? composer.length;
@@ -9727,6 +9776,29 @@ function AgentsPanel({
                         : activeProfile?.name || t("agents.agentFallback")}
                     </span>
                     <time>{new Date(message.created_at).toLocaleString()}</time>
+                    <button
+                      className={
+                        copiedMessageId === message.id
+                          ? "message-copy copied"
+                          : "message-copy"
+                      }
+                      type="button"
+                      title={t("agents.copyMessage")}
+                      aria-label={t("agents.copyMessage")}
+                      onClick={() => {
+                        void writeClipboardText(message.content).then((ok) => {
+                          if (!ok) return;
+                          setCopiedMessageId(message.id);
+                          window.setTimeout(() => setCopiedMessageId(null), 1200);
+                        });
+                      }}
+                    >
+                      {copiedMessageId === message.id ? (
+                        <Check aria-hidden="true" size={13} />
+                      ) : (
+                        <Copy aria-hidden="true" size={13} />
+                      )}
+                    </button>
                   </div>
                   <div className="message-content">
                     <AgentMessageContent
@@ -11571,7 +11643,7 @@ function GitRefTree({
             <button
               type="button"
               title={checkoutHint ?? t("git.checkoutHint")}
-              style={{ paddingLeft: 8 + depth * 12 }}
+              style={{ "--depth": depth } as CSSProperties}
               onDoubleClick={() => onCheckout(node.leaf!.full)}
               onContextMenu={onContext ? (event) => onContext(node.leaf!, event) : undefined}
             >
@@ -11635,7 +11707,7 @@ function GitRefFolder({
       <button
         type="button"
         className="git-ref-folder"
-        style={{ paddingLeft: 8 + depth * 12 }}
+        style={{ "--depth": depth } as CSSProperties}
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >

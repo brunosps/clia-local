@@ -16066,3 +16066,97 @@ h2 {
   gap: var(--space-4);
   flex-wrap: wrap;
 }
+
+/* clia-local: git ref tree — one scale for folders and branches ------------
+   The folder rows were pinned at 12px while the branch rows inherited a larger
+   size, so a parent folder rendered SMALLER than the branches under it and the
+   hierarchy read upside down. Both now share one row spec; what separates them
+   is colour and icon, not size. Indentation comes from --depth (set in the TSX)
+   so a guide line can be positioned from the same number. */
+.git-ref-row > button:first-child,
+.git-ref-folder {
+  position: relative;
+  gap: var(--space-2);
+  min-height: 26px;
+  padding: var(--space-1) var(--space-2);
+  padding-left: calc(var(--space-2) + var(--depth, 0) * 14px);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+/* Folders are the quieter half of the pair: same size, muted label, gold icon —
+   the same language the source explorer uses for directories. */
+.git-ref-folder {
+  color: var(--clia-muted);
+  font-weight: 500;
+}
+
+.git-ref-folder svg:last-of-type {
+  color: var(--clia-gold);
+}
+
+.git-ref-row > button:first-child {
+  color: var(--clia-text);
+}
+
+/* Vertical guide at the parent's indent. `min(depth, 1)` keeps it off the
+   top-level rows, which have no parent to trace back to. */
+.git-ref-row > button:first-child::before,
+.git-ref-folder::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--space-2) + (var(--depth, 0) - 1) * 14px + 7px);
+  width: 1px;
+  background: var(--clia-border);
+  opacity: calc(min(var(--depth, 0), 1) * 0.9);
+}
+
+.git-ref-row.head > button:first-child {
+  color: var(--clia-primary);
+  font-weight: 700;
+}
+
+.git-ref-row small {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+/* Per-message copy: only shows on hover so it does not compete with the text. */
+.message-header.agent-message-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.message-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--clia-dim);
+  padding: 2px 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--ease),
+    color var(--motion-fast) var(--ease);
+}
+
+.agent-message:hover .message-copy,
+.message-copy:focus-visible,
+.message-copy.copied {
+  opacity: 1;
+}
+
+.message-copy:hover {
+  border-color: var(--clia-border);
+  color: var(--clia-text);
+}
+
+.message-copy.copied {
+  color: var(--clia-primary);
+}
