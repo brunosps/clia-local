@@ -1,6 +1,6 @@
 [package]
 name = "clia-local"
-version = "0.3.3"
+version = "0.3.4"
 description = "clia.local — fully local desktop agent development environment"
 authors = ["Bruno Santos"]
 edition = "2021"
