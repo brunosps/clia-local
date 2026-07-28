@@ -209,6 +209,7 @@ import type {
   BlameLine,
   Branch,
   ChangedFile,
+  ClipboardDiagnostics,
   Commit,
   CommitDetail,
   CommitFile,
@@ -7498,7 +7499,7 @@ function WorkspaceSettingsPanel({
   const [rtkBusyProfileId, setRtkBusyProfileId] = useState<number | null>(null);
   const [rtkError, setRtkError] = useState("");
   const [activeSettingsSection, setActiveSettingsSection] = useState<
-    "theme" | "accent" | "language" | "editor" | "rtk" | "skills"
+    "theme" | "accent" | "language" | "editor" | "rtk" | "skills" | "clipboard"
   >("theme");
   const skillTargetPath = activeProject?.path ?? workspace.root_path;
   const [skillBundles, setSkillBundles] = useState<SkillBundle[]>([]);
@@ -7659,6 +7660,16 @@ function WorkspaceSettingsPanel({
       items: [
         { id: "rtk", label: t("settings.nav.rtk"), icon: <Bot aria-hidden="true" size={16} /> },
         { id: "skills", label: t("settings.nav.skills"), icon: <Boxes aria-hidden="true" size={16} /> },
+      ],
+    },
+    {
+      title: t("settings.group.diagnostics"),
+      items: [
+        {
+          id: "clipboard",
+          label: t("settings.nav.clipboard"),
+          icon: <Copy aria-hidden="true" size={16} />,
+        },
       ],
     },
   ];
@@ -8035,8 +8046,72 @@ function WorkspaceSettingsPanel({
               </div>
             </section>
           ) : null}
+
+          {activeSettingsSection === "clipboard" ? <ClipboardDiagnosticsSection /> : null}
         </div>
       </div>
+    </section>
+  );
+}
+
+/// Reports which clipboard routes the app can actually reach. Every clipboard
+/// failure so far has been silent — an unavailable route is indistinguishable
+/// from an empty clipboard — so this makes the difference visible.
+function ClipboardDiagnosticsSection() {
+  const { t } = useI18n();
+  const [report, setReport] = useState<ClipboardDiagnostics | null>(null);
+  const [roundTrip, setRoundTrip] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function run() {
+    setBusy(true);
+    setRoundTrip(null);
+    const result = await api.diagnoseClipboard();
+    setReport(result.ok ? result.value : null);
+    // Independent of the native probe: what the frontend routes actually return.
+    const read = await readClipboardText();
+    setRoundTrip(read == null ? t("settings.clipboard.readEmpty") : `${read.length} chars`);
+    setBusy(false);
+  }
+
+  const rows: Array<[string, string]> = report
+    ? [
+        ["WSL", report.is_wsl ? "sim" : "não"],
+        ["XDG_SESSION_TYPE", report.session_type ?? "—"],
+        ["WAYLAND_DISPLAY", report.wayland_display ?? "—"],
+        ["DISPLAY", report.x11_display ?? "—"],
+        ["GDK_BACKEND", report.gdk_backend ?? "—"],
+        ["powershell.exe", report.powershell ?? "não encontrado"],
+        [
+          "clipboard do Windows",
+          report.windows_error ?? (report.windows_text_len == null ? "—" : `${report.windows_text_len} chars`),
+        ],
+      ]
+    : [];
+
+  return (
+    <section className="settings-section">
+      <div className="settings-section-head">
+        <h2>{t("settings.nav.clipboard")}</h2>
+        <p>{t("settings.clipboard.help")}</p>
+      </div>
+      <button className="secondary-button" type="button" disabled={busy} onClick={() => void run()}>
+        {busy ? t("common.loading") : t("settings.clipboard.run")}
+      </button>
+      {report ? (
+        <div className="clipboard-diagnostics">
+          {rows.map(([label, value]) => (
+            <div className="clipboard-diagnostics-row" key={label}>
+              <span>{label}</span>
+              <code>{value}</code>
+            </div>
+          ))}
+          <div className="clipboard-diagnostics-row">
+            <span>{t("settings.clipboard.frontendRead")}</span>
+            <code>{roundTrip ?? "—"}</code>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -8862,6 +8937,8 @@ function AgentsPanel({
   const [rawLoading, setRawLoading] = useState(false);
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
   const layoutRef = useRef<HTMLElement>(null);
+  // Shown when a paste produced nothing on any route (see clipboard.ts).
+  const [pasteHint, setPasteHint] = useState("");
   const [skillAutocompleteHidden, setSkillAutocompleteHidden] = useState(false);
   const [chatAttachments, setChatAttachments] = useState<{ name: string; path: string }[]>([]);
   const [chatAttachmentBusy, setChatAttachmentBusy] = useState(false);
@@ -8924,8 +9001,8 @@ function AgentsPanel({
   // plugin) first, then — on WSL — the Windows clipboard via powershell. WSLg can't
   // bridge the Windows image clipboard nor drag files in, so this is how a Windows
   // screenshot (image) or a file copied in Explorer (Ctrl+C) gets attached.
-  async function addPastedClipboard() {
-    if (!project) return;
+  async function addPastedClipboard(): Promise<boolean> {
+    if (!project) return false;
     setChatAttachmentBusy(true);
     try {
       const native = await readClipboardImageBase64();
@@ -8933,7 +9010,7 @@ function AgentsPanel({
         const saved = await api.saveAgentAttachment(project.path, native.name, native.base64);
         if (saved.ok) {
           setChatAttachments((items) => [...items, { name: native.name, path: saved.value }]);
-          return;
+          return true;
         }
       }
       const windowsImage = await api.readWindowsClipboardImage(project.path);
@@ -8942,7 +9019,7 @@ function AgentsPanel({
         // Strip the "<epoch>-" uniqueness prefix from the on-disk name for display.
         const name = (path.split(/[\\/]/).pop() || "pasted-image.png").replace(/^\d+-/, "");
         setChatAttachments((items) => [...items, { name, path }]);
-        return;
+        return true;
       }
       // Files copied in Windows Explorer → translated to /mnt/... WSL paths.
       const windowsFiles = await api.readWindowsClipboardFiles();
@@ -8952,7 +9029,9 @@ function AgentsPanel({
           path,
         }));
         setChatAttachments((items) => [...items, ...added]);
+        return true;
       }
+      return false;
     } finally {
       setChatAttachmentBusy(false);
     }
@@ -8997,7 +9076,9 @@ function AgentsPanel({
         setComposer(composer.slice(0, selectionStart) + text + composer.slice(selectionEnd));
         return;
       }
-      await addPastedClipboard();
+      // Nothing anywhere: say so instead of swallowing the paste silently, which
+      // is what made this so hard to diagnose in the first place.
+      if (!(await addPastedClipboard())) setPasteHint(t("agents.pasteEmpty"));
     })();
   }
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -9790,6 +9871,14 @@ function AgentsPanel({
               </button>
             </div>
           </div>
+          {pasteHint ? (
+            <div className="composer-paste-hint" role="status">
+              <span>{pasteHint}</span>
+              <button type="button" onClick={() => setPasteHint("")} aria-label="OK">
+                <X aria-hidden="true" size={14} />
+              </button>
+            </div>
+          ) : null}
           {chatAttachments.length || chatAttachmentBusy ? (
             <div className="composer-attachments">
               {chatAttachments.map((attachment, index) => (

@@ -16,6 +16,7 @@ import type {
   AgentSession,
   Branch,
   ChangedFile,
+  ClipboardDiagnostics,
   DockerContainer,
   DockerImage,
   DockerNetwork,
@@ -615,6 +616,9 @@ export const api = {
   },
   readWindowsClipboardFiles() {
     return invokeSafe<string[]>("read_windows_clipboard_files", {});
+  },
+  diagnoseClipboard() {
+    return invokeSafe<ClipboardDiagnostics>("diagnose_clipboard", {});
   },
   readWindowsClipboardText() {
     return invokeSafe<string | null>("read_windows_clipboard_text", {});

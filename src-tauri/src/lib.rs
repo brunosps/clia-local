@@ -2904,6 +2904,36 @@ fn save_agent_attachment(input: AgentAttachmentInput) -> AppResult<String> {
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Locate a Windows PowerShell reachable from WSL.
+///
+/// `Command::new("powershell.exe")` only works when the Windows directories are on
+/// PATH. A GUI app launched from a `.desktop` entry does not inherit the login
+/// shell's environment, and `appendWindowsPath=false` in `/etc/wsl.conf` removes
+/// them outright — so fall back to the standard absolute locations before giving up.
+fn windows_powershell() -> Option<PathBuf> {
+    const CANDIDATES: [&str; 4] = [
+        "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+        "/mnt/c/Windows/SysWOW64/WindowsPowerShell/v1.0/powershell.exe",
+        "/mnt/c/Program Files/PowerShell/7/pwsh.exe",
+        "/mnt/c/Program Files/WindowsApps/pwsh.exe",
+    ];
+    // PATH lookup first: honours a non-default Windows drive mount (`/c`, etc.).
+    if Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg("exit 0")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+    {
+        return Some(PathBuf::from("powershell.exe"));
+    }
+    CANDIDATES
+        .iter()
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_file())
+}
+
 /// On WSL, read *text* off the Windows clipboard via `powershell.exe`.
 ///
 /// WSLg is supposed to bridge text to the Linux CLIPBOARD selection, but it does
@@ -2915,12 +2945,15 @@ fn read_windows_clipboard_text() -> AppResult<Option<String>> {
     if !is_wsl() {
         return Ok(None);
     }
+    let Some(powershell) = windows_powershell() else {
+        return Ok(None);
+    };
 
     // `GetText` needs an STA thread. `[Console]::Out.Write` (not Write-Output) so
     // PowerShell does not append a newline of its own to the clipboard content.
     let script = "Add-Type -AssemblyName System.Windows.Forms; \
          [Console]::Out.Write([System.Windows.Forms.Clipboard]::GetText())";
-    let output = Command::new("powershell.exe")
+    let output = Command::new(&powershell)
         .args(["-NoProfile", "-STA", "-Command", script])
         .output()
         .map_err(anyhow::Error::from)?;
@@ -2936,6 +2969,55 @@ fn read_windows_clipboard_text() -> AppResult<Option<String>> {
     }
 }
 
+/// What the app can actually see of the clipboard, reported field by field.
+///
+/// Exists because every clipboard failure so far has been silent: a route that is
+/// unavailable looks exactly like a clipboard that is empty. This says which is
+/// which, including the display backend — if WSLg syncs Windows to one selection
+/// (Wayland) and the app is connected to another (XWayland), copy/paste *inside*
+/// the app works while Windows → app does not, which is otherwise baffling.
+#[derive(Debug, Serialize)]
+struct ClipboardDiagnostics {
+    is_wsl: bool,
+    session_type: Option<String>,
+    wayland_display: Option<String>,
+    x11_display: Option<String>,
+    gdk_backend: Option<String>,
+    powershell: Option<String>,
+    windows_text_len: Option<usize>,
+    windows_error: Option<String>,
+}
+
+#[tauri::command]
+fn diagnose_clipboard() -> AppResult<ClipboardDiagnostics> {
+    let env = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+    let wsl = is_wsl();
+    let powershell = if wsl { windows_powershell() } else { None };
+
+    let (windows_text_len, windows_error) = match (&wsl, &powershell) {
+        (true, Some(_)) => match read_windows_clipboard_text() {
+            Ok(text) => (Some(text.map(|value| value.len()).unwrap_or(0)), None),
+            Err(error) => (None, Some(format!("{error:?}"))),
+        },
+        (true, None) => (
+            None,
+            Some("powershell.exe not found (PATH nor /mnt/c/...)".to_string()),
+        ),
+        _ => (None, None),
+    };
+
+    Ok(ClipboardDiagnostics {
+        is_wsl: wsl,
+        session_type: env("XDG_SESSION_TYPE"),
+        wayland_display: env("WAYLAND_DISPLAY"),
+        x11_display: env("DISPLAY"),
+        gdk_backend: env("GDK_BACKEND"),
+        powershell: powershell.map(|path| path.to_string_lossy().to_string()),
+        windows_text_len,
+        windows_error,
+    })
+}
+
 /// On WSL, push text to the Windows clipboard so a copy inside the app is available
 /// to Windows apps even when WSLg does not bridge the selection outward.
 #[tauri::command]
@@ -2943,7 +3025,12 @@ fn write_windows_clipboard_text(text: String) -> AppResult<bool> {
     if !is_wsl() {
         return Ok(false);
     }
-    let mut child = Command::new("clip.exe")
+    let clip = if Path::new("/mnt/c/Windows/System32/clip.exe").is_file() {
+        PathBuf::from("/mnt/c/Windows/System32/clip.exe")
+    } else {
+        PathBuf::from("clip.exe")
+    };
+    let mut child = Command::new(&clip)
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(anyhow::Error::from)?;
@@ -5274,6 +5361,7 @@ pub fn run() {
             read_windows_clipboard_files,
             read_windows_clipboard_text,
             write_windows_clipboard_text,
+            diagnose_clipboard,
             agent_usage,
             check_agent_provider_health,
             list_agent_run_metrics,

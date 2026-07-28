@@ -1086,3 +1086,14 @@ export type DockerVolume = {
   scope: string;
   mountpoint: string;
 };
+
+export type ClipboardDiagnostics = {
+  is_wsl: boolean;
+  session_type: string | null;
+  wayland_display: string | null;
+  x11_display: string | null;
+  gdk_backend: string | null;
+  powershell: string | null;
+  windows_text_len: number | null;
+  windows_error: string | null;
+};
