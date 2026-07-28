@@ -454,12 +454,14 @@ const MIN_EDITOR_FONT_SIZE = 10;
 const MAX_EDITOR_FONT_SIZE = 28;
 const DEFAULT_EXPLORER_WIDTH = 300;
 const DEFAULT_GIT_SIDEBAR_WIDTH = 240;
+const DEFAULT_AGENTS_SIDEBAR_WIDTH = 280;
 const DEFAULT_PATCH_LIST_WIDTH = 320;
 const APP_VERSION = packageInfo.version;
 const PANE_WIDTH_BOUNDS = {
   explorer: { min: 200, max: 560 },
   gitSidebar: { min: 200, max: 560 },
   patchList: { min: 200, max: 620 },
+  agentsSidebar: { min: 220, max: 560 },
 };
 
 function clampEditorFontSize(value: number): number {
@@ -674,6 +676,9 @@ export function App() {
   const [explorerWidth, setExplorerWidth] = useState<number>(DEFAULT_EXPLORER_WIDTH);
   const [gitSidebarWidth, setGitSidebarWidth] = useState<number>(DEFAULT_GIT_SIDEBAR_WIDTH);
   const [patchListWidth, setPatchListWidth] = useState<number>(DEFAULT_PATCH_LIST_WIDTH);
+  const [agentsSidebarWidth, setAgentsSidebarWidth] = useState<number>(
+    DEFAULT_AGENTS_SIDEBAR_WIDTH,
+  );
   const [timeTravel, setTimeTravel] = useState<{
     sha: string;
     content: string;
@@ -1059,6 +1064,29 @@ export function App() {
       cancelled = true;
     };
   }, [activeProject?.id]);
+
+  // Load the Agents sidebar width. Scoped to the workspace (not a project): the
+  // agents panel lists the workspace's profiles/sessions, not a project's files.
+  useEffect(() => {
+    const workspaceId = activeWorkspace?.id;
+    if (workspaceId == null) return;
+    let cancelled = false;
+    void api
+      .getAppState(workspaceUiPreferenceKey(workspaceId, "agents_sidebar_width"))
+      .then((result) => {
+        if (cancelled) return;
+        setAgentsSidebarWidth(
+          clampNumberPreference(
+            result.ok ? result.value : null,
+            DEFAULT_AGENTS_SIDEBAR_WIDTH,
+            PANE_WIDTH_BOUNDS.agentsSidebar,
+          ),
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspace?.id]);
 
   useEffect(() => {
     const projectId = activeProject?.id;
@@ -4578,6 +4606,17 @@ export function App() {
                 error={agentError}
                 resolveSourceRef={resolveSourceRef}
                 onOpenSourceFile={openSourceFileFromChat}
+                sidebarWidth={agentsSidebarWidth}
+                onSidebarResize={(width) => {
+                  setAgentsSidebarWidth(width);
+                  const workspaceId = activeWorkspace?.id;
+                  if (workspaceId != null) {
+                    void api.setAppState(
+                      workspaceUiPreferenceKey(workspaceId, "agents_sidebar_width"),
+                      String(width),
+                    );
+                  }
+                }}
                 health={
                   activeAgentProfile ? (agentHealthByProfile[activeAgentProfile.id] ?? null) : null
                 }
@@ -8756,6 +8795,8 @@ function AgentsPanel({
   skills,
   resolveSourceRef,
   onOpenSourceFile,
+  sidebarWidth,
+  onSidebarResize,
 }: {
   activeProfile: AgentProfile | null;
   activeSession: AgentSession | null;
@@ -8780,6 +8821,8 @@ function AgentsPanel({
   skills: WorkspaceSkill[];
   resolveSourceRef: (token: string) => string | null;
   onOpenSourceFile: (relativePath: string) => void;
+  sidebarWidth: number;
+  onSidebarResize: (width: number) => void;
 }) {
   const { t } = useI18n();
   const [profileModalOpen, setProfileModalOpen] = useState(false);
@@ -8798,6 +8841,7 @@ function AgentsPanel({
   const [rawTotal, setRawTotal] = useState(0);
   const [rawLoading, setRawLoading] = useState(false);
   const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
+  const layoutRef = useRef<HTMLElement>(null);
   const [skillAutocompleteHidden, setSkillAutocompleteHidden] = useState(false);
   const [chatAttachments, setChatAttachments] = useState<{ name: string; path: string }[]>([]);
   const [chatAttachmentBusy, setChatAttachmentBusy] = useState(false);
@@ -9051,8 +9095,38 @@ function AgentsPanel({
     setSkillAutocompleteHidden(true);
   }
 
+  // Same approach as the explorer/git splitters: mutate the CSS var while dragging
+  // so the (heavy) chat doesn't re-render on every mousemove, and only commit the
+  // width — which is what gets persisted — on mouseup.
+  function startSidebarResize(event: React.MouseEvent) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    let latest = startWidth;
+    const onMove = (move: MouseEvent) => {
+      latest = Math.max(
+        PANE_WIDTH_BOUNDS.agentsSidebar.min,
+        Math.min(PANE_WIDTH_BOUNDS.agentsSidebar.max, startWidth + (move.clientX - startX)),
+      );
+      layoutRef.current?.style.setProperty("--agents-sidebar-w", `${latest}px`);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      onSidebarResize(latest);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+  }
+
   return (
-    <section className="agents-panel">
+    <section
+      className="agents-panel"
+      ref={layoutRef}
+      style={{ "--agents-sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
+    >
       {profileModalOpen ? (
         <AgentProfileModal
           busy={busy}
@@ -9276,6 +9350,14 @@ function AgentsPanel({
           </section>
         ) : null}
       </aside>
+
+      <div
+        className="agents-sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t("agents.resizeSidebar")}
+        onMouseDown={startSidebarResize}
+      />
 
       <section className="agent-workspace">
         <div className="chat-header agent-session-bar">
