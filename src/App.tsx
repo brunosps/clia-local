@@ -1185,11 +1185,12 @@ export function App() {
     if (workspaceId == null || activeAgentProfileId == null) return;
     const scope = `${workspaceId}:${activeProject?.id ?? "workspace"}`;
     if (activeAgentProfilePreferenceReadyScopeRef.current !== scope) return;
-    const key =
-      activeProject?.id != null
-        ? projectUiPreferenceKey(activeProject.id, "active_agent_profile")
-        : workspaceUiPreferenceKey(workspaceId, "active_agent_profile");
-    void api.setAppState(key, String(activeAgentProfileId));
+    // Stored per workspace to match the profile's own scope — a per-project key
+    // would drop the selection every time the project changed.
+    void api.setAppState(
+      workspaceUiPreferenceKey(workspaceId, "active_agent_profile"),
+      String(activeAgentProfileId),
+    );
   }, [activeWorkspace?.id, activeProject?.id, activeAgentProfileId]);
 
   useEffect(() => {
@@ -1523,13 +1524,11 @@ export function App() {
       activeAgentSessionPreferenceReadyScopeRef.current = null;
       const [profilesResult, sessionsResult, profilePreferenceResult, sessionPreferenceResult] =
         await Promise.all([
-          api.listAgentProfiles(workspace.id, project?.id ?? null),
+          api.listAgentProfiles(workspace.id),
           api.listAgentSessions(workspace.id, project?.id ?? null),
-          api.getAppState(
-            project
-              ? projectUiPreferenceKey(project.id, "active_agent_profile")
-              : workspaceUiPreferenceKey(workspace.id, "active_agent_profile"),
-          ),
+          // The profile is workspace-scoped, so remembering it per project would
+          // reset the selection on every project switch.
+          api.getAppState(workspaceUiPreferenceKey(workspace.id, "active_agent_profile")),
           api.getAppState(
             project
               ? projectUiPreferenceKey(project.id, "active_agent_session")
@@ -2234,7 +2233,6 @@ export function App() {
     if (!profile) {
       const created = await api.createAgentProfile({
         workspace_id: activeWorkspace.id,
-        project_id: activeProject.id,
         name: "Codex",
         provider: "codex",
         model: null,
@@ -2299,7 +2297,6 @@ export function App() {
     setAgentError("");
     const result = await api.createAgentProfile({
       workspace_id: activeWorkspace.id,
-      project_id: activeProject?.id ?? null,
       name: draft.name,
       provider: draft.provider,
       model: draft.model,

@@ -524,15 +524,12 @@ export const api = {
   indexProjectEvidence(path: string) {
     return invokeSafe<EvidenceEntry[]>("index_project_evidence", { path });
   },
-  listAgentProfiles(workspaceId: number, projectId?: number | null) {
-    return invokeSafe<AgentProfile[]>("list_agent_profiles", {
-      workspaceId,
-      projectId: projectId ?? null,
-    });
+  /** Profiles belong to the workspace — they are not filtered by project. */
+  listAgentProfiles(workspaceId: number) {
+    return invokeSafe<AgentProfile[]>("list_agent_profiles", { workspaceId });
   },
   createAgentProfile(input: {
     workspace_id: number;
-    project_id?: number | null;
     name: string;
     provider: AgentProvider;
     model?: string | null;

@@ -377,7 +377,6 @@ struct ManualEvidenceInput {
 #[derive(Debug, Deserialize)]
 struct AgentProfileInput {
     workspace_id: i64,
-    project_id: Option<i64>,
     name: String,
     provider: String,
     model: Option<String>,
@@ -1489,10 +1488,9 @@ fn index_project_evidence(
 fn list_agent_profiles(
     app: tauri::AppHandle,
     workspace_id: i64,
-    project_id: Option<i64>,
 ) -> AppResult<Vec<store::AgentProfile>> {
     let db = store::Database::open(&app_data_dir(&app)?)?;
-    Ok(db.list_agent_profiles(workspace_id, project_id)?)
+    Ok(db.list_agent_profiles(workspace_id)?)
 }
 
 #[tauri::command]
@@ -1516,7 +1514,6 @@ fn create_agent_profile(
     let db = store::Database::open(&app_data_dir(&app)?)?;
     Ok(db.create_agent_profile(store::AgentProfileCreate {
         workspace_id: input.workspace_id,
-        project_id: input.project_id,
         name,
         provider,
         model,

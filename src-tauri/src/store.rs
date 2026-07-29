@@ -198,7 +198,6 @@ pub struct AgentSession {
 
 pub struct AgentProfileCreate<'a> {
     pub workspace_id: i64,
-    pub project_id: Option<i64>,
     pub name: &'a str,
     pub provider: &'a str,
     pub model: Option<&'a str>,
@@ -2489,21 +2488,23 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_agent_profiles(
-        &self,
-        workspace_id: i64,
-        project_id: Option<i64>,
-    ) -> anyhow::Result<Vec<AgentProfile>> {
+    /// Agent profiles belong to the WORKSPACE, not to a project.
+    ///
+    /// They used to be filterable by project, which meant a profile created while
+    /// one project was open vanished when another was selected — an agent is a
+    /// configured assistant, not a per-repository setting. `project_id` is kept on
+    /// the table (dropping a column mid-migration is not worth it) but is written
+    /// as null and never filtered on.
+    pub fn list_agent_profiles(&self, workspace_id: i64) -> anyhow::Result<Vec<AgentProfile>> {
         let conn = self.workspace_connect_by_id(workspace_id)?;
         let mut stmt = conn.prepare(
             "select id, workspace_id, project_id, name, provider, model, reasoning_effort,
                     sandbox, context_mode, rtk_enabled, created_at, updated_at
              from agent_profiles
              where workspace_id = ?1
-               and (?2 is null or project_id is null or project_id = ?2)
              order by updated_at desc, id desc",
         )?;
-        let rows = stmt.query_map(params![workspace_id, project_id], agent_profile_from_row)?;
+        let rows = stmt.query_map(params![workspace_id], agent_profile_from_row)?;
         collect_rows(rows)
     }
 
@@ -2520,7 +2521,7 @@ impl Database {
              ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
             params![
                 input.workspace_id,
-                input.project_id,
+                None::<i64>,
                 input.name.trim(),
                 input.provider.trim(),
                 input.model.map(str::trim).filter(|value| !value.is_empty()),
@@ -3886,6 +3887,12 @@ fn migrate_connection(conn: &Connection) -> anyhow::Result<()> {
     )?;
     ensure_column(conn, "workspace_machines", "access_user", "text")?;
     ensure_column(conn, "agent_profiles", "reasoning_effort", "text")?;
+    // Profiles are workspace-scoped now. Existing project-scoped ones are promoted
+    // rather than left behind, or they would simply stop appearing.
+    conn.execute(
+        "update agent_profiles set project_id = null where project_id is not null",
+        [],
+    )?;
     ensure_column(
         conn,
         "agent_profiles",
@@ -5957,7 +5964,6 @@ mod tests {
         let profile = db
             .create_agent_profile(AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: None,
                 name: "Codex Deploy",
                 provider: "codex",
                 model: Some("gpt-5.5"),
@@ -6717,6 +6723,55 @@ mod tests {
     }
 
     #[test]
+    fn existing_project_scoped_profiles_are_promoted_to_the_workspace() {
+        let (db, root) = temp_db();
+        let workspace = db
+            .create_workspace("Workspace", &root.join("ws").display().to_string())
+            .expect("create workspace");
+        let conn = db
+            .workspace_connect_by_id(workspace.id)
+            .expect("workspace conn");
+
+        drop(conn);
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("create project root");
+        let project = db
+            .add_project(
+                workspace.id,
+                "Project",
+                &project_root.display().to_string(),
+                None,
+            )
+            .expect("add project");
+
+        // Simulate a row written by an older build, pinned to that project.
+        let conn = db
+            .workspace_connect_by_id(workspace.id)
+            .expect("workspace conn");
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "insert into agent_profiles (
+               workspace_id, project_id, name, provider, sandbox, context_mode,
+               rtk_enabled, created_at, updated_at
+             ) values (?1, ?2, 'Legado', 'codex', 'read-only', 'auto_lean', 0, ?3, ?3)",
+            params![workspace.id, project.id, now],
+        )
+        .expect("insert legacy profile");
+        drop(conn);
+
+        // Re-opening runs the migrations.
+        let db = Database::open(&root).expect("reopen db");
+        let profiles = db.list_agent_profiles(workspace.id).expect("list profiles");
+
+        // It must still be there — promoted, not hidden or dropped.
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "Legado");
+        assert!(profiles[0].project_id.is_none());
+
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn agent_profiles_sessions_and_messages_are_workspace_scoped() {
         let (db, root) = temp_db();
         let workspace_root = root.join("workspace");
@@ -6737,7 +6792,6 @@ mod tests {
         let profile = db
             .create_agent_profile(AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: Some(project.id),
                 name: "Codex",
                 provider: "codex",
                 model: Some("gpt-5.4"),
@@ -6786,7 +6840,7 @@ mod tests {
         assert_eq!(edited_profile.sandbox, "workspace-write");
         assert_eq!(edited_profile.context_mode, "full");
         assert_eq!(
-            db.list_agent_profiles(workspace.id, Some(project.id))
+            db.list_agent_profiles(workspace.id)
                 .expect("list profiles")
                 .len(),
             1
@@ -6853,7 +6907,6 @@ mod tests {
         let profile = db
             .create_agent_profile(AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: Some(project.id),
                 name: "Codex",
                 provider: "codex",
                 model: Some("gpt-5.4"),

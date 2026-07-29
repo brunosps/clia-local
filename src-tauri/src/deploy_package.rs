@@ -3686,7 +3686,6 @@ mod tests {
         let agent = db
             .create_agent_profile(store::AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: None,
                 name: "Codex Deploy",
                 provider: "codex",
                 model: Some("gpt-5"),
@@ -4560,7 +4559,6 @@ services:
         let agent = db
             .create_agent_profile(store::AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: None,
                 name: "Codex Deploy",
                 provider: "codex",
                 model: None,
@@ -4628,7 +4626,6 @@ services:
         let agent = db
             .create_agent_profile(store::AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: None,
                 name: "Codex Deploy",
                 provider: "codex",
                 model: Some("gpt-5"),
@@ -4720,7 +4717,6 @@ services:
         let agent = db
             .create_agent_profile(store::AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: None,
                 name: "Codex Deploy",
                 provider: "codex",
                 model: Some("gpt-5"),
@@ -4818,7 +4814,6 @@ services:
         let agent = db
             .create_agent_profile(store::AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: None,
                 name: "Codex Deploy",
                 provider: "codex",
                 model: Some("gpt-5"),
@@ -4904,7 +4899,6 @@ services:
         let agent = db
             .create_agent_profile(store::AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: None,
                 name: "Codex Deploy",
                 provider: "codex",
                 model: Some("gpt-5"),
@@ -4975,7 +4969,6 @@ services:
         let agent = db
             .create_agent_profile(store::AgentProfileCreate {
                 workspace_id: workspace.id,
-                project_id: None,
                 name: "Codex Deploy",
                 provider: "codex",
                 model: Some("gpt-5"),

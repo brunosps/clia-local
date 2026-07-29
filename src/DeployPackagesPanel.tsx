@@ -506,7 +506,7 @@ export default function DeployPackagesPanel({
       api.listDeployStacks(workspace.id),
       api.listWorkspaceMachines(workspace.id),
       api.listMachinePresets(),
-      api.listAgentProfiles(workspace.id, null),
+      api.listAgentProfiles(workspace.id),
     ]);
     if (stackResult.ok) {
       const sorted = sortDeployStacks(stackResult.value);
