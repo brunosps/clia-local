@@ -1545,6 +1545,12 @@ pub struct AgentModelOption {
     /// session this workspace already ran. Lets the UI say where the list is from
     /// instead of implying every provider can enumerate its models.
     pub source: &'static str,
+    /// Reasoning levels this specific model accepts. Empty when unknown — the
+    /// levels are NOT uniform across models (gpt-5.6-sol takes `ultra`, gpt-5.5
+    /// stops at `xhigh`), so a single per-provider list lets the user pick an
+    /// effort the model will reject.
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
 }
 
 /// Parse `codex debug models` output.
@@ -1576,10 +1582,30 @@ pub fn parse_codex_models(json: &str) -> Vec<AgentModelOption> {
                 .map(str::trim)
                 .filter(|name| !name.is_empty())
                 .unwrap_or(slug);
+            let efforts = model
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)
+                .map(|levels| {
+                    levels
+                        .iter()
+                        .filter_map(|level| {
+                            level
+                                .get("effort")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(AgentModelOption {
                 value: slug.to_string(),
                 label: label.to_string(),
                 source: "cli",
+                efforts,
+                default_effort: model
+                    .get("default_reasoning_level")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             })
         })
         .collect()
@@ -2770,7 +2796,9 @@ mod tests {
     fn parses_the_codex_model_catalogue_and_hides_internal_entries() {
         // Trimmed from real `codex debug models` output.
         let json = r#"{"models":[
-          {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list"},
+          {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list",
+           "default_reasoning_level":"low",
+           "supported_reasoning_levels":[{"effort":"low"},{"effort":"high"},{"effort":"ultra"}]},
           {"slug":"gpt-5.4-mini","display_name":"GPT-5.4-Mini","visibility":"list"},
           {"slug":"sem-nome","visibility":"list"},
           {"slug":"codex-auto-review","display_name":"Codex Auto Review","visibility":"hide"}
@@ -2782,6 +2810,15 @@ mod tests {
         // No display_name falls back to the slug rather than showing an empty label.
         assert_eq!(models[2].label, "sem-nome");
         assert!(models.iter().all(|m| m.source == "cli"));
+
+        // Reasoning levels are per MODEL, not per provider: gpt-5.6-sol takes
+        // `ultra` while others stop earlier, so they travel with the model.
+        assert_eq!(models[0].efforts, vec!["low", "high", "ultra"]);
+        assert_eq!(models[0].default_effort.as_deref(), Some("low"));
+        // A model that does not declare them yields none, rather than inheriting
+        // someone else's levels.
+        assert!(models[1].efforts.is_empty());
+        assert_eq!(models[1].default_effort, None);
     }
 
     #[test]

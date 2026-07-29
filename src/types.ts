@@ -1110,4 +1110,7 @@ export type AgentModelOption = {
   label: string;
   /** "cli" when the tool listed it, "used" when harvested from past sessions. */
   source: "cli" | "used";
+  /** Reasoning levels this model accepts; empty when the provider does not say. */
+  efforts: string[];
+  default_effort: string | null;
 };

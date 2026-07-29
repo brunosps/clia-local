@@ -1505,6 +1505,10 @@ fn list_agent_models(
                 label: model.clone(),
                 value: model,
                 source: "used",
+                // Only the catalogue knows which levels a model takes; a model we
+                // merely saw in use tells us nothing about that.
+                efforts: Vec::new(),
+                default_effort: None,
             });
         }
     }

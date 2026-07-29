@@ -8826,10 +8826,28 @@ function AgentProfileModal({
     }
     return merged;
   }, [provider, discovered]);
-  const effortOptions = agentEffortOptions(provider);
   const selectedModel =
     modelChoice === "default" ? null : modelChoice === "custom" ? customModel.trim() : modelChoice;
-  const selectedEffort = reasoningEffort === "default" ? null : reasoningEffort;
+  // The chosen model dictates which reasoning levels exist. Only when the
+  // catalogue is silent do we fall back to the provider-wide list, which is a
+  // guess and can offer a level the model rejects.
+  const effortOptions = useMemo(() => {
+    const bundled = agentEffortOptions(provider);
+    const modelEfforts =
+      discovered.find((option) => option.value === modelChoice)?.efforts ?? [];
+    if (!modelEfforts.length) return bundled;
+    const head = bundled.find((option) => option.value === "default");
+    return [
+      ...(head ? [head] : []),
+      ...modelEfforts.map((effort) => ({ value: effort, label: effort })),
+    ];
+  }, [provider, discovered, modelChoice]);
+
+  // Switching to a model that does not take the current level would otherwise
+  // leave the field showing something the CLI will refuse.
+  const effortSupported = effortOptions.some((option) => option.value === reasoningEffort);
+  const selectedEffort =
+    reasoningEffort === "default" || !effortSupported ? null : reasoningEffort;
   const editing = Boolean(profile);
 
   return (
@@ -8949,7 +8967,7 @@ function AgentProfileModal({
           <label>
             <span>Reasoning effort</span>
             <select
-              value={reasoningEffort}
+              value={effortSupported ? reasoningEffort : "default"}
               onChange={(event) => setReasoningEffort(event.target.value)}
               disabled={busy}
             >
