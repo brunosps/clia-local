@@ -2976,7 +2976,10 @@ fn read_windows_clipboard_text() -> AppResult<Option<String>> {
     // it in the console's ACTIVE CODE PAGE, not UTF-8. Without this every accented
     // character comes back mangled — the paste looked like it worked and quietly
     // corrupted the text.
-    let script = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+    // UTF8Encoding($false) rather than [Text.Encoding]::UTF8: the latter emits a BOM
+    // preamble, which .NET writes to the redirected stream and would prepend U+FEFF
+    // to every paste.
+    let script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; \
          Add-Type -AssemblyName System.Windows.Forms; \
          [Console]::Out.Write([System.Windows.Forms.Clipboard]::GetText())";
     let output = Command::new(&powershell)
@@ -2986,13 +2989,21 @@ fn read_windows_clipboard_text() -> AppResult<Option<String>> {
     if !output.status.success() {
         return Ok(None);
     }
-    // Windows clipboard text is CRLF; normalize so it pastes as ordinary Unix text.
-    let text = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    let text = normalize_clipboard_text(&String::from_utf8_lossy(&output.stdout));
     if text.is_empty() {
         Ok(None)
     } else {
         Ok(Some(text))
     }
+}
+
+/// Clean up text coming off the Windows clipboard: drop a leading BOM (belt and
+/// braces against a console encoder that emits one) and turn CRLF into LF so it
+/// pastes as ordinary Unix text.
+fn normalize_clipboard_text(raw: &str) -> String {
+    raw.strip_prefix('\u{feff}')
+        .unwrap_or(raw)
+        .replace("\r\n", "\n")
 }
 
 /// What the app can actually see of the clipboard, reported field by field.
@@ -5786,6 +5797,16 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn clipboard_text_loses_the_bom_and_crlf_but_keeps_accents() {
+        assert_eq!(normalize_clipboard_text("\u{feff}olá"), "olá");
+        assert_eq!(normalize_clipboard_text("uma\r\nduas"), "uma\nduas");
+        assert_eq!(normalize_clipboard_text("\u{feff}ação\r\nçãé"), "ação\nçãé");
+        // A BOM in the middle is real content, not a preamble — leave it alone.
+        assert_eq!(normalize_clipboard_text("a\u{feff}b"), "a\u{feff}b");
+        assert_eq!(normalize_clipboard_text(""), "");
     }
 
     #[test]
