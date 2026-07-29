@@ -1246,6 +1246,17 @@ fn copilot_metric(value: &Value) -> Option<(&'static str, Value)> {
             }),
         ));
     }
+    // Consumption is also metered in AI Units, reported as a cumulative checkpoint
+    // for the run (hence its own phase — summing checkpoints would over-count).
+    if event_type == "session.usage_checkpoint" {
+        return Some((
+            "usage_checkpoint",
+            json!({
+                "nano_aiu": first_i64_field(value, "totalNanoAiu"),
+                "premium_requests_total": first_i64_field(value, "totalPremiumRequests")
+            }),
+        ));
+    }
     if event_type.contains("started") || event_type.contains("created") {
         return Some(("provider_init", json!({ "event_type": event_type })));
     }
@@ -2709,6 +2720,14 @@ mod tests {
         let (phase, details) = copilot_metric(&result).expect("result metric");
         assert_eq!(phase, "result");
         assert_eq!(details["premium_requests"], 1);
+
+        let checkpoint = serde_json::json!({
+            "type": "session.usage_checkpoint",
+            "data": { "totalNanoAiu": 6050150000i64, "totalPremiumRequests": 1 }
+        });
+        let (phase, details) = copilot_metric(&checkpoint).expect("checkpoint metric");
+        assert_eq!(phase, "usage_checkpoint");
+        assert_eq!(details["nano_aiu"], 6050150000i64);
     }
 
     #[test]

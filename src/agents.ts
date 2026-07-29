@@ -66,38 +66,82 @@ export function agentStatusLabel(status: string) {
 export type SessionTokenUsage = {
   inputTokens: number;
   outputTokens: number;
+  cachedTokens: number;
   premiumRequests: number;
+  nanoAiu: number;
+  costUsd: number;
 };
 
+type UsageMetric = { run_id?: string; phase: string; details_json: string };
+
+function parseDetails(json: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function numeric(record: Record<string, unknown>, key: string): number {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 /**
- * Running token total for a whole conversation, not just the last turn.
+ * Running usage for a whole conversation, not just the last turn.
  *
- * Sums every `result` event in the session. Providers report different subsets —
- * Copilot only gives output tokens plus a premium-request count, Codex/Claude give
- * input and output — so a zero here means "not reported", never "nothing spent".
+ * The providers do not agree on what `input_tokens` means, and getting this wrong
+ * is not a rounding error — it is the difference between "29k" and "2". Verified
+ * against each CLI's real output:
+ *
+ *   - Claude: `input_tokens` counts ONLY the uncached part. A real turn came back
+ *     as input 2 / cache_creation 14216 / cache_read 15251, so the cache fields
+ *     have to be added to get the input actually processed.
+ *   - Codex: `input_tokens` is the total (15473) and `cached_input_tokens` (13056)
+ *     is the slice of it that was cached — adding it would double count.
+ *   - Copilot: no input tokens at all; it reports output tokens per message plus
+ *     premium requests and AI Units.
+ *
+ * AI Units arrive as a per-run cumulative checkpoint, so they are maxed within a
+ * run and summed across runs; everything else is a per-turn delta and is summed.
  */
-export function sumSessionTokenUsage(
-  metrics: Array<{ phase: string; details_json: string }>,
-): SessionTokenUsage {
-  const total: SessionTokenUsage = { inputTokens: 0, outputTokens: 0, premiumRequests: 0 };
+export function sumSessionTokenUsage(metrics: UsageMetric[]): SessionTokenUsage {
+  const total: SessionTokenUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedTokens: 0,
+    premiumRequests: 0,
+    nanoAiu: 0,
+    costUsd: 0,
+  };
+  const aiuByRun = new Map<string, number>();
+
   for (const metric of metrics) {
-    if (metric.phase !== "result") continue;
-    let details: unknown;
-    try {
-      details = JSON.parse(metric.details_json);
-    } catch {
+    const details = parseDetails(metric.details_json);
+    if (!details) continue;
+
+    if (metric.phase === "usage_checkpoint") {
+      const run = metric.run_id ?? "";
+      aiuByRun.set(run, Math.max(aiuByRun.get(run) ?? 0, numeric(details, "nano_aiu")));
       continue;
     }
-    if (typeof details !== "object" || details === null) continue;
-    const record = details as Record<string, unknown>;
-    const read = (key: string) => {
-      const value = record[key];
-      return typeof value === "number" && Number.isFinite(value) ? value : 0;
-    };
-    total.inputTokens += read("input_tokens");
-    total.outputTokens += read("output_tokens");
-    total.premiumRequests += read("premium_requests");
+    if (metric.phase !== "result") continue;
+
+    const cacheCreate = numeric(details, "cache_creation_input_tokens");
+    const cacheRead = numeric(details, "cache_read_input_tokens");
+    total.inputTokens += numeric(details, "input_tokens") + cacheCreate + cacheRead;
+    total.outputTokens += numeric(details, "output_tokens");
+    // `cached_input_tokens` (Codex) is already inside input_tokens; the Claude
+    // cache_read is not. Both are reported here only as "how much was cached".
+    total.cachedTokens += cacheRead + numeric(details, "cached_input_tokens");
+    total.premiumRequests += numeric(details, "premium_requests");
+    total.costUsd += numeric(details, "total_cost_usd");
   }
+
+  for (const value of aiuByRun.values()) total.nanoAiu += value;
   return total;
 }
 
@@ -106,16 +150,16 @@ export function formatSessionTokenUsage(usage: SessionTokenUsage): string {
   const compact = (value: number) =>
     value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : String(value);
   const parts: string[] = [];
-  const tokens = usage.inputTokens + usage.outputTokens;
-  if (tokens > 0) {
+  if (usage.inputTokens > 0 || usage.outputTokens > 0) {
     parts.push(
       usage.inputTokens > 0
         ? `${compact(usage.inputTokens)}↑ ${compact(usage.outputTokens)}↓ tokens`
         : `${compact(usage.outputTokens)} tokens`,
     );
   }
-  if (usage.premiumRequests > 0) {
-    parts.push(`${usage.premiumRequests} premium`);
-  }
+  if (usage.cachedTokens > 0) parts.push(`${compact(usage.cachedTokens)} cache`);
+  if (usage.nanoAiu > 0) parts.push(`${(usage.nanoAiu / 1e9).toFixed(2)} AIU`);
+  if (usage.premiumRequests > 0) parts.push(`${usage.premiumRequests} premium`);
+  if (usage.costUsd > 0) parts.push(`$${usage.costUsd.toFixed(4)}`);
   return parts.join(" · ");
 }
