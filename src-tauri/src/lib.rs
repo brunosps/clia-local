@@ -2872,15 +2872,29 @@ struct AgentAttachmentInput {
     data_base64: String,
 }
 
-/// Persist a pasted/dropped chat attachment (base64 bytes) under the project's
-/// `.dw/gui/agent-attachments/` and return its absolute path. The chat references
-/// that path in the agent prompt, and the agent (which runs in the project dir)
-/// reads the file with its own file/vision tool.
+/// Where pasted/dropped chat attachments live.
+///
+/// The user's temp dir, NOT the project: these used to be written to
+/// `<project>/.dw/gui/agent-attachments/`, so every screenshot or long paste
+/// showed up as an untracked file in the user's repo. The agent reads them by
+/// absolute path, so nothing requires them to sit inside the project.
+fn agent_attachments_dir() -> anyhow::Result<PathBuf> {
+    let dir = std::env::temp_dir()
+        .join("clia-local")
+        .join("agent-attachments");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Persist a pasted/dropped chat attachment (base64 bytes) and return its absolute
+/// path. The chat references that path in the agent prompt, and the agent reads the
+/// file with its own file/vision tool.
 #[tauri::command]
 fn save_agent_attachment(input: AgentAttachmentInput) -> AppResult<String> {
-    let root = canonical_project_root(&PathBuf::from(&input.project_path))?;
-    let dir = root.join(".dw").join("gui").join("agent-attachments");
-    std::fs::create_dir_all(&dir).map_err(anyhow::Error::from)?;
+    // Still validated: an attachment only makes sense with a project open, and this
+    // rejects a bogus path before anything is written.
+    canonical_project_root(&PathBuf::from(&input.project_path))?;
+    let dir = agent_attachments_dir()?;
 
     let base = Path::new(input.file_name.trim())
         .file_name()
@@ -3095,8 +3109,8 @@ fn write_windows_clipboard_text(text: String) -> AppResult<bool> {
 }
 
 /// On WSL, pull an image off the *Windows* clipboard (WSLg does not bridge the image
-/// clipboard to Linux) by shelling out to `powershell.exe`, saving it as a PNG under
-/// the project's agent-attachments dir, and returning that path. Returns `Ok(None)`
+/// clipboard to Linux) by shelling out to `powershell.exe`, saving it as a PNG in
+/// the attachments dir, and returning that path. Returns `Ok(None)`
 /// when not on WSL or when the Windows clipboard holds no image.
 #[tauri::command]
 fn read_windows_clipboard_image(project_path: String) -> AppResult<Option<String>> {
@@ -3104,9 +3118,8 @@ fn read_windows_clipboard_image(project_path: String) -> AppResult<Option<String
         return Ok(None);
     }
 
-    let root = canonical_project_root(&PathBuf::from(&project_path))?;
-    let dir = root.join(".dw").join("gui").join("agent-attachments");
-    std::fs::create_dir_all(&dir).map_err(anyhow::Error::from)?;
+    canonical_project_root(&PathBuf::from(&project_path))?;
+    let dir = agent_attachments_dir()?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis())
@@ -5772,6 +5785,35 @@ mod tests {
             create_source_file(root.display().to_string(), "src/lib/new.ts".to_string()).is_err()
         );
 
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn agent_attachments_land_outside_the_project() {
+        let root = fixture_root();
+
+        let saved = save_agent_attachment(AgentAttachmentInput {
+            project_path: root.display().to_string(),
+            file_name: "pasted-text-1.txt".to_string(),
+            data_base64: general_purpose::STANDARD.encode("olá acentuação"),
+        })
+        .expect("save attachment");
+
+        let path = PathBuf::from(&saved);
+        assert!(path.is_file(), "{saved}");
+        // The whole point: nothing is written inside the project, so the user's repo
+        // never shows an untracked attachment.
+        assert!(
+            !path.starts_with(&root),
+            "attachment must not live in the project: {saved}"
+        );
+        assert!(!root.join(".dw").exists(), ".dw must not be created");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "olá acentuação"
+        );
+
+        let _ = std::fs::remove_file(&path);
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 
