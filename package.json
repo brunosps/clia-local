@@ -1,6 +1,6 @@
 {
   "name": "clia-local",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.23.0",
