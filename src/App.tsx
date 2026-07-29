@@ -47,6 +47,7 @@ import {
   Send,
   Settings,
   Sparkles,
+  ChevronLeft,
   Square,
   Trash2,
   Upload,
@@ -9077,7 +9078,12 @@ function AgentsPanel({
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<AgentProfile | null>(null);
   const [rawOpen, setRawOpen] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useState(false);
+  // Sidebar drill-down: the profile list and that profile's sessions share the same
+  // space instead of stacking, which did not scale past a handful of profiles.
+  const [sidebarView, setSidebarView] = useState<"profiles" | "sessions">("sessions");
+  // Derived rather than synced with an effect: with no profile selected there are no
+  // sessions to show, so the list always falls back to the profiles level.
+  const drillView = activeProfile ? sidebarView : "profiles";
   const [usageByProfile, setUsageByProfile] = useState<Record<number, AgentUsage>>({});
   const [usageBusy, setUsageBusy] = useState(false);
   const usage = activeProfile ? (usageByProfile[activeProfile.id] ?? null) : null;
@@ -9290,7 +9296,6 @@ function AgentsPanel({
   // nothing about what the session has cost so far.
   const sessionTokens = formatSessionTokenUsage(sumSessionTokenUsage(metrics));
   const visibleMessages = messages.filter((message) => message.role !== "event");
-  const sessionStatus = activeSession ? agentStatusLabel(activeSession.status) : t("agents.noConversation");
   const rawPageCount = Math.max(1, Math.ceil(rawTotal / rawPageSize));
   const safeRawPage = Math.min(rawPage, rawPageCount - 1);
   const rawPageStart = safeRawPage * rawPageSize;
@@ -9462,18 +9467,6 @@ function AgentsPanel({
         <span className="topbar-title">Agents</span>
         <div className="topbar-actions">
           <button
-            className={rawOpen ? "topbar-btn active" : "topbar-btn"}
-            type="button"
-            onClick={() => {
-              setRawOpen((open) => !open);
-              setSessionsOpen(false);
-            }}
-            aria-pressed={rawOpen}
-          >
-            <FileText aria-hidden="true" size={14} />
-            {t("agents.events")}
-          </button>
-          <button
             className="topbar-btn"
             type="button"
             onClick={() => {
@@ -9488,6 +9481,7 @@ function AgentsPanel({
         </div>
       </header>
       <aside className="agents-sidebar" aria-label={t("agents.sidebarLabel")}>
+        {drillView === "profiles" ? (
         <section className="sidebar-section">
           <div className="sidebar-section-title">
             {t("agents.profiles")}
@@ -9524,7 +9518,10 @@ function AgentsPanel({
                     <button
                       className="profile-card-main agent-row-main"
                       type="button"
-                      onClick={() => onSelectProfile(profile.id)}
+                      onClick={() => {
+                        onSelectProfile(profile.id);
+                        setSidebarView("sessions");
+                      }}
                     >
                       <span className="profile-header">
                         <span className="profile-avatar agent-profile-avatar" aria-hidden="true">
@@ -9582,6 +9579,38 @@ function AgentsPanel({
             )}
           </div>
         </section>
+        ) : (
+        <>
+        <div className="agent-drill-head">
+          <button
+            className="agent-drill-back"
+            type="button"
+            onClick={() => setSidebarView("profiles")}
+            aria-label={t("agents.backToProfiles")}
+            title={t("agents.backToProfiles")}
+          >
+            <ChevronLeft aria-hidden="true" size={16} />
+          </button>
+          <span className="profile-avatar agent-profile-avatar" aria-hidden="true">
+            {activeProfile ? authorInitials(activeProfile.name).slice(0, 2) : "AI"}
+          </span>
+          <span className="agent-drill-name" title={activeProfile?.name}>
+            {activeProfile?.name}
+          </span>
+          <button
+            className="sidebar-section-btn"
+            type="button"
+            onClick={() => {
+              setEditingProfile(activeProfile);
+              setProfileModalOpen(true);
+            }}
+            disabled={!activeProfile}
+            aria-label={t("agents.editProfileTitle")}
+            title={t("agents.editProfileTitle")}
+          >
+            <Pencil aria-hidden="true" size={14} />
+          </button>
+        </div>
 
         <section className="sidebar-section agent-session-section">
           <div className="sidebar-section-title">
@@ -9595,6 +9624,38 @@ function AgentsPanel({
               title={t("agents.newSession")}
             >
               <Plus aria-hidden="true" size={14} />
+            </button>
+          </div>
+          <div className="agent-session-tools">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => activeSession && onStop(activeSession.id)}
+              disabled={!activeSession || activeSession.status !== "running"}
+              title="Stop"
+            >
+              <Square aria-hidden="true" size={14} />
+              Stop
+            </button>
+            <button
+              className={rawOpen ? "secondary-button active" : "secondary-button"}
+              type="button"
+              onClick={() => setRawOpen((open) => !open)}
+              aria-pressed={rawOpen}
+              title={rawOpen ? t("agents.hideRaw") : t("agents.showRaw")}
+            >
+              <FileText aria-hidden="true" size={14} />
+              Raw
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onResetChat}
+              disabled={busy || !activeProfile}
+              title={t("agents.clearChat")}
+            >
+              <Trash2 aria-hidden="true" size={14} />
+              {t("agents.clearChat")}
             </button>
           </div>
           <div className="session-list">
@@ -9618,6 +9679,8 @@ function AgentsPanel({
             )}
           </div>
         </section>
+        </>
+        )}
 
         {activeProfile ? (
           <section className="sidebar-section agent-usage">
@@ -9675,76 +9738,6 @@ function AgentsPanel({
       />
 
       <section className="agent-workspace">
-        <div className="chat-header agent-session-bar">
-          <div className="chat-profile-avatar" aria-hidden="true">
-            {activeProfile ? authorInitials(activeProfile.name).slice(0, 2) : "AI"}
-          </div>
-          <div className="chat-profile-info agent-chat-title">
-            <div className="chat-profile-name">{activeProfile?.name || t("agents.selectAgent")}</div>
-            <div className="chat-profile-status">
-              <span className={working ? "chat-profile-dot" : "chat-profile-dot idle"} />
-              {activeProfile
-                ? `${t("agents.active")} · ${activeSession?.title || sessionStatus}`
-                : project
-                  ? projectDisplayName(project)
-                  : t("agents.noProject")}
-            </div>
-          </div>
-          <div className="agent-session-actions">
-            {sessionTokens ? (
-              <span className="agent-session-tokens" title={t("agents.sessionTokensHint")}>
-                {sessionTokens}
-              </span>
-            ) : null}
-            {working ? <span className="status-pill ready">Working</span> : null}
-            <button
-              className="secondary-button agent-raw-toggle"
-              type="button"
-              onClick={() => {
-                setSessionsOpen((open) => !open);
-                setRawOpen(false);
-              }}
-              aria-pressed={sessionsOpen}
-              aria-label={sessionsOpen ? t("agents.hideConversations") : t("agents.showConversations")}
-            >
-              <span>{t("agents.conversations")}</span>
-              <strong>{activeSessions.length}</strong>
-            </button>
-            {activeSession ? (
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => onStop(activeSession.id)}
-                disabled={activeSession.status !== "running"}
-              >
-                <Square aria-hidden="true" size={16} />
-                Stop
-              </button>
-            ) : null}
-            <button
-              className="secondary-button agent-raw-toggle"
-              type="button"
-              onClick={() => {
-                setRawOpen((open) => !open);
-                setSessionsOpen(false);
-              }}
-              aria-pressed={rawOpen}
-              aria-label={rawOpen ? t("agents.hideRaw") : t("agents.showRaw")}
-            >
-              <span>Raw</span>
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={onResetChat}
-              disabled={busy || !activeProfile}
-            >
-              <Trash2 aria-hidden="true" size={16} />
-              {t("agents.clearChat")}
-            </button>
-          </div>
-        </div>
-
         {error ? <div className="error-banner">{error}</div> : null}
 
         <div className="agent-diagnostics" aria-label={t("agents.diagnostics")}>
@@ -9767,9 +9760,15 @@ function AgentsPanel({
             </span>
           ) : null}
           {metricSummary ? <span>{metricSummary}</span> : null}
+          {sessionTokens ? (
+            <span className="agent-session-tokens" title={t("agents.sessionTokensHint")}>
+              {sessionTokens}
+            </span>
+          ) : null}
+          {working ? <span className="status-pill ready">Working</span> : null}
         </div>
 
-        <div className={rawOpen || sessionsOpen ? "agent-chat-shell raw-open" : "agent-chat-shell"}>
+        <div className={rawOpen ? "agent-chat-shell raw-open" : "agent-chat-shell"}>
           <div
             className="chat-messages agent-timeline"
             ref={timelineRef}
@@ -9837,49 +9836,6 @@ function AgentsPanel({
               </div>
             ) : null}
           </div>
-
-          {sessionsOpen ? (
-            <aside
-              className="agent-raw-panel agent-sessions-drawer"
-              aria-label={t("agents.conversationsDrawer")}
-            >
-              <div>
-                <span>
-                  <strong>{t("agents.conversations")}</strong>
-                  <small>{activeSessions.length}</small>
-                </span>
-              </div>
-              <div className="agent-raw-body">
-                {activeSessions.length ? (
-                  activeSessions.map((session) => (
-                    <button
-                      key={session.id}
-                      type="button"
-                      className={
-                        session.id === activeSession?.id
-                          ? "agent-session-item active"
-                          : "agent-session-item"
-                      }
-                      onClick={() => {
-                        onSelectSession(session.id);
-                        setSessionsOpen(false);
-                      }}
-                    >
-                      <span className="agent-session-item-title">
-                        {session.title || `#${session.id}`}
-                      </span>
-                      <span className="agent-session-item-meta">
-                        {agentStatusLabel(session.status)} ·{" "}
-                        {new Date(session.updated_at).toLocaleString()}
-                      </span>
-                    </button>
-                  ))
-                ) : (
-                  <div className="empty-note">{t("agents.noConversations")}</div>
-                )}
-              </div>
-            </aside>
-          ) : null}
 
           {rawOpen ? (
             <aside className="agent-raw-panel" aria-label={t("agents.rawDrawer")}>

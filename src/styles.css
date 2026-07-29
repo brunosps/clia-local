@@ -16167,3 +16167,69 @@ h2 {
   font-size: 11px;
   white-space: nowrap;
 }
+
+/* clia-local: agents sidebar drill-down ------------------------------------
+   Profiles and that profile's sessions share one column instead of stacking:
+   with more than a handful of profiles the two lists fought for the same
+   vertical space and neither was usable. */
+.agent-drill-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--clia-border);
+  padding: var(--space-2) var(--space-3);
+}
+
+.agent-drill-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 1px solid var(--clia-border);
+  border-radius: var(--radius-sm);
+  background: var(--clia-panel-strong);
+  color: var(--clia-muted);
+  padding: 3px;
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease),
+    border-color var(--motion-fast) var(--ease);
+}
+
+.agent-drill-back:hover {
+  border-color: var(--clia-border-strong);
+  color: var(--clia-text);
+}
+
+.agent-drill-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--clia-text);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Stop / Raw / clear, moved out of the removed chat header. */
+.agent-session-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0 0 var(--space-2);
+}
+
+.agent-session-tools .secondary-button {
+  flex: 1 1 auto;
+  gap: var(--space-1);
+  min-height: 26px;
+  padding: 2px var(--space-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.agent-session-tools .secondary-button.active {
+  border-color: var(--clia-violet);
+  color: var(--clia-text);
+}
