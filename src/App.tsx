@@ -68,10 +68,12 @@ import { artifactCounts, artifactLanguage, formatArtifactSize } from "./artifact
 import {
   agentSessionsForProfile,
   agentStatusLabel,
+  formatSessionTokenUsage,
   hasRunningAgentSession,
   isAgentRunning,
   resolveActiveAgentSession,
   shouldAppendAgentMessage,
+  sumSessionTokenUsage,
   upsertAgentSession,
 } from "./agents";
 import {
@@ -9284,6 +9286,9 @@ function AgentsPanel({
     ? metrics.filter((metric) => metric.run_id === latestMetric.run_id)
     : [];
   const metricSummary = summarizeAgentMetrics(latestRunMetrics);
+  // Whole-conversation total, not just the last turn — the last turn's numbers say
+  // nothing about what the session has cost so far.
+  const sessionTokens = formatSessionTokenUsage(sumSessionTokenUsage(metrics));
   const visibleMessages = messages.filter((message) => message.role !== "event");
   const sessionStatus = activeSession ? agentStatusLabel(activeSession.status) : t("agents.noConversation");
   const rawPageCount = Math.max(1, Math.ceil(rawTotal / rawPageSize));
@@ -9686,6 +9691,11 @@ function AgentsPanel({
             </div>
           </div>
           <div className="agent-session-actions">
+            {sessionTokens ? (
+              <span className="agent-session-tokens" title={t("agents.sessionTokensHint")}>
+                {sessionTokens}
+              </span>
+            ) : null}
             {working ? <span className="status-pill ready">Working</span> : null}
             <button
               className="secondary-button agent-raw-toggle"

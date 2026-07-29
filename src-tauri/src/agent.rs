@@ -1229,6 +1229,23 @@ fn copilot_metric(value: &Value) -> Option<(&'static str, Value)> {
         ));
     }
     let event_type = value.get("type").and_then(Value::as_str).unwrap_or("event");
+    // Copilot reports tokens per assistant message (`outputTokens`) and bills in
+    // premium requests; it does not expose input tokens at all, so the session
+    // total is the sum of what it did report rather than a full token count.
+    if event_type == "assistant.message" {
+        if let Some(output_tokens) = first_i64_field(value, "outputTokens") {
+            return Some(("result", json!({ "output_tokens": output_tokens })));
+        }
+    }
+    if event_type == "result" {
+        return Some((
+            "result",
+            json!({
+                "event_type": event_type,
+                "premium_requests": first_i64_field(value, "premiumRequests")
+            }),
+        ));
+    }
     if event_type.contains("started") || event_type.contains("created") {
         return Some(("provider_init", json!({ "event_type": event_type })));
     }
@@ -1526,7 +1543,13 @@ fn build_copilot_command(
     ]);
     append_copilot_context_policy(&mut command, context_policy);
     if let Some(provider_session_id) = session.provider_session_id.as_deref() {
-        command.arg(format!("--connect={provider_session_id}"));
+        // `--resume`, NOT `--connect`: in the Copilot CLI `--connect` attaches to a
+        // *remote* session, and given a local id it silently starts a fresh one —
+        // the agent then answered every follow-up as if it were the first message.
+        // Verified against the CLI: with `--connect` the `result` event comes back
+        // with a different sessionId and no memory of the conversation; with
+        // `--resume` the id round-trips and the history is there.
+        command.arg(format!("--resume={provider_session_id}"));
     }
     if let Some(model) = trimmed(session.model.as_deref()) {
         command.arg(format!("--model={model}"));
@@ -2667,13 +2690,37 @@ mod tests {
     }
 
     #[test]
-    fn copilot_resume_uses_connect_flag() {
+    fn copilot_metric_extracts_output_tokens_and_premium_requests() {
+        // Shapes copied from real `copilot --output-format json` output (CLI 1.0.63).
+        let message = serde_json::json!({
+            "type": "assistant.message",
+            "data": { "content": "ok", "outputTokens": 4, "turnId": "0" }
+        });
+        let (phase, details) = copilot_metric(&message).expect("message metric");
+        assert_eq!(phase, "result");
+        assert_eq!(details["output_tokens"], 4);
+
+        let result = serde_json::json!({
+            "type": "result",
+            "sessionId": "44295a67",
+            "exitCode": 0,
+            "usage": { "premiumRequests": 1, "sessionDurationMs": 4021 }
+        });
+        let (phase, details) = copilot_metric(&result).expect("result metric");
+        assert_eq!(phase, "result");
+        assert_eq!(details["premium_requests"], 1);
+    }
+
+    #[test]
+    fn copilot_resume_uses_the_resume_flag_not_connect() {
         let mut session = session("copilot", "read-only");
         session.provider_session_id = Some("copilot-session-1".to_string());
         let command = build_copilot_command(&session, "hi", &lean_policy()).unwrap();
         let args = args(&command);
-        assert!(args.contains(&"--connect=copilot-session-1".to_string()));
-        assert!(!args.iter().any(|arg| arg.starts_with("--resume")));
+        assert!(args.contains(&"--resume=copilot-session-1".to_string()));
+        // `--connect` is for remote sessions and starts a NEW local one; using it
+        // here is what made every message look like the first.
+        assert!(!args.iter().any(|arg| arg.starts_with("--connect")));
     }
 
     #[test]

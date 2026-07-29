@@ -16160,3 +16160,10 @@ h2 {
 .message-copy.copied {
   color: var(--clia-primary);
 }
+
+.agent-session-tokens {
+  color: var(--clia-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+}

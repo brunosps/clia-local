@@ -62,3 +62,60 @@ export function agentStatusLabel(status: string) {
       return status;
   }
 }
+
+export type SessionTokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  premiumRequests: number;
+};
+
+/**
+ * Running token total for a whole conversation, not just the last turn.
+ *
+ * Sums every `result` event in the session. Providers report different subsets —
+ * Copilot only gives output tokens plus a premium-request count, Codex/Claude give
+ * input and output — so a zero here means "not reported", never "nothing spent".
+ */
+export function sumSessionTokenUsage(
+  metrics: Array<{ phase: string; details_json: string }>,
+): SessionTokenUsage {
+  const total: SessionTokenUsage = { inputTokens: 0, outputTokens: 0, premiumRequests: 0 };
+  for (const metric of metrics) {
+    if (metric.phase !== "result") continue;
+    let details: unknown;
+    try {
+      details = JSON.parse(metric.details_json);
+    } catch {
+      continue;
+    }
+    if (typeof details !== "object" || details === null) continue;
+    const record = details as Record<string, unknown>;
+    const read = (key: string) => {
+      const value = record[key];
+      return typeof value === "number" && Number.isFinite(value) ? value : 0;
+    };
+    total.inputTokens += read("input_tokens");
+    total.outputTokens += read("output_tokens");
+    total.premiumRequests += read("premium_requests");
+  }
+  return total;
+}
+
+/** Compact label for the session header; empty when the provider reported nothing. */
+export function formatSessionTokenUsage(usage: SessionTokenUsage): string {
+  const compact = (value: number) =>
+    value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : String(value);
+  const parts: string[] = [];
+  const tokens = usage.inputTokens + usage.outputTokens;
+  if (tokens > 0) {
+    parts.push(
+      usage.inputTokens > 0
+        ? `${compact(usage.inputTokens)}↑ ${compact(usage.outputTokens)}↓ tokens`
+        : `${compact(usage.outputTokens)} tokens`,
+    );
+  }
+  if (usage.premiumRequests > 0) {
+    parts.push(`${usage.premiumRequests} premium`);
+  }
+  return parts.join(" · ");
+}
