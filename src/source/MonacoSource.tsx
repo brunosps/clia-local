@@ -171,49 +171,64 @@ export function MonacoSource({
     // Binding Ctrl/Cmd+V means the shortcut is handled whether or not the engine
     // decides to dispatch a paste event, and every route is tried in order —
     // including a plain in-app copy, which the native plugin serves.
-    ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV, () => {
-      // `executeEdits` bypasses readOnly (that option only blocks user input), so
-      // without this a paste could mutate the historical-version viewer.
-      if (ed.getOption(monaco.editor.EditorOption.readOnly)) return;
-      pastedAt.current = Date.now();
-      void readClipboardText().then((text) => {
-        if (!text) return;
-        const selections = ed.getSelections();
-        if (!selections?.length) return;
-        // Monaco's own behaviour: N cursors + N lines pastes one line per cursor.
-        const lines = text.split("\n");
-        const perCursor = selections.length > 1 && lines.length === selections.length;
-        ed.executeEdits(
-          "clipboard-fallback",
-          selections.map((selection, index) => ({
-            range: selection,
-            text: perCursor ? lines[index] : text,
-            forceMoveMarkers: true,
-          })),
-        );
-        ed.pushUndoStop();
-        ed.focus();
-      });
-    });
+    ed.addCommand(
+      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV,
+      () => {
+        // `executeEdits` bypasses readOnly (that option only blocks user input), so
+        // without this a paste could mutate the historical-version viewer.
+        if (ed.getOption(monaco.editor.EditorOption.readOnly)) return;
+        pastedAt.current = Date.now();
+        void readClipboardText().then((text) => {
+          if (!text) return;
+          const selections = ed.getSelections();
+          if (!selections?.length) return;
+          // Monaco's own behaviour: N cursors + N lines pastes one line per cursor.
+          const lines = text.split("\n");
+          const perCursor = selections.length > 1 && lines.length === selections.length;
+          ed.executeEdits(
+            "clipboard-fallback",
+            selections.map((selection, index) => ({
+              range: selection,
+              text: perCursor ? lines[index] : text,
+              forceMoveMarkers: true,
+            })),
+          );
+          ed.pushUndoStop();
+          ed.focus();
+        });
+        // `editorTextFocus` scopes the binding to the editor's own text area. Without
+        // it the command also fired from Monaco's widgets — Ctrl+F then Ctrl+V pasted
+        // into the document at the cursor instead of into the find box.
+      },
+      "editorTextFocus",
+    );
 
     // Copy goes through the app's clipboard chain for the same reason as paste:
     // under WSL the hand-off to Windows has to be done explicitly and in UTF-8.
     // Empty selection copies the whole line, matching Monaco/VS Code.
-    ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyC, () => {
-      const model = ed.getModel();
-      const selection = ed.getSelection();
-      if (!model || !selection) return;
-      const text = selection.isEmpty()
-        ? model.getLineContent(selection.startLineNumber) + "\n"
-        : model.getValueInRange(selection);
-      if (text) void writeClipboardText(text);
-    });
+    ed.addCommand(
+      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyC,
+      () => {
+        const model = ed.getModel();
+        const selection = ed.getSelection();
+        if (!model || !selection) return;
+        const text = selection.isEmpty()
+          ? model.getLineContent(selection.startLineNumber) + "\n"
+          : model.getValueInRange(selection);
+        if (text) void writeClipboardText(text);
+      },
+      "editorTextFocus",
+    );
 
     // Belt and braces: if the engine dispatches a paste event anyway right after
     // the keybinding ran, swallow it so the text is not inserted twice.
     const dom = ed.getDomNode();
     if (dom) {
       const onPaste = (event: ClipboardEvent) => {
+        // Monaco's find/replace fields are real <input>s inside this same node, and
+        // they are served by the app-wide paste fallback — never swallow theirs.
+        // (Monaco's own editing surface is a <textarea>, so it does not match.)
+        if ((event.target as HTMLElement | null)?.closest?.("input")) return;
         if (Date.now() - pastedAt.current < 500) {
           event.preventDefault();
           event.stopPropagation();
