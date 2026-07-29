@@ -1536,6 +1536,72 @@ fn build_claude_command(
     Ok(command)
 }
 
+/// A model the user can pick, and where the name came from.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct AgentModelOption {
+    pub value: String,
+    pub label: String,
+    /// "cli" when the tool itself listed it, "used" when it was harvested from a
+    /// session this workspace already ran. Lets the UI say where the list is from
+    /// instead of implying every provider can enumerate its models.
+    pub source: &'static str,
+}
+
+/// Parse `codex debug models` output.
+///
+/// Codex is the only one of the three CLIs that can enumerate its catalogue;
+/// Claude and Copilot resolve models server-side and expose no listing at all
+/// (an invalid `--model` just fails, without naming the valid ones).
+pub fn parse_codex_models(json: &str) -> Vec<AgentModelOption> {
+    let Ok(value) = serde_json::from_str::<Value>(json) else {
+        return Vec::new();
+    };
+    let Some(models) = value.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter(|model| {
+            // `hide` marks internal entries such as the auto-review model.
+            model.get("visibility").and_then(Value::as_str) != Some("hide")
+        })
+        .filter_map(|model| {
+            let slug = model.get("slug").and_then(Value::as_str)?.trim();
+            if slug.is_empty() {
+                return None;
+            }
+            let label = model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(slug);
+            Some(AgentModelOption {
+                value: slug.to_string(),
+                label: label.to_string(),
+                source: "cli",
+            })
+        })
+        .collect()
+}
+
+/// Ask the provider's CLI for its models. Empty when the tool cannot list them.
+pub fn list_models_from_cli(provider: &str) -> Vec<AgentModelOption> {
+    if provider != "codex" {
+        return Vec::new();
+    }
+    let Ok(program) = resolve_codex_program() else {
+        return Vec::new();
+    };
+    let Ok(output) = Command::new(program).args(["debug", "models"]).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_codex_models(&String::from_utf8_lossy(&output.stdout))
+}
+
 fn build_copilot_command(
     session: &AgentSession,
     prompt: &str,
@@ -2698,6 +2764,40 @@ mod tests {
         .unwrap();
         let args = args(&command);
         assert!(args.contains(&"--allow-all".to_string()));
+    }
+
+    #[test]
+    fn parses_the_codex_model_catalogue_and_hides_internal_entries() {
+        // Trimmed from real `codex debug models` output.
+        let json = r#"{"models":[
+          {"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list"},
+          {"slug":"gpt-5.4-mini","display_name":"GPT-5.4-Mini","visibility":"list"},
+          {"slug":"sem-nome","visibility":"list"},
+          {"slug":"codex-auto-review","display_name":"Codex Auto Review","visibility":"hide"}
+        ]}"#;
+        let models = parse_codex_models(json);
+        let values: Vec<&str> = models.iter().map(|m| m.value.as_str()).collect();
+        assert_eq!(values, vec!["gpt-5.6-sol", "gpt-5.4-mini", "sem-nome"]);
+        assert_eq!(models[0].label, "GPT-5.6-Sol");
+        // No display_name falls back to the slug rather than showing an empty label.
+        assert_eq!(models[2].label, "sem-nome");
+        assert!(models.iter().all(|m| m.source == "cli"));
+    }
+
+    #[test]
+    fn codex_model_catalogue_survives_junk_instead_of_panicking() {
+        assert!(parse_codex_models("not json").is_empty());
+        assert!(parse_codex_models("{}").is_empty());
+        assert!(parse_codex_models(r#"{"models":"nope"}"#).is_empty());
+        assert!(parse_codex_models(r#"{"models":[{"display_name":"sem slug"}]}"#).is_empty());
+    }
+
+    #[test]
+    fn only_codex_can_enumerate_models_from_its_cli() {
+        // Claude and Copilot resolve models server-side; asking their CLI yields
+        // nothing, and the UI falls back to previously used models.
+        assert!(list_models_from_cli("claude").is_empty());
+        assert!(list_models_from_cli("copilot").is_empty());
     }
 
     #[test]

@@ -4,6 +4,7 @@ import type {
   AttachmentPreview,
   AgentMessage,
   AgentProviderHealth,
+  AgentModelOption,
   AgentProfile,
   AgentRawEventsPage,
   AgentRunEvent,
@@ -523,6 +524,10 @@ export const api = {
   },
   indexProjectEvidence(path: string) {
     return invokeSafe<EvidenceEntry[]>("index_project_evidence", { path });
+  },
+  /** Models offered for a provider: the CLI catalogue plus what was already used. */
+  listAgentModels(provider: AgentProvider, workspaceId: number) {
+    return invokeSafe<AgentModelOption[]>("list_agent_models", { provider, workspaceId });
   },
   /** Profiles belong to the workspace — they are not filtered by project. */
   listAgentProfiles(workspaceId: number) {

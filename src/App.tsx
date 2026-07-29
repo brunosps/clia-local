@@ -205,6 +205,7 @@ import {
 import { api } from "./tauri";
 import type {
   AgentMessage,
+  AgentModelOption,
   AgentMetricEvent,
   AgentProviderHealth,
   AgentProfile,
@@ -4701,6 +4702,7 @@ export function App() {
               />
             ) : activeTab === "agents" ? (
               <AgentsPanel
+                workspaceId={activeWorkspace?.id ?? null}
                 activeProfile={activeAgentProfile}
                 activeSession={activeAgentSession}
                 activeSessions={activeAgentSessions}
@@ -8760,11 +8762,13 @@ function AgentProfileModal({
   onClose,
   onCreate,
   profile,
+  workspaceId,
 }: {
   busy: boolean;
   onClose: () => void;
   onCreate: (draft: AgentProfileDraft) => void;
   profile?: AgentProfile | null;
+  workspaceId: number | null;
 }) {
   const { t } = useI18n();
   const initialProvider = safeAgentProvider(profile?.provider);
@@ -8785,7 +8789,43 @@ function AgentProfileModal({
     profile?.context_mode === "full" ? "full" : "auto_lean",
   );
   const [rtkEnabled, setRtkEnabled] = useState(Boolean(profile?.rtk_enabled));
-  const modelOptions = agentModelOptions(provider);
+  // Models discovered from the provider's own CLI (only Codex can list them) plus
+  // the ones this workspace already ran. The bundled list stays as a fallback so
+  // the field is never empty on a fresh install.
+  const [discovered, setDiscovered] = useState<AgentModelOption[]>([]);
+  const [discovering, setDiscovering] = useState(false);
+  useEffect(() => {
+    if (workspaceId == null) return;
+    let cancelled = false;
+    setDiscovering(true);
+    void api.listAgentModels(provider, workspaceId).then((result) => {
+      if (cancelled) return;
+      setDiscovered(result.ok ? result.value : []);
+      setDiscovering(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [provider, workspaceId]);
+
+  const modelOptions = useMemo(() => {
+    const bundled = agentModelOptions(provider);
+    const head = bundled.filter((option) => option.value === "default");
+    const seen = new Set(head.map((option) => option.value));
+    const merged = [...head];
+    for (const option of discovered) {
+      if (seen.has(option.value)) continue;
+      seen.add(option.value);
+      merged.push({ value: option.value, label: option.label });
+    }
+    // Anything the tool did not report is still offered, just after what it did.
+    for (const option of bundled) {
+      if (seen.has(option.value)) continue;
+      seen.add(option.value);
+      merged.push(option);
+    }
+    return merged;
+  }, [provider, discovered]);
   const effortOptions = agentEffortOptions(provider);
   const selectedModel =
     modelChoice === "default" ? null : modelChoice === "custom" ? customModel.trim() : modelChoice;
@@ -8871,7 +8911,16 @@ function AgentProfileModal({
           </label>
 
           <label>
-            <span>{t("agents.fieldModel")}</span>
+            <span>
+              {t("agents.fieldModel")}
+              <small className="field-note">
+                {discovering
+                  ? t("common.loading")
+                  : discovered.some((option) => option.source === "cli")
+                    ? t("agents.modelsFromCli")
+                    : t("agents.modelsFromHistory")}
+              </small>
+            </span>
             <select
               value={modelChoice}
               onChange={(event) => setModelChoice(event.target.value)}
@@ -9037,6 +9086,7 @@ function AgentsPanel({
   onStop,
   profiles,
   project,
+  workspaceId,
   sessions,
   setComposer,
   skills,
@@ -9063,6 +9113,7 @@ function AgentsPanel({
   onStop: (sessionId: number) => void;
   profiles: AgentProfile[];
   project: Project | null;
+  workspaceId: number | null;
   sessions: AgentSession[];
   setComposer: (value: string) => void;
   skills: WorkspaceSkill[];
@@ -9447,6 +9498,7 @@ function AgentsPanel({
       {profileModalOpen ? (
         <AgentProfileModal
           busy={busy}
+          workspaceId={workspaceId}
           profile={editingProfile}
           onClose={() => {
             setProfileModalOpen(false);

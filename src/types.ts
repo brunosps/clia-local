@@ -1104,3 +1104,10 @@ export type PushTarget = {
   upstream: string | null;
   needs_upstream: boolean;
 };
+
+export type AgentModelOption = {
+  value: string;
+  label: string;
+  /** "cli" when the tool listed it, "used" when harvested from past sessions. */
+  source: "cli" | "used";
+};

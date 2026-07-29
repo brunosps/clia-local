@@ -2495,6 +2495,28 @@ impl Database {
     /// configured assistant, not a per-repository setting. `project_id` is kept on
     /// the table (dropping a column mid-migration is not worth it) but is written
     /// as null and never filtered on.
+    /// Distinct models this workspace has actually run for a provider.
+    ///
+    /// Claude and Copilot cannot enumerate their models from the CLI, so what was
+    /// really used is the only trustworthy list the app can offer for them.
+    pub fn list_used_agent_models(
+        &self,
+        workspace_id: i64,
+        provider: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let conn = self.workspace_connect_by_id(workspace_id)?;
+        let mut stmt = conn.prepare(
+            "select distinct model from agent_sessions
+             where workspace_id = ?1 and provider = ?2
+               and model is not null and trim(model) <> ''
+             order by model",
+        )?;
+        let rows = stmt.query_map(params![workspace_id, provider], |row| {
+            row.get::<_, String>(0)
+        })?;
+        collect_rows(rows)
+    }
+
     pub fn list_agent_profiles(&self, workspace_id: i64) -> anyhow::Result<Vec<AgentProfile>> {
         let conn = self.workspace_connect_by_id(workspace_id)?;
         let mut stmt = conn.prepare(

@@ -1484,6 +1484,33 @@ fn index_project_evidence(
     Ok(entries)
 }
 
+/// Models to offer for a provider, newest source first.
+///
+/// Only Codex can list its catalogue (`codex debug models`); Claude and Copilot
+/// resolve models server-side and expose no listing, so for them this returns what
+/// the workspace has actually used. Either way the field stays free-text, so a
+/// model the app has never heard of can still be typed.
+#[tauri::command]
+fn list_agent_models(
+    app: tauri::AppHandle,
+    provider: String,
+    workspace_id: i64,
+) -> AppResult<Vec<agent::AgentModelOption>> {
+    let provider = normalize_agent_provider(&provider)?;
+    let mut options = agent::list_models_from_cli(provider);
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    for model in db.list_used_agent_models(workspace_id, provider)? {
+        if !options.iter().any(|option| option.value == model) {
+            options.push(agent::AgentModelOption {
+                label: model.clone(),
+                value: model,
+                source: "used",
+            });
+        }
+    }
+    Ok(options)
+}
+
 #[tauri::command]
 fn list_agent_profiles(
     app: tauri::AppHandle,
@@ -5417,6 +5444,7 @@ pub fn run() {
             complete_evidence_run,
             create_manual_evidence,
             index_project_evidence,
+            list_agent_models,
             list_agent_profiles,
             create_agent_profile,
             update_agent_profile,
