@@ -1,7 +1,5 @@
 import type { Project, Workspace } from "./types";
 
-export const defaultWorkspaceName = "Local";
-
 export function parseStateId(value: string | null): number | null {
   if (value === null) return null;
   const parsed = Number(value.trim());

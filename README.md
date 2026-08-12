@@ -17,8 +17,11 @@ binário nativo e os agentes rodam como processos locais.
   histórico ficam em SQLite na sua máquina. (Ações de rede explícitas — clonar repositórios,
   baixar runtimes e chamar os CLIs dos agentes — usam a internet normalmente.)
 - **Abre direto no trabalho.** Sem tela de login nem conta — ao abrir, você já está na UI.
-- **Multi-projeto por workspace.** Agrupe vários repositórios (e seus submódulos) sob um
-  mesmo workspace e alterne entre eles rapidamente.
+- **A pasta é o workspace.** `clia-local ~/code/meu-projeto` abre aquela pasta; os
+  repositórios dentro dela viram projetos sozinhos, e os dados ficam no `.dw` da própria
+  pasta. Nada de cadastrar workspace.
+- **Multi-projeto por pasta.** Vários repositórios (e seus submódulos) sob a mesma pasta,
+  alternando entre eles rapidamente.
 - **Agentes como cidadãos de primeira classe.** Dispare um agente direto de uma tarefa e
   acompanhe o resultado — com histórico por tarefa.
 
@@ -79,9 +82,12 @@ corepack pnpm dev          # sobe o Vite + Tauri e abre a janela (requer $DISPLA
 
 ### Primeiro uso
 
-1. **Crie ou abra um workspace** pelo seletor no topo.
-2. **Adicione um projeto:** *New project* → clonar um repositório remoto ou apontar para uma
-   pasta local.
+1. **Abra uma pasta** — `clia-local /caminho/da/pasta`, ou *Abrir pasta…* no seletor do topo.
+   A pasta é o workspace: seu nome vira o nome, e os dados vão para o `.dw` dentro dela (se
+   ela for um repo git, `.dw` entra no `.git/info/exclude`, então não suja o `git status`).
+   Instale o comando com `corepack pnpm launcher:install`.
+2. **Os repositórios da pasta já aparecem como projetos.** Para trazer outro, *New project* →
+   clonar um repositório remoto ou apontar para uma pasta local.
 3. **Configure um agente** em *Configurações* (perfil + CLI do agente).
 4. Crie uma tarefa na **Fila** e dispare **Executar com agente**.
 
@@ -116,12 +122,19 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 
 ## Onde ficam os dados
 
-Todo o estado é local, em SQLite (`clia-local.sqlite3`), no diretório de dados do app —
-resolvido nesta ordem: `$DW_GUI_HOME` → diretório de dados do Tauri
-(`~/.local/share/dev.clia.local/`) → `~/.local/share/clia-local/` → `./.clia-local`.
-Os anexos das tarefas são copiados para dentro do workspace, por card
-(`<workspace>/.dw/gui/attachments/<card_id>/`), fora dos repositórios — então não sujam o
-Git dos seus projetos.
+Todo o estado é local, em SQLite, dividido em dois arquivos:
+
+- **Na pasta que você abriu:** `<pasta>/.dw/clia-local.sqlite3` — tarefas, projetos, deploy
+  e sessões de agente. É o dado de verdade: ele viaja com a pasta, e apagar o `.dw` apaga o
+  workspace. Os anexos das tarefas ficam ao lado, por card
+  (`<pasta>/.dw/gui/attachments/<card_id>/`).
+- **No diretório de dados do app:** `clia-local.sqlite3` — apenas a **lista de pastas
+  recentes** e as preferências de UI. Resolvido nesta ordem: `$DW_GUI_HOME` → diretório de
+  dados do Tauri (`~/.local/share/dev.clia.local/`) → `~/.local/share/clia-local/` →
+  `./.clia-local`.
+
+Se a pasta aberta for um repositório Git, o `.dw` é registrado no `.git/info/exclude` desse
+clone — não suja o `git status` nem o `.gitignore` versionado.
 
 ## Estrutura do repositório
 

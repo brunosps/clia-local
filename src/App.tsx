@@ -284,7 +284,6 @@ import {
 import { loadFlowRegistry, parseFlowIndex, singleFlowRegistry, type FlowRegistry } from "./flows";
 import {
   createDefaultWorkspaceRoot,
-  defaultWorkspaceName,
   parseStateId,
   pickActiveProject,
   pickActiveWorkspace,
@@ -513,11 +512,6 @@ export function App() {
   const activeWorkspaceRef = useRef<Workspace | null>(null);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [projectPath, setProjectPath] = useState(defaultProjectPath);
-  const [newWorkspaceName, setNewWorkspaceName] = useState(defaultWorkspaceName);
-  const [newWorkspaceRoot, setNewWorkspaceRoot] = useState(
-    createDefaultWorkspaceRoot(defaultProjectPath),
-  );
-  const [workspaceModalOpen, setWorkspaceModalOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [workspaceAccent, setWorkspaceAccent] = useState<{
     workspaceId: number;
@@ -1765,10 +1759,29 @@ export function App() {
       return;
     }
 
-    const nextWorkspaces = workspaceResult.value;
+    // `clia-local <folder>` wins over the remembered workspace: the folder the user
+    // named on the command line is the one they want open. It may be a folder we've
+    // never seen, so it is prepended to the recents list rather than looked up in it.
+    let nextWorkspaces = workspaceResult.value;
+    const startup = await api.startupWorkspace();
+    if (!startup.ok) {
+      setError(startup.error);
+    }
+    const startupWorkspace = startup.ok ? startup.value : null;
+    if (startupWorkspace) {
+      nextWorkspaces = [
+        startupWorkspace,
+        ...nextWorkspaces.filter((item) => item.id !== startupWorkspace.id),
+      ];
+    }
+
     const lastWorkspaceState = await api.getAppState("last_workspace_id");
     const lastWorkspaceId = lastWorkspaceState.ok ? parseStateId(lastWorkspaceState.value) : null;
-    const selectedWorkspace = pickActiveWorkspace(nextWorkspaces, lastWorkspaceId);
+    const selectedWorkspace =
+      startupWorkspace ?? pickActiveWorkspace(nextWorkspaces, lastWorkspaceId);
+    if (startupWorkspace) {
+      void api.setAppState("last_workspace_id", String(startupWorkspace.id));
+    }
 
     setWorkspaces(nextWorkspaces);
     setLocalRegistryChecked(true);
@@ -1786,8 +1799,6 @@ export function App() {
 
     setActiveWorkspace(selectedWorkspace);
     activeWorkspaceRef.current = selectedWorkspace;
-    setNewWorkspaceName(selectedWorkspace.name);
-    setNewWorkspaceRoot(selectedWorkspace.root_path);
 
     const projectResult = await api.listProjects(selectedWorkspace.id);
     if (!projectResult.ok) {
@@ -2811,18 +2822,19 @@ export function App() {
     }
   }
 
-  async function createWorkspace(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const name = newWorkspaceName.trim();
-    const rootPath = newWorkspaceRoot.trim();
-    if (!name || !rootPath) {
-      setError("Workspace name and root path are required.");
+  // The folder *is* the workspace: pick it, open it, done — no name/root form. Same
+  // path the CLI takes (`clia-local <folder>`), so both entry points behave alike.
+  async function openWorkspaceFolder() {
+    const picked = await api.pickDirectory();
+    if (!picked.ok) {
+      setError(picked.error);
       return;
     }
+    if (!picked.value) return;
 
     setRegistryBusy(true);
     setError("");
-    const result = await api.createWorkspace(name, rootPath);
+    const result = await api.openWorkspacePath(picked.value);
     if (!result.ok) {
       setError(result.error);
       setRegistryBusy(false);
@@ -2833,8 +2845,42 @@ export function App() {
       ...items.filter((item) => item.id !== result.value.id),
     ]);
     await selectWorkspace(result.value);
-    setWorkspaceModalOpen(false);
     setRegistryBusy(false);
+  }
+
+  // Forgetting only drops the folder from the recents list — its data stays in
+  // `<root>/.dw`, so reopening the folder brings the tasks back. That is what makes
+  // cleaning up the list safe enough to do without a confirmation dance.
+  async function forgetWorkspace(workspace: Workspace) {
+    setRegistryBusy(true);
+    setError("");
+    const result = await api.forgetWorkspace(workspace.id);
+    if (!result.ok) {
+      setError(result.error);
+      setRegistryBusy(false);
+      return;
+    }
+    const remaining = workspaces.filter((item) => item.id !== workspace.id);
+    setWorkspaces(remaining);
+    if (activeWorkspace?.id === workspace.id) {
+      const next = remaining[0] ?? null;
+      if (next) {
+        await selectWorkspace(next);
+      } else {
+        setActiveWorkspace(null);
+        activeWorkspaceRef.current = null;
+        setActiveProject(null);
+        setProjects([]);
+        setProjectPath("");
+        clearProjectState();
+        void refreshWorkspaceSkills(null);
+      }
+    }
+    setRegistryBusy(false);
+    void notice({
+      title: t("workspace.forget.doneTitle"),
+      body: t("workspace.forget.doneBody", { name: workspace.name }),
+    });
   }
 
   // clia-local: create a requirement card in the active workspace. Public IDs are
@@ -2939,8 +2985,6 @@ export function App() {
     setError("");
     setActiveWorkspace(workspace);
     activeWorkspaceRef.current = workspace;
-    setNewWorkspaceName(workspace.name);
-    setNewWorkspaceRoot(workspace.root_path);
     void api.setAppState("last_workspace_id", String(workspace.id));
 
     const projectResult = await api.listProjects(workspace.id);
@@ -4057,12 +4101,27 @@ export function App() {
                           <Check aria-hidden="true" size={14} />
                         ) : undefined,
                       onSelect: () => void selectWorkspace(workspace),
+                      // Right-side escape hatch: the recents list is only pleasant to
+                      // live with if pruning it is one click away from the switcher.
+                      submenu: [
+                        {
+                          label: workspace.root_path,
+                          disabled: true,
+                        },
+                        { separator: true },
+                        {
+                          label: t("topbar.forgetWorkspace"),
+                          icon: <X aria-hidden="true" size={14} />,
+                          danger: true,
+                          onSelect: () => void forgetWorkspace(workspace),
+                        },
+                      ],
                     })),
                     ...(workspaces.length ? [{ separator: true }] : []),
                     {
-                      label: t("topbar.newWorkspace"),
-                      icon: <Plus aria-hidden="true" size={14} />,
-                      onSelect: () => setWorkspaceModalOpen(true),
+                      label: t("topbar.openFolder"),
+                      icon: <FolderOpen aria-hidden="true" size={14} />,
+                      onSelect: () => void openWorkspaceFolder(),
                     },
                   ];
                   openHeaderMenu(
@@ -4223,7 +4282,7 @@ export function App() {
               }}
               onAddWorkspace={() => {
                 setQuickSwitchOpen(false);
-                setWorkspaceModalOpen(true);
+                void openWorkspaceFolder();
               }}
               onImportWorkspace={() => {
                 setQuickSwitchOpen(false);
@@ -4247,20 +4306,6 @@ export function App() {
                 setFilePaletteOpen(false);
               }}
               onClose={() => setFilePaletteOpen(false)}
-            />
-          ) : null}
-
-          {workspaceModalOpen ? (
-            <WorkspaceModal
-              busy={registryBusy}
-              newWorkspaceName={newWorkspaceName}
-              newWorkspaceRoot={newWorkspaceRoot}
-              onClose={() => setWorkspaceModalOpen(false)}
-              onCreateWorkspace={(event) => void createWorkspace(event)}
-              onPickWorkspaceRoot={() => void pickDirectory(setNewWorkspaceRoot)}
-              setNewWorkspaceName={setNewWorkspaceName}
-              setNewWorkspaceRoot={setNewWorkspaceRoot}
-              t={t}
             />
           ) : null}
 
@@ -4448,7 +4493,7 @@ export function App() {
           >
             {!activeWorkspace ? (
               <WelcomeScreen
-                onCreateWorkspace={() => setWorkspaceModalOpen(true)}
+                onOpenFolder={() => void openWorkspaceFolder()}
                 onImportWorkspace={openWorkspaceImport}
                 t={t}
                 workspaceCount={workspaces.length}
@@ -4771,12 +4816,12 @@ function formatCountdown(totalSeconds: number) {
 }
 
 function WelcomeScreen({
-  onCreateWorkspace,
+  onOpenFolder,
   onImportWorkspace,
   t,
   workspaceCount,
 }: {
-  onCreateWorkspace: () => void;
+  onOpenFolder: () => void;
   onImportWorkspace: () => void;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
   workspaceCount: number;
@@ -4790,9 +4835,9 @@ function WelcomeScreen({
           <p>{t("welcome.body")}</p>
         </div>
         <div className="welcome-actions">
-          <button className="primary-button welcome-cta" type="button" onClick={onCreateWorkspace}>
+          <button className="primary-button welcome-cta" type="button" onClick={onOpenFolder}>
             <FolderOpen aria-hidden="true" size={22} />
-            {t("welcome.createWorkspace")}
+            {t("welcome.openFolder")}
           </button>
           <button
             className="secondary-button welcome-cta"
@@ -4823,89 +4868,6 @@ function workspaceImportSummary(report: WorkspaceSolutionImportReport) {
   const failed = report.projects.filter((project) => project.status === "failed").length;
   const skipped = report.projects.filter((project) => project.status === "skipped").length;
   return `${cloned} clonado(s), ${warnings} com aviso, ${failed} falhou(aram), ${skipped} sem remote.`;
-}
-
-function WorkspaceModal({
-  busy,
-  newWorkspaceName,
-  newWorkspaceRoot,
-  onClose,
-  onCreateWorkspace,
-  onPickWorkspaceRoot,
-  setNewWorkspaceName,
-  setNewWorkspaceRoot,
-  t,
-}: {
-  busy: boolean;
-  newWorkspaceName: string;
-  newWorkspaceRoot: string;
-  onClose: () => void;
-  onCreateWorkspace: (event: React.FormEvent<HTMLFormElement>) => void;
-  onPickWorkspaceRoot: () => void;
-  setNewWorkspaceName: (value: string) => void;
-  setNewWorkspaceRoot: (value: string) => void;
-  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
-}) {
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section
-        className="modal-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="workspace-modal-title"
-      >
-        <div className="modal-heading">
-          <div>
-            <div className="section-label">Workspace</div>
-            <h2 id="workspace-modal-title">{t("workspace.modal.title")}</h2>
-            <p>{t("workspace.modal.description")}</p>
-          </div>
-          <button
-            className="secondary-button icon-button"
-            type="button"
-            onClick={onClose}
-            aria-label={t("common.close")}
-          >
-            <X aria-hidden="true" size={16} />
-          </button>
-        </div>
-        <form className="setup-form" onSubmit={onCreateWorkspace}>
-          <label>
-            <span>{t("workspace.modal.name")}</span>
-            <input
-              value={newWorkspaceName}
-              onChange={(event) => setNewWorkspaceName(event.target.value)}
-              disabled={busy}
-            />
-          </label>
-          <label>
-            <span>{t("workspace.modal.root")}</span>
-            <div className="path-picker">
-              <input
-                value={newWorkspaceRoot}
-                onChange={(event) => setNewWorkspaceRoot(event.target.value)}
-                disabled={busy}
-                spellCheck={false}
-              />
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={onPickWorkspaceRoot}
-                disabled={busy}
-              >
-                <FolderOpen aria-hidden="true" size={16} />
-                {t("workspace.modal.pick")}
-              </button>
-            </div>
-          </label>
-          <button className="primary-button" type="submit" disabled={busy}>
-            <Plus aria-hidden="true" size={17} />
-            {t("workspace.modal.save")}
-          </button>
-        </form>
-      </section>
-    </div>
-  );
 }
 
 function WorkspaceImportModal({
@@ -4977,7 +4939,7 @@ function WorkspaceImportModal({
                 disabled={busy}
               >
                 <Upload aria-hidden="true" size={16} />
-                {t("workspace.modal.pick")}
+                {t("workspace.import.pick")}
               </button>
             </div>
           </label>
@@ -5006,7 +4968,7 @@ function WorkspaceImportModal({
                 disabled={busy}
               >
                 <FolderOpen aria-hidden="true" size={16} />
-                {t("workspace.modal.pick")}
+                {t("workspace.import.pick")}
               </button>
             </div>
           </label>

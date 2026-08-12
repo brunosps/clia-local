@@ -525,6 +525,27 @@ impl Database {
         .ok_or_else(|| anyhow::anyhow!("workspace not found: {id}"))
     }
 
+    /// Remove a workspace from the recents registry, plus the UI preferences keyed by
+    /// its id (otherwise a recycled autoincrement id would inherit stale prefs).
+    /// The workspace's own tables live in `<root>/.dw/clia-local.sqlite3` and are left
+    /// untouched — reopening the folder restores everything.
+    pub fn forget_workspace(&self, id: i64) -> anyhow::Result<()> {
+        let conn = self.connect()?;
+        conn.execute("delete from workspaces where id = ?1", [id])?;
+        conn.execute(
+            "delete from app_state where key like ?1 or key = ?2",
+            params![
+                format!("ui.workspace:{id}:%"),
+                format!("last_project_id:{id}")
+            ],
+        )?;
+        conn.execute(
+            "delete from app_state where key = 'last_workspace_id' and value = ?1",
+            [id.to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn get_app_state(&self, key: &str) -> anyhow::Result<Option<String>> {
         let conn = self.connect()?;
         conn.query_row("select value from app_state where key = ?1", [key], |row| {
@@ -5079,7 +5100,11 @@ fn discover_workspace_git_projects(root_path: &str) -> anyhow::Result<Vec<PathBu
             root.clone(),
         );
     }
-    for child_dir in [root.join("projects"), root.join("repos")] {
+    // `projects/` and `repos/` are the curated layouts; the root's own direct children
+    // cover "open the folder I keep my repos in" (`clia-local ~/code`) without making
+    // the user register each repo by hand. Depth stops here on purpose — recursing
+    // would walk node_modules and vendored trees.
+    for child_dir in [root.join("projects"), root.join("repos"), root.clone()] {
         if !child_dir.is_dir() {
             continue;
         }
@@ -5656,6 +5681,107 @@ mod tests {
 
         assert_eq!(timeout, SQLITE_BUSY_TIMEOUT_MS);
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn forget_workspace_drops_registry_row_but_keeps_workspace_data() {
+        let (db, root) = temp_db();
+        let workspace_root = root.join("wks");
+        let workspace = db
+            .create_workspace("Wks", &workspace_root.display().to_string())
+            .expect("create workspace");
+        db.set_app_state(
+            &format!("ui.workspace:{}:accent_color", workspace.id),
+            "#f00",
+        )
+        .expect("set accent");
+        db.set_app_state(&format!("last_project_id:{}", workspace.id), "7")
+            .expect("set last project");
+        db.set_app_state("last_workspace_id", &workspace.id.to_string())
+            .expect("set last workspace");
+
+        db.forget_workspace(workspace.id).expect("forget");
+
+        assert!(db.list_workspaces().expect("list").is_empty());
+        assert_eq!(
+            db.get_app_state(&format!("ui.workspace:{}:accent_color", workspace.id))
+                .expect("read accent"),
+            None
+        );
+        assert_eq!(
+            db.get_app_state(&format!("last_project_id:{}", workspace.id))
+                .expect("read last project"),
+            None
+        );
+        assert_eq!(
+            db.get_app_state("last_workspace_id")
+                .expect("read last workspace"),
+            None
+        );
+        // The workspace's own database stays on disk, so reopening the folder recovers it.
+        assert!(workspace_db_path(&workspace_root.display().to_string()).is_file());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn forget_workspace_keeps_other_workspaces_preferences() {
+        let (db, root) = temp_db();
+        let doomed = db
+            .create_workspace("A", &root.join("a").display().to_string())
+            .expect("create a");
+        let kept = db
+            .create_workspace("B", &root.join("b").display().to_string())
+            .expect("create b");
+        db.set_app_state(&format!("ui.workspace:{}:accent_color", kept.id), "#0f0")
+            .expect("set accent");
+        db.set_app_state("last_workspace_id", &kept.id.to_string())
+            .expect("set last workspace");
+
+        db.forget_workspace(doomed.id).expect("forget");
+
+        let remaining = db.list_workspaces().expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, kept.id);
+        assert_eq!(
+            db.get_app_state(&format!("ui.workspace:{}:accent_color", kept.id))
+                .expect("read accent")
+                .as_deref(),
+            Some("#0f0")
+        );
+        // Forgetting A must not clear the pointer to the workspace still in use.
+        assert_eq!(
+            db.get_app_state("last_workspace_id")
+                .expect("read last workspace")
+                .as_deref(),
+            Some(kept.id.to_string().as_str())
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn discover_workspace_git_projects_finds_direct_children() {
+        let (_db, root) = temp_db();
+        let workspace_root = root.join("code");
+        // A repo directly under the root (`clia-local ~/code`)...
+        std::fs::create_dir_all(workspace_root.join("alpha").join(".git")).expect("alpha");
+        // ...one under the curated `projects/` layout...
+        std::fs::create_dir_all(workspace_root.join("projects").join("beta").join(".git"))
+            .expect("beta");
+        // ...and a plain folder that is not a repo, which must be ignored.
+        std::fs::create_dir_all(workspace_root.join("notes")).expect("notes");
+
+        let found = discover_workspace_git_projects(&workspace_root.display().to_string())
+            .expect("discover");
+        let names: Vec<String> = found
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        assert!(names.contains(&"alpha".to_string()), "got {names:?}");
+        assert!(names.contains(&"beta".to_string()), "got {names:?}");
+        assert!(!names.contains(&"notes".to_string()), "got {names:?}");
+        assert!(!names.contains(&"projects".to_string()), "got {names:?}");
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

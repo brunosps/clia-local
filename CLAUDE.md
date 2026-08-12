@@ -35,11 +35,46 @@ Tauri 2 · React 19 · TypeScript · Rust. Frontend em `src/`, backend Rust em `
 | `src-tauri/src/deploy*.rs`, `machine.rs`, `winbox_provider.rs` | Deploy local em VMs (Winbox). Pesado (~10k linhas). |
 | `src-tauri/src/terminal.rs`, `lsp.rs`, `rtk.rs`, `solution.rs` | PTY, language server, runtime toolkit, import/export de solução. |
 
-**Persistência:** SQLite em `app_data_dir()` =
-`$DW_GUI_HOME` → `app.path().app_data_dir()` (`~/.local/share/dev.clia.local/`) →
-`~/.local/share/clia-local/` → `./.clia-local`. Arquivo: `clia-local.sqlite3`
-(`store.rs::Database::open`). Preferências de UI ficam na tabela `app_state`
-(`get_app_state`/`set_app_state`).
+**Persistência (dois bancos, não confundir):**
+
+1. **Registry** (global) — SQLite em `app_data_dir()` = `$DW_GUI_HOME` →
+   `app.path().app_data_dir()` (`~/.local/share/dev.clia.local/`) → `~/.local/share/clia-local/`
+   → `./.clia-local`. Arquivo `clia-local.sqlite3` (`store.rs::Database::open`). Guarda **só**
+   a lista de pastas recentes (tabela `workspaces`) + as preferências de UI (`app_state`,
+   via `get_app_state`/`set_app_state`).
+2. **Banco do workspace** — os dados de verdade (tarefas, projetos, deploy, agents) ficam
+   em `<pasta>/.dw/clia-local.sqlite3` (`store.rs::workspace_db_path`), dentro da própria
+   pasta aberta. Por isso "esquecer" um workspace é reversível: sai do registry, os dados
+   ficam no disco.
+
+## A pasta é o workspace
+
+Não existe "criar workspace": você **abre uma pasta** e ela é o workspace. O nome é o nome
+da pasta.
+
+- **Pela CLI:** `clia-local /home/bruno/code/clia-remote`. O primeiro argumento posicional
+  é lido em `lib.rs::first_positional_arg` (flags e `--dwgui-rebase-editor` são pulados),
+  cacheado em `startup_target()`, e o frontend busca via o comando `startup_workspace` no
+  `loadRegistry()` — a pasta da CLI **ganha** do `last_workspace_id`. Instale o launcher com
+  `corepack pnpm launcher:install` (escreve `~/.local/bin/clia-local` + `.desktop` com `%f`).
+- **Pela UI:** breadcrumb de workspace → "Abrir pasta…" (`openWorkspaceFolder` em `App.tsx`
+  → comando `open_workspace_path`). Mesmo caminho da CLI:
+  `lib.rs::open_existing_workspace_folder`, idempotente por path canônico, e que **recusa**
+  path inexistente em vez de criar a pasta (typo na CLI tem que falhar alto).
+- **Sem single-instance:** duas pastas = duas janelas independentes, como editores.
+- **`.dw` fora do git:** se a pasta aberta for ela mesma um repo, `exclude_dw_from_git`
+  registra `/.dw` no `.git/info/exclude` (local ao clone, não toca o `.gitignore` versionado).
+- **Projetos são autodescobertos** (`store.rs::discover_workspace_git_projects`): a própria
+  raiz se for repo, os **filhos diretos** da raiz, e `root/projects/*` + `root/repos/*`.
+  Profundidade para aí de propósito (recursão andaria em `node_modules`).
+- **Remover da lista:** comando `forget_workspace` → apaga a linha do registry + as prefs
+  daquele id (`ui.workspace:<id>:*`, `last_project_id:<id>`, e o `last_workspace_id` se
+  apontava pra ele). `delete_data: true` apaga também o `.dw`. Não existe mais
+  `WorkspaceModal` nem o fluxo "criar workspace com nome + raiz".
+
+> A tabela `workspaces` e o `workspace_id` **continuam existindo** (10 FKs
+> `references workspaces(id)`) — o que foi removido é a _administração_ deles na UI, não o
+> modelo de dados. Não tente arrancar o `workspace_id`.
 
 ## Sidebar (6 tabs)
 
@@ -119,8 +154,8 @@ Não há nuvem em nenhuma parte do fluxo.
 1. **Modo single-user local.** Não há login nem pareamento de device — o app vai **direto
    pra UI**. Todo o estado sintético de auth (`LOCAL_WIRED_STATUS`, `wiredAuth*`,
    `WiredCloudBootstrap`, etc.) e os gates (`WiredLoginGate`, `CloudWorkspaceInstallGate`)
-   foram **removidos**. Criar/abrir workspace é local (`createWorkspace` /
-   `setWorkspaceModalOpen`).
+   foram **removidos**. Abrir workspace é local e é só abrir uma pasta
+   (`openWorkspaceFolder` / `open_workspace_path` / `startup_workspace`).
 
 2. **Zero código de nuvem.** Não há mais nenhum `WiredCloud*`/`Cloud*` no frontend nem
    `cloud_*` no backend. Os únicos "cloud" que sobram no Rust são `linux_cloud` /

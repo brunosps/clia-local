@@ -138,6 +138,20 @@ export const api = {
   listWorkspaces() {
     return invokeSafe<Workspace[]>("list_workspaces");
   },
+  /** Open an existing folder as a workspace (idempotent; fails if the path is not a folder). */
+  openWorkspacePath(path: string) {
+    return invokeSafe<Workspace>("open_workspace_path", { path });
+  },
+  /** The folder passed on the command line (`clia-local <folder>`), or null. */
+  startupWorkspace() {
+    return invokeSafe<Workspace | null>("startup_workspace");
+  },
+  /** Drop a workspace from the recents list; `deleteData` also removes `<root>/.dw`. */
+  forgetWorkspace(workspaceId: number, deleteData = false) {
+    return invokeSafe<void>("forget_workspace", {
+      input: { workspace_id: workspaceId, delete_data: deleteData },
+    });
+  },
   getAppState(key: string) {
     return invokeSafe<string | null>("get_app_state", { key });
   },

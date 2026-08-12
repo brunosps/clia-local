@@ -194,6 +194,15 @@ struct WorkspaceInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct ForgetWorkspaceInput {
+    workspace_id: i64,
+    /// Also delete `<root>/.dw` from disk (tasks, attachments, deploy state).
+    /// Default (false) only drops the workspace from the recents registry.
+    #[serde(default)]
+    delete_data: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct ProjectInput {
     workspace_id: i64,
     name: String,
@@ -463,6 +472,116 @@ fn list_workspaces(app: tauri::AppHandle) -> AppResult<Vec<store::Workspace>> {
 fn create_workspace(app: tauri::AppHandle, input: WorkspaceInput) -> AppResult<store::Workspace> {
     let db = store::Database::open(&app_data_dir(&app)?)?;
     Ok(db.create_workspace(&input.name, &input.root_path)?)
+}
+
+/// Open an existing folder as a workspace: the folder *is* the workspace, its name
+/// is the folder name, and its data lives in `<folder>/.dw`. Idempotent — opening the
+/// same path twice reuses the same workspace instead of piling up registry rows.
+/// Unlike `create_workspace`, this refuses to create the folder: a mistyped path from
+/// the CLI must fail loudly, not silently materialize an empty workspace.
+#[tauri::command]
+fn open_workspace_path(app: tauri::AppHandle, path: String) -> AppResult<store::Workspace> {
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(open_existing_workspace_folder(&db, &path)?)
+}
+
+/// The workspace requested on the command line (`clia-local <folder>`), opened on
+/// demand so a bad path surfaces as a normal UI error. `None` when the app was
+/// launched without a path — the UI then falls back to the last used workspace.
+#[tauri::command]
+fn startup_workspace(app: tauri::AppHandle) -> AppResult<Option<store::Workspace>> {
+    let Some(path) = startup_target() else {
+        return Ok(None);
+    };
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    Ok(Some(open_existing_workspace_folder(
+        &db,
+        &path.display().to_string(),
+    )?))
+}
+
+/// Drop a workspace from the recents registry. The workspace's own data lives in
+/// `<root>/.dw`, so forgetting is non-destructive by default — reopening the folder
+/// brings everything back. `delete_data` opts into removing `.dw` as well.
+#[tauri::command]
+fn forget_workspace(app: tauri::AppHandle, input: ForgetWorkspaceInput) -> AppResult<()> {
+    let db = store::Database::open(&app_data_dir(&app)?)?;
+    let workspace = db.get_workspace(input.workspace_id)?;
+    db.forget_workspace(input.workspace_id)?;
+    if input.delete_data {
+        let dw = Path::new(&workspace.root_path).join(".dw");
+        if dw.is_dir() {
+            std::fs::remove_dir_all(&dw)
+                .with_context(|| format!("failed to remove {}", dw.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn open_existing_workspace_folder(
+    db: &store::Database,
+    path: &str,
+) -> anyhow::Result<store::Workspace> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("workspace path is empty");
+    }
+    let root = PathBuf::from(trimmed);
+    if !root.is_dir() {
+        anyhow::bail!("not a folder: {trimmed}");
+    }
+    let canonical = std::fs::canonicalize(&root).unwrap_or(root);
+    let name = canonical
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| canonical.display().to_string());
+    let workspace = create_or_open_workspace(db, &name, &canonical.display().to_string())?;
+    exclude_dw_from_git(&canonical);
+    Ok(workspace)
+}
+
+/// When the opened folder is itself a git repo, `.dw/` would show up as an untracked
+/// change on every status. Register it in `.git/info/exclude` (local to this clone,
+/// so it never touches the repo's tracked `.gitignore`). Best-effort: an unwritable
+/// exclude file must not stop the workspace from opening.
+fn exclude_dw_from_git(root: &Path) {
+    if !root.join(".git").exists() {
+        return;
+    }
+    if let Err(error) = git::ignore_file(root, ".dw", "info_exclude") {
+        eprintln!(
+            "failed to exclude .dw from git in {}: {error}",
+            root.display()
+        );
+    }
+}
+
+/// The folder named on the command line (`clia-local <folder>`), cached because the
+/// UI may ask for it more than once per launch.
+fn startup_target() -> Option<PathBuf> {
+    static TARGET: OnceLock<Option<PathBuf>> = OnceLock::new();
+    TARGET
+        .get_or_init(|| first_positional_arg(std::env::args().skip(1)))
+        .clone()
+}
+
+/// First positional argument, treated as the folder to open. Flags are skipped
+/// (Tauri and WebKit inject their own), as is the hidden `--dwgui-rebase-editor`
+/// subcommand together with the todo file that follows it.
+fn first_positional_arg(args: impl Iterator<Item = String>) -> Option<PathBuf> {
+    let mut args = args;
+    while let Some(arg) = args.next() {
+        if arg == "--dwgui-rebase-editor" {
+            args.next();
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        return Some(PathBuf::from(arg));
+    }
+    None
 }
 
 #[tauri::command]
@@ -5414,6 +5533,9 @@ pub fn run() {
             preflight,
             list_workspaces,
             create_workspace,
+            open_workspace_path,
+            startup_workspace,
+            forget_workspace,
             list_projects,
             add_local_project,
             clone_git_project,
@@ -5646,6 +5768,95 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn args(values: &[&str]) -> impl Iterator<Item = String> {
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn first_positional_arg_picks_the_folder_and_skips_flags() {
+        assert_eq!(
+            first_positional_arg(args(&["/home/bruno/code/clia-remote"])),
+            Some(PathBuf::from("/home/bruno/code/clia-remote"))
+        );
+        // Tauri/WebKit inject their own flags before/around the path.
+        assert_eq!(
+            first_positional_arg(args(&["--no-sandbox", "/tmp/wks", "--other"])),
+            Some(PathBuf::from("/tmp/wks"))
+        );
+        assert_eq!(first_positional_arg(args(&[])), None);
+        assert_eq!(first_positional_arg(args(&["--flag-only"])), None);
+    }
+
+    #[test]
+    fn first_positional_arg_ignores_the_rebase_editor_subcommand() {
+        // The todo file after --dwgui-rebase-editor is an argument, not a workspace.
+        assert_eq!(
+            first_positional_arg(args(&[
+                "--dwgui-rebase-editor",
+                "/tmp/git-rebase-todo",
+                "/tmp/wks",
+            ])),
+            Some(PathBuf::from("/tmp/wks"))
+        );
+        assert_eq!(
+            first_positional_arg(args(&["--dwgui-rebase-editor", "/tmp/git-rebase-todo"])),
+            None
+        );
+    }
+
+    #[test]
+    fn open_existing_workspace_folder_is_idempotent_and_names_from_the_folder() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("clia-open-folder-{unique}"));
+        let folder = root.join("clia-remote");
+        std::fs::create_dir_all(&folder).expect("create folder");
+        let db = store::Database::open(&root).expect("open db");
+
+        let first =
+            open_existing_workspace_folder(&db, &folder.display().to_string()).expect("open once");
+        assert_eq!(first.name, "clia-remote");
+
+        // Reopening the same path must reuse the workspace, not pile up registry rows.
+        let second =
+            open_existing_workspace_folder(&db, &folder.display().to_string()).expect("open twice");
+        assert_eq!(second.id, first.id);
+        assert_eq!(db.list_workspaces().expect("list").len(), 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn open_existing_workspace_folder_refuses_missing_paths_instead_of_creating_them() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("clia-open-missing-{unique}"));
+        std::fs::create_dir_all(&root).expect("create root");
+        let db = store::Database::open(&root).expect("open db");
+        let missing = root.join("typo-in-the-path");
+
+        // A mistyped CLI path must fail loudly, never materialize an empty workspace.
+        assert!(open_existing_workspace_folder(&db, &missing.display().to_string()).is_err());
+        assert!(!missing.exists());
+        assert!(open_existing_workspace_folder(&db, "   ").is_err());
+        assert!(db.list_workspaces().expect("list").is_empty());
+
+        // A file is not a folder.
+        let file = root.join("notes.md");
+        std::fs::write(&file, b"x").expect("write file");
+        assert!(open_existing_workspace_folder(&db, &file.display().to_string()).is_err());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn validate_remote_url_allows_https_ssh_rejects_dangerous() {
